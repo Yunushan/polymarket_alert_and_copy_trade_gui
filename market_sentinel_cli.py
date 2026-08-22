@@ -1682,6 +1682,14 @@ MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
 LIMITLESS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")
 SMARKETS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
 PROBABLE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders", "cancel_all_orders")
+HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_by_cloid",
+    "modify_order",
+    "batch_modify_orders",
+    "schedule_cancel",
+)
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1694,6 +1702,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + LIMITLESS_ORDER_MANAGEMENT_OPERATIONS
         + SMARKETS_ORDER_MANAGEMENT_OPERATIONS
         + PROBABLE_ORDER_MANAGEMENT_OPERATIONS
+        + HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1723,7 +1732,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         parsed = json.loads(raw)
         if not isinstance(parsed, list) and not (
             market_id == "myriad_markets" and operation in {"cancel_order", "batch_modify_orders"}
-        ):
+        ) and not (market_id == "hyperliquid" and isinstance(parsed, dict)):
             raise ValueError("--instructions must contain a JSON array (or a Myriad signed-object payload).")
         if operation == "batch_cancel_orders" or (market_id == "polymarket" and operation == "cancel_orders"):
             payload["orders"] = parsed
@@ -1735,6 +1744,10 @@ def run_market_order_management(args: argparse.Namespace) -> int:
             if not isinstance(parsed, dict):
                 raise ValueError("Myriad cancel_order instructions must be a JSON object with order and signature.")
             payload.update(parsed)
+        elif market_id == "hyperliquid":
+            if not isinstance(parsed, dict):
+                raise ValueError("Hyperliquid order-management instructions must be a signed JSON object.")
+            payload["signed_action"] = parsed
         else:
             payload["instructions"] = parsed
     _put_optional(payload, "customer_ref", getattr(args, "customer_ref", None))
@@ -1779,6 +1792,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         ("subaccount", "subaccount"),
         ("exchange_index", "exchange_index"),
         ("confirm_order_management", "confirm_order_management"),
+        ("signed_action", "signed_action"),
     ):
         _put_optional(payload, key, getattr(args, argument, None))
     data = adapter.manage_orders(operation, **payload)
@@ -2808,7 +2822,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, or Smarkets).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Probable, or Smarkets).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2819,7 +2833,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders.add_argument(
         "--instructions",
         default=None,
-        help="JSON array of venue instructions/order ids, or @path to a JSON file.",
+        help="JSON array of venue instructions/order ids, or a signed Hyperliquid/Myriad JSON object, or @path to a JSON file.",
     )
     market_orders.add_argument("--customer-ref", default=None, help="Optional Betfair de-duplication reference (max 32 chars).")
     market_orders.add_argument("--market-version", default=None, help="Optional replaceOrders market version integer or JSON object.")

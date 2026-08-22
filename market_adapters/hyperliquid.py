@@ -48,6 +48,19 @@ HYPERLIQUID_CANDLE_RESOLUTIONS = (
     "1w",
     "1M",
 )
+HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_by_cloid",
+    "modify_order",
+    "batch_modify_orders",
+    "schedule_cancel",
+)
+HYPERLIQUID_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+HYPERLIQUID_SCHEDULE_CANCEL_CONFIRMATION = "SCHEDULE HYPERLIQUID CANCEL"
+HYPERLIQUID_ORDER_MANAGEMENT_MAX_BATCH = 50
+HYPERLIQUID_ASSET_BASE = 100_000_000
+HYPERLIQUID_CLOID_RE = re.compile(r"^0x[0-9a-fA-F]{32}$")
 
 
 class HyperliquidAdapter(MarketAdapter):
@@ -74,6 +87,7 @@ class HyperliquidAdapter(MarketAdapter):
         "portfolio",
         "subaccounts",
     )
+    order_management_operations = HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, *, runtime=None) -> None:
         super().__init__(config, runtime=runtime)
@@ -114,6 +128,7 @@ class HyperliquidAdapter(MarketAdapter):
                 "activity_feed_supported": True,
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
                 "authenticated_account_endpoints": [
                     "openOrders",
                     "historicalOrders",
@@ -121,6 +136,12 @@ class HyperliquidAdapter(MarketAdapter):
                     "spotClearinghouseState",
                     "portfolio",
                     "subAccounts",
+                ],
+                "order_management_enabled": self.config_bool("hyperliquid_order_management_enabled", False),
+                "authenticated_order_management_endpoints": [
+                    "POST /exchange action.cancel/cancelByCloid",
+                    "POST /exchange action.modify/batchModify",
+                    "POST /exchange action.scheduleCancel",
                 ],
             }
         )
@@ -488,6 +509,69 @@ class HyperliquidAdapter(MarketAdapter):
         supported = ", ".join(self.account_recovery_operations)
         raise MarketConfigurationError(f"Hyperliquid account recovery operation must be one of: {supported}.")
 
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Forward a reviewed, externally signed Hyperliquid order action.
+
+        Hyperliquid exposes cancellation and modification through the fixed
+        ``POST /exchange`` route.  The app never signs these actions and never
+        accepts an arbitrary exchange action: callers must provide the complete
+        signed envelope and the operation-specific action type is validated
+        locally before the request is sent.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Hyperliquid order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("hyperliquid_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Hyperliquid order management is disabled by adapter config. "
+                "Set hyperliquid_order_management_enabled=true only after reviewing signed-action risk controls."
+            )
+        self.ensure_live_trading_enabled("Hyperliquid order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != HYPERLIQUID_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Hyperliquid order management requires exact confirmation text "
+                f"{HYPERLIQUID_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if normalized == "schedule_cancel" and str(kwargs.get("confirm_global_cancel") or "").strip() != HYPERLIQUID_SCHEDULE_CANCEL_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Hyperliquid schedule_cancel requires exact confirmation text "
+                f"{HYPERLIQUID_SCHEDULE_CANCEL_CONFIRMATION}."
+            )
+
+        signed_action = kwargs.get("signed_action")
+        if signed_action is None and isinstance(kwargs.get("instructions"), Mapping):
+            signed_action = kwargs.get("instructions")
+        envelope = self._validate_management_envelope(signed_action, normalized)
+        response = self.runtime.request_json(
+            "POST",
+            f"{self.api_base_url}/exchange",
+            json_body=envelope,
+            headers={"Content-Type": "application/json"},
+        )
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_external_signature": True,
+                "references": list(HYPERLIQUID_REFERENCES),
+            },
+            "request": envelope,
+            "response": response,
+        }
+
     def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
         """Return normalized public HIP-4 fills for a wallet.
 
@@ -749,8 +833,213 @@ class HyperliquidAdapter(MarketAdapter):
             raise MarketConfigurationError("Hyperliquid signed order size must be numeric.") from exc
         if not math.isclose(signed_size, float(order.size), rel_tol=0.0, abs_tol=1e-9):
             raise MarketConfigurationError("Hyperliquid signed order size does not match the requested size.")
-        if not payload.get("signature") or payload.get("nonce") in (None, ""):
+        self._validate_signature(payload.get("signature"))
+        if payload.get("nonce") in (None, ""):
             raise MarketConfigurationError("Hyperliquid signed_action must include a signature and nonce.")
+
+    def _validate_management_envelope(self, payload: Any, operation: str) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise MarketConfigurationError(
+                "Hyperliquid order management requires signed_action with the complete external signature envelope."
+            )
+        envelope = dict(payload)
+        action = envelope.get("action")
+        if not isinstance(action, Mapping):
+            raise MarketConfigurationError("Hyperliquid signed_action.action must be an object.")
+        self._validate_signature(envelope.get("signature"))
+        self._positive_integer(envelope.get("nonce"), "Hyperliquid signed-action nonce")
+        if envelope.get("expiresAfter") not in (None, ""):
+            self._positive_integer(
+                envelope.get("expiresAfter"), "Hyperliquid signed-action expiresAfter"
+            )
+        if envelope.get("vaultAddress") not in (None, ""):
+            self._wallet_address(envelope.get("vaultAddress"), "vaultAddress")
+
+        action_type = str(action.get("type") or "").strip()
+        expected = {
+            "cancel_order": "cancel",
+            "cancel_orders": "cancel",
+            "cancel_by_cloid": "cancelByCloid",
+            "modify_order": "modify",
+            "batch_modify_orders": "batchModify",
+            "schedule_cancel": "scheduleCancel",
+        }[operation]
+        if action_type != expected:
+            raise MarketConfigurationError(
+                f"Hyperliquid {operation} requires signed_action.action.type={expected!r}."
+            )
+
+        if action_type == "cancel":
+            cancels = self._validate_cancel_entries(action.get("cancels"), by_cloid=False)
+            if operation == "cancel_order" and len(cancels) != 1:
+                raise MarketConfigurationError("Hyperliquid cancel_order requires exactly one cancel entry.")
+            if operation == "cancel_orders" and not cancels:
+                raise MarketConfigurationError("Hyperliquid cancel_orders requires at least one cancel entry.")
+        elif action_type == "cancelByCloid":
+            cancels = self._validate_cancel_entries(action.get("cancels"), by_cloid=True)
+            if not cancels:
+                raise MarketConfigurationError("Hyperliquid cancel_by_cloid requires at least one cancel entry.")
+        elif action_type == "modify":
+            if not isinstance(action.get("order"), Mapping):
+                raise MarketConfigurationError("Hyperliquid modify_order requires a signed order object.")
+            self._order_reference(action.get("oid"), "modify oid")
+            self._validate_modify_order(action.get("order"))
+        elif action_type == "batchModify":
+            modifies = action.get("modifies")
+            if not isinstance(modifies, list) or not modifies:
+                raise MarketConfigurationError("Hyperliquid batch_modify_orders requires a non-empty modifies array.")
+            if len(modifies) > HYPERLIQUID_ORDER_MANAGEMENT_MAX_BATCH:
+                raise MarketConfigurationError(
+                    f"Hyperliquid batch_modify_orders is capped at {HYPERLIQUID_ORDER_MANAGEMENT_MAX_BATCH} orders."
+                )
+            for entry in modifies:
+                self._validate_modify_entry(entry)
+        else:
+            schedule_time = action.get("time")
+            if schedule_time not in (None, ""):
+                schedule_time = self._positive_integer(schedule_time, "Hyperliquid schedule cancel time")
+                if schedule_time < int(time.time() * 1000) + 5_000:
+                    raise MarketConfigurationError(
+                        "Hyperliquid schedule cancel time must be at least five seconds in the future."
+                    )
+        return envelope
+
+    @staticmethod
+    def _validate_signature(value: Any) -> None:
+        if not isinstance(value, Mapping):
+            raise MarketConfigurationError(
+                "Hyperliquid signed_action.signature must be an object containing r, s, and v."
+            )
+        for component in ("r", "s"):
+            raw = value.get(component)
+            if not isinstance(raw, str) or not re.fullmatch(r"0x[0-9a-fA-F]+", raw):
+                raise MarketConfigurationError(
+                    f"Hyperliquid signed_action.signature.{component} must be a hexadecimal string."
+                )
+        recovery = value.get("v")
+        if isinstance(recovery, bool) or not isinstance(recovery, int) or recovery < 0 or recovery > 255:
+            raise MarketConfigurationError("Hyperliquid signed_action.signature.v must be an integer byte.")
+
+    def _validate_cancel_entries(self, value: Any, *, by_cloid: bool) -> List[Dict[str, Any]]:
+        if not isinstance(value, list) or not value:
+            raise MarketConfigurationError("Hyperliquid cancellation requires a non-empty cancels array.")
+        if len(value) > HYPERLIQUID_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Hyperliquid cancellation is capped at {HYPERLIQUID_ORDER_MANAGEMENT_MAX_BATCH} orders."
+            )
+        entries: List[Dict[str, Any]] = []
+        seen = set()
+        for raw in value:
+            if not isinstance(raw, Mapping):
+                raise MarketConfigurationError("Hyperliquid cancellation entries must be objects.")
+            asset = self._hip4_asset(raw.get("asset", raw.get("a")))
+            if by_cloid:
+                reference = self._cloid(raw.get("cloid"), "cancel cloid")
+                key = (asset, reference)
+                entry = {"asset": asset, "cloid": reference}
+            else:
+                reference = self._positive_integer(raw.get("oid", raw.get("o")), "cancel oid")
+                key = (asset, reference)
+                entry = {"a": asset, "o": reference}
+            if key in seen:
+                raise MarketConfigurationError("Hyperliquid cancellation entries must be unique.")
+            seen.add(key)
+            entries.append(entry)
+        return entries
+
+    def _validate_modify_entry(self, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise MarketConfigurationError("Hyperliquid modify entries must be objects.")
+        oid = self._order_reference(value.get("oid"), "modify oid")
+        order = self._validate_modify_order(value.get("order"))
+        return {"oid": oid, "order": order}
+
+    def _validate_modify_order(self, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise MarketConfigurationError("Hyperliquid modify order must be an object.")
+        asset = self._hip4_asset(value.get("a"))
+        if not isinstance(value.get("b"), bool) or not isinstance(value.get("r"), bool):
+            raise MarketConfigurationError("Hyperliquid modify order b and r fields must be booleans.")
+        price = self._probability(value.get("p"))
+        if price is None:
+            raise MarketConfigurationError("Hyperliquid modify order price must be between 0 and 1.")
+        size = self._required_positive_number(value.get("s"), "Hyperliquid modify order size")
+        order_type = value.get("t")
+        if not isinstance(order_type, Mapping):
+            raise MarketConfigurationError("Hyperliquid modify order type must be a limit or trigger object.")
+        normalized_type: Dict[str, Any]
+        if isinstance(order_type.get("limit"), Mapping):
+            tif = str(order_type["limit"].get("tif") or "").strip()
+            if tif not in {"Alo", "Ioc", "Gtc"}:
+                raise MarketConfigurationError("Hyperliquid modify limit tif must be Alo, Ioc, or Gtc.")
+            normalized_type = {"limit": {"tif": tif}}
+        elif isinstance(order_type.get("trigger"), Mapping):
+            trigger = order_type["trigger"]
+            if not isinstance(trigger.get("isMarket"), bool):
+                raise MarketConfigurationError("Hyperliquid trigger isMarket must be boolean.")
+            trigger_price = self._probability(trigger.get("triggerPx"))
+            if trigger_price is None:
+                raise MarketConfigurationError("Hyperliquid trigger price must be between 0 and 1.")
+            tpsl = str(trigger.get("tpsl") or "").strip().lower()
+            if tpsl not in {"tp", "sl"}:
+                raise MarketConfigurationError("Hyperliquid trigger tpsl must be tp or sl.")
+            normalized_type = {
+                "trigger": {"isMarket": bool(trigger["isMarket"]), "triggerPx": str(trigger_price), "tpsl": tpsl}
+            }
+        else:
+            raise MarketConfigurationError("Hyperliquid modify order type must contain limit or trigger.")
+        normalized: Dict[str, Any] = {
+            "a": asset,
+            "b": bool(value["b"]),
+            "p": str(price),
+            "s": str(size),
+            "r": bool(value["r"]),
+            "t": normalized_type,
+        }
+        if value.get("c") not in (None, ""):
+            normalized["c"] = self._cloid(value.get("c"), "modify cloid")
+        return normalized
+
+    @staticmethod
+    def _positive_integer(value: Any, label: str) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"{label} must be a positive integer.")
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be a positive integer.") from exc
+        if number <= 0 or number > 2**63 - 1 or str(value).strip() != str(number):
+            raise MarketConfigurationError(f"{label} must be a positive integer.")
+        return number
+
+    @classmethod
+    def _order_reference(cls, value: Any, label: str) -> Any:
+        text = str(value or "").strip()
+        if HYPERLIQUID_CLOID_RE.fullmatch(text):
+            return text
+        return cls._positive_integer(text, label)
+
+    @classmethod
+    def _cloid(cls, value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not HYPERLIQUID_CLOID_RE.fullmatch(text):
+            raise MarketConfigurationError(f"{label} must be a 128-bit hexadecimal cloid with a 0x prefix.")
+        return text
+
+    @classmethod
+    def _hip4_asset(cls, value: Any) -> int:
+        asset = cls._positive_integer(value, "Hyperliquid HIP-4 asset")
+        encoded = asset - HYPERLIQUID_ASSET_BASE
+        if encoded < 0 or encoded % 10 not in {0, 1}:
+            raise MarketConfigurationError("Hyperliquid order asset must be a HIP-4 synthetic outcome asset.")
+        return asset
+
+    @staticmethod
+    def _wallet_address(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", text):
+            raise MarketConfigurationError(f"Hyperliquid {label} must be a 20-byte hexadecimal address.")
+        return text
 
     @classmethod
     def _order_action(cls, outcome_id: str, side: int, order_side: Any, size: Any, price: Optional[float]) -> Dict[str, Any]:

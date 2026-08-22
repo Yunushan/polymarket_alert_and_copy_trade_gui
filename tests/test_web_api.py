@@ -1132,6 +1132,50 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
         self.assertNotIn("unexpected", calls[0][1])
 
+    def test_hyperliquid_order_management_payload_forwards_signed_action_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="hyperliquid",
+            display_name="Hyperliquid",
+            capabilities=MarketCapabilities(credentials_required=False, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "schedule_cancel")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["hyperliquid"].enabled = True
+        signed = {
+            "action": {"type": "cancel", "cancels": [{"a": 100000000, "o": 123456789}]},
+            "nonce": 1700000000000,
+            "signature": "0x" + "ab" * 65,
+        }
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "hyperliquid",
+            "cancel_order",
+            {
+                "signed_action": signed,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["signed_action"], signed)
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+        self.assertIsNone(calls[0][1]["instructions"])
+
     def test_smarkets_account_and_order_management_payloads_forward_bounded_fields(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

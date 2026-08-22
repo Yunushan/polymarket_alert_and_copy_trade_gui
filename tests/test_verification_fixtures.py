@@ -536,6 +536,9 @@ class VerificationFixtureTests(unittest.TestCase):
         fills = json.loads((FIXTURE_ROOT / "hyperliquid" / "user_fills.json").read_text(encoding="utf-8"))
         candles = json.loads((FIXTURE_ROOT / "hyperliquid" / "candles.json").read_text(encoding="utf-8"))
         exchange = json.loads((FIXTURE_ROOT / "hyperliquid" / "exchange_response.json").read_text(encoding="utf-8"))
+        cancel = json.loads((FIXTURE_ROOT / "hyperliquid" / "cancel_response.json").read_text(encoding="utf-8"))
+        modify = json.loads((FIXTURE_ROOT / "hyperliquid" / "modify_response.json").read_text(encoding="utf-8"))
+        schedule = json.loads((FIXTURE_ROOT / "hyperliquid" / "schedule_cancel_response.json").read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["outcomes"][0].get("outcome"), 1)
         self.assertEqual([side["name"] for side in metadata["outcomes"][0]["sideSpecs"]], ["Yes", "No"])
@@ -548,6 +551,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("o", candles[0])
         self.assertIn("v", candles[0])
         self.assertEqual(exchange.get("status"), "ok")
+        self.assertEqual(cancel["response"]["type"], "cancel")
+        self.assertEqual(modify["response"]["type"], "batchModify")
+        self.assertEqual(schedule["response"]["type"], "scheduleCancel")
 
     def test_hyperliquid_account_fixtures_cover_documented_info_shapes(self) -> None:
         open_orders = json.loads((FIXTURE_ROOT / "hyperliquid" / "open_orders.json").read_text(encoding="utf-8"))

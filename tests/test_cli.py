@@ -639,6 +639,85 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["operation"], "order_history")
         self.assertEqual(payload["parameters"]["limit"], 12)
 
+    def test_hyperliquid_order_management_command_forwards_signed_envelopes(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="hyperliquid")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "schedule_cancel"),
+            manage_orders=manage_orders,
+        )
+        signed_cancel = {
+            "action": {"type": "cancel", "cancels": [{"a": 100000000, "o": 123456789}]},
+            "nonce": 1700000000000,
+            "signature": "0x" + "ab" * 65,
+        }
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "hyperliquid",
+                        "--instructions",
+                        json.dumps(signed_cancel),
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_order")
+        self.assertEqual(calls[0][1]["signed_action"], signed_cancel)
+        self.assertEqual(calls[0][1]["confirm_order_management"], confirmation)
+
+        signed_schedule = {
+            "action": {"type": "scheduleCancel", "time": 1800000000000},
+            "nonce": 1700000000001,
+            "signature": "0x" + "cd" * 65,
+        }
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "schedule_cancel",
+                        "--market",
+                        "hyperliquid",
+                        "--instructions",
+                        json.dumps(signed_schedule),
+                        "--confirm-order-management",
+                        confirmation,
+                        "--confirm-global-cancel",
+                        "SCHEDULE HYPERLIQUID CANCEL",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "schedule_cancel")
+        self.assertEqual(calls[1][1]["signed_action"], signed_schedule)
+        self.assertEqual(calls[1][1]["confirm_global_cancel"], "SCHEDULE HYPERLIQUID CANCEL")
+
     def test_opinion_account_command_forwards_page_filters_and_order_id(self) -> None:
         cfg = SimpleNamespace(selected_market_id="opinion_labs")
         adapter = SimpleNamespace(

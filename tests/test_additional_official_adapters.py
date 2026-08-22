@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -506,6 +507,138 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({"side": "BUY"})
+
+    def test_hyperliquid_guarded_order_management_validates_signed_exchange_actions(self) -> None:
+        adapter = HyperliquidAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "hyperliquid_order_management_enabled": True,
+            }
+        )
+        calls = []
+        responses = {
+            "cancel": load_fixture("hyperliquid", "cancel_response"),
+            "cancelByCloid": load_fixture("hyperliquid", "cancel_response"),
+            "modify": load_fixture("hyperliquid", "modify_response"),
+            "batchModify": load_fixture("hyperliquid", "modify_response"),
+            "scheduleCancel": load_fixture("hyperliquid", "schedule_cancel_response"),
+        }
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(method, "POST")
+            self.assertTrue(url.endswith("/exchange"))
+            self.assertIsNone(params)
+            self.assertEqual(headers, {"Content-Type": "application/json"})
+            calls.append(json_body)
+            return responses[str(json_body["action"]["type"])]
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        cancel = {
+            "action": {"type": "cancel", "cancels": [{"a": 100000010, "o": 123456}]},
+            "nonce": 1788264000000,
+            "signature": {"r": "0x1", "s": "0x2", "v": 27},
+        }
+        result = adapter.manage_orders("cancel_order", signed_action=cancel, confirm_order_management=confirmation)
+        self.assertEqual(result["response"]["response"]["type"], "cancel")
+        self.assertEqual(calls[-1], cancel)
+
+        batch_cancel = {
+            "action": {
+                "type": "cancel",
+                "cancels": [{"a": 100000010, "o": 123456}, {"a": 100000011, "o": 123457}],
+            },
+            "nonce": 1788264000001,
+            "signature": {"r": "0x3", "s": "0x4", "v": 27},
+        }
+        adapter.manage_orders("cancel_orders", signed_action=batch_cancel, confirm_order_management=confirmation)
+        self.assertEqual(calls[-1], batch_cancel)
+
+        by_cloid = {
+            "action": {
+                "type": "cancelByCloid",
+                "cancels": [{"asset": 100000010, "cloid": "0x1234567890abcdef1234567890abcdef"}],
+            },
+            "nonce": 1788264000002,
+            "signature": {"r": "0x5", "s": "0x6", "v": 27},
+        }
+        adapter.manage_orders("cancel_by_cloid", signed_action=by_cloid, confirm_order_management=confirmation)
+        self.assertEqual(calls[-1], by_cloid)
+
+        modify = {
+            "action": {
+                "type": "modify",
+                "oid": 123456,
+                "order": {
+                    "a": 100000010,
+                    "b": True,
+                    "p": "0.64",
+                    "s": "5",
+                    "r": False,
+                    "t": {"limit": {"tif": "Gtc"}},
+                },
+            },
+            "nonce": 1788264000003,
+            "signature": {"r": "0x7", "s": "0x8", "v": 27},
+        }
+        adapter.manage_orders("modify_order", signed_action=modify, confirm_order_management=confirmation)
+        self.assertEqual(calls[-1], modify)
+
+        batch_modify = {
+            "action": {
+                "type": "batchModify",
+                "modifies": [
+                    {
+                        "oid": 123456,
+                        "order": {
+                            "a": 100000010,
+                            "b": True,
+                            "p": "0.64",
+                            "s": "5",
+                            "r": False,
+                            "t": {"limit": {"tif": "Gtc"}},
+                        },
+                    }
+                ],
+            },
+            "nonce": 1788264000004,
+            "signature": {"r": "0x9", "s": "0xa", "v": 27},
+        }
+        adapter.manage_orders("batch_modify_orders", signed_action=batch_modify, confirm_order_management=confirmation)
+        self.assertEqual(calls[-1], batch_modify)
+
+        schedule = {
+            "action": {"type": "scheduleCancel", "time": int(time.time() * 1000) + 60_000},
+            "nonce": 1788264000005,
+            "signature": {"r": "0xb", "s": "0xc", "v": 27},
+        }
+        adapter.manage_orders(
+            "schedule_cancel",
+            signed_action=schedule,
+            confirm_order_management=confirmation,
+            confirm_global_cancel="SCHEDULE HYPERLIQUID CANCEL",
+        )
+        self.assertEqual(calls[-1], schedule)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_order", signed_action=cancel, confirm_order_management="wrong")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_order",
+                signed_action={
+                    **cancel,
+                    "action": {"type": "cancel", "cancels": [{"a": 100, "o": 123456}]},
+                },
+                confirm_order_management=confirmation,
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "schedule_cancel",
+                signed_action=schedule,
+                confirm_order_management=confirmation,
+                confirm_global_cancel="wrong",
+            )
 
     def test_hyperliquid_public_hip4_candles_are_normalized_with_documented_bounds(self) -> None:
         adapter = HyperliquidAdapter()

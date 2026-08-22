@@ -1,0 +1,9 @@
+{
+  "status": "ok",
+  "response": {
+    "type": "scheduleCancel",
+    "data": {
+      "status": "success"
+    }
+  }
+}

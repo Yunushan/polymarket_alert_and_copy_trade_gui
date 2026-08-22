@@ -3887,6 +3887,7 @@ def market_order_management_payload(
         "subaccount",
         "exchange_index",
         "orders",
+        "signed_action",
         "confirm_order_management",
     ):
         if key in payload:

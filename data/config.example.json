@@ -253,7 +253,8 @@
           "HYPERLIQUID_ACTIVITY_WALLET"
         ],
         "live_trading_enabled": false,
-        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, open/historical orders, perpetual and spot account state, portfolio, subaccounts, alerts, paper orders, and simulation-first copy previews are implemented. Set HYPERLIQUID_ACCOUNT_WALLET for account reads and HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history; the account reader falls back to the trade wallet when needed. Wallet signing, settlement, and funded execution remain external gates."
+        "hyperliquid_order_management_enabled": false,
+        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, open/historical orders, perpetual and spot account state, portfolio, subaccounts, alerts, paper orders, and simulation-first copy previews are implemented. Guarded signed cancel, cancel-by-cloid, modify, batch-modify, and schedule-cancel actions use the documented POST /exchange contract, remain disabled by default, and require a complete externally signed envelope plus shared live-safety confirmation. Set HYPERLIQUID_ACCOUNT_WALLET for account reads and HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history; the account reader falls back to the trade wallet when needed. Wallet signing, settlement, and funded execution remain external gates."
       }
     },
     "hypermind": {
