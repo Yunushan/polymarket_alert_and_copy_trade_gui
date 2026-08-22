@@ -251,7 +251,13 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Reads accessible Community Prediction aggregation history through `list_candles`; official irregular snapshots are normalized as point candles (no fabricated OHLCV or resampling)
 - Does not expose trading controls because Metaculus is a forecasting platform, not a cash market
 
-### 10) Legacy Web3 protocol adapter support
+### 10) Good Judgment Open adapter support
+- Lists Good Judgment Open questions and answer contracts through the documented Cultivate Forecasts REST API
+- Reads answer probabilities and authenticated prediction-set history as irregular point candles without fabricated OHLCV
+- Supports local forecast previews and guarded OAuth/Bearer forecast submission; this is a forecast update, not exchange execution
+- Requires an operator-validated Good Judgment Open/Cultivate instance URL and account credentials; live submission remains disabled by default
+
+### 11) Legacy Web3 protocol adapter support
 - Lists Augur v2 markets/outcomes through a configured documented subgraph endpoint
 - Reads Omen AMM marginal prices and Zeitgeist indexer asset prices for alerts
 - Supports dry-run paper orders where reliable price data exists; Zeitgeist also exposes a guarded externally signed HybridRouter transaction boundary, off by default and without in-app signing or settlement
@@ -537,7 +543,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Manifold Markets (`manifold`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation-first | Required | Optional API key | Not KYC limited |
 | Metaculus (`metaculus`) | Implemented | Yes | Yes (forecast snapshots) | No | No | No | Required | Account/API token required | Not trading/KYC limited |
 | SciCast (`scicast`) | Implemented | Yes | Yes (archive snapshots/trades) | Yes (local dry-run) | No | No | Required | API key required | Not trading/KYC limited |
-| Good Judgment Open (`good_judgment_open`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
+| Good Judgment Open (`good_judgment_open`) | Implemented | Yes | Yes (forecast probabilities/history) | Yes (local preview) | Guarded, off by default | No | Required | Account/API token required | Region/account limited |
 | Hypermind (`hypermind`) | Verified blocked | No | No | No | No | No | Required | Program access required | Program access limited |
 | Iowa Electronic Markets (`iowa_electronic_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Not trading/KYC limited |
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |

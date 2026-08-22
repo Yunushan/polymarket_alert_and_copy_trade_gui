@@ -224,10 +224,19 @@
     "good_judgment_open": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "good_judgment_open_base_url": "https://www.gjopen.com",
+        "credential_env_vars": [
+          "GJOPEN_API_TOKEN",
+          "GJOPEN_EMAIL",
+          "GJOPEN_PASSWORD"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: public question pages and account-based forecasting remain available, but no public documented API, SDK, or export endpoint is published. Do not scrape pages or automate private sessions."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "min_request_interval_seconds": 0.5,
+        "notes": "Credentialed questions, answer probabilities, irregular forecast snapshots, local paper previews, and guarded forecast submission use the documented Cultivate Forecasts API. Set the instance base URL and credentials through environment variables; live submission remains disabled by default and is a forecast update, not exchange execution."
       }
     },
     "hedgehog_markets": {

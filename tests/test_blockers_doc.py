@@ -30,6 +30,7 @@ IMPLEMENTED_MARKETS = {
     "predictit",
     "manifold",
     "metaculus",
+    "good_judgment_open",
     "limitless_exchange",
     "sx_bet",
     "azuro",

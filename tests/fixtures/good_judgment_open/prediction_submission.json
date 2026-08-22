@@ -1,0 +1,8 @@
+{
+  "id": 303,
+  "question_id": 1201,
+  "predictions": [
+    {"answer_id": 7, "forecasted_probability": 0.7}
+  ],
+  "state": "submitted"
+}

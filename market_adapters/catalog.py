@@ -72,6 +72,22 @@ METACULUS_CAPABILITIES = MarketCapabilities(
     region_limited=False,
 )
 
+GOOD_JUDGMENT_OPEN_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=False,
+    region_limited=True,
+)
+
 PREDICTIT_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -691,7 +707,12 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="good_judgment_open",
         display_name="Good Judgment Open",
         homepage_url="https://www.gjopen.com",
-        description="Verified blocked: no public documented API/export contract for app integration.",
+        description=(
+            "Credentialed Cultivate Forecasts API adapter for Good Judgment Open questions, answer probabilities, "
+            "irregular forecast history, local paper previews, and guarded forecast submission. The instance URL, "
+            "account eligibility, and live submission approval remain operator-owned gates."
+        ),
+        capabilities=GOOD_JUDGMENT_OPEN_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="hypermind",

@@ -21,6 +21,7 @@ from market_adapters import (
     DriftBetAdapter,
     FrenzyFinanceAdapter,
     GeminiPredictionAdapter,
+    GoodJudgmentOpenAdapter,
     GnosisPredictionMarketsAdapter,
     HyperliquidAdapter,
     HedgehogMarketsAdapter,
@@ -102,6 +103,7 @@ IMPLEMENTED_MARKETS = {
     "predictit",
     "manifold",
     "metaculus",
+    "good_judgment_open",
     "limitless_exchange",
     "sx_bet",
     "azuro",
@@ -157,6 +159,7 @@ HISTORY_CAPABILITIES = {
     "kalshi_via_robinhood": {"trade_history", "candle_history"},
     "manifold": {"trade_history"},
     "metaculus": {"candle_history"},
+    "good_judgment_open": {"candle_history"},
     "limitless_exchange": {"trade_history", "candle_history"},
     "hyperliquid": {"trade_history", "candle_history"},
     "ibkr_forecasttrader": {"trade_history", "candle_history"},
@@ -248,6 +251,8 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("manifold"), ManifoldAdapter)
         self.assertEqual(registry.get_metadata("metaculus").display_name, "Metaculus")
         self.assertIsInstance(registry.create("metaculus"), MetaculusAdapter)
+        self.assertEqual(registry.get_metadata("good_judgment_open").display_name, "Good Judgment Open")
+        self.assertIsInstance(registry.create("good_judgment_open"), GoodJudgmentOpenAdapter)
         self.assertEqual(registry.get_metadata("limitless_exchange").display_name, "Limitless Exchange")
         self.assertIsInstance(registry.create("limitless_exchange"), LimitlessAdapter)
         self.assertEqual(registry.get_metadata("sx_bet").display_name, "SX Bet / SX Network")

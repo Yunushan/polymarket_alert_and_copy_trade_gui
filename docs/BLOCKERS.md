@@ -1,12 +1,12 @@
 # Blockers
 
-Last reviewed: 2026-08-22
+Last reviewed: 2026-08-23
 
 This file documents why each market is either implemented, guarded, or stubbed. The project rule is: use official APIs, SDKs, documented endpoints, or protocol contracts only. Do not scrape private data, bypass authentication, or enable live trading/copy trading by default.
 
 ## Summary
 
-- Polymarket, Kalshi, PredictIt, Crypto.com Predict/CDNA, Nadex/CDNA, Fanatics Markets/CDNA, FanDuel Predicts/OG, Blinq/Polymarket, Manifold, Metaculus, SciCast archive, Myriad, Opinion, Gemini, Predict.fun, XO, Betfair, Limitless Exchange, SX Bet, Azuro, Augur, Omen, Gnosis Prediction Markets, Zeitgeist, Zeitgeist SDK / Markets, Zeitgeist Prediction Pools, Reality.eth Markets, Xmarket, Probable, Matchbook, DFlow, Context V2, Smarkets, Thales Market, MetaDAO, Seer, Hyperliquid, Trueo, Frenzy Finance, Hedgehog Markets, IBKR ForecastTrader, ForecastEx, CME event contracts, Prophet Exchange, PRDT Finance, Zetarium World, Lamas Finance, and BetMGM's partner Sports API are implemented adapters today.
+- Polymarket, Kalshi, PredictIt, Crypto.com Predict/CDNA, Nadex/CDNA, Fanatics Markets/CDNA, FanDuel Predicts/OG, Blinq/Polymarket, Manifold, Metaculus, Good Judgment Open, SciCast archive, Myriad, Opinion, Gemini, Predict.fun, XO, Betfair, Limitless Exchange, SX Bet, Azuro, Augur, Omen, Gnosis Prediction Markets, Zeitgeist, Zeitgeist SDK / Markets, Zeitgeist Prediction Pools, Reality.eth Markets, Xmarket, Probable, Matchbook, DFlow, Context V2, Smarkets, Thales Market, MetaDAO, Seer, Hyperliquid, Trueo, Frenzy Finance, Hedgehog Markets, IBKR ForecastTrader, ForecastEx, CME event contracts, Prophet Exchange, PRDT Finance, Zetarium World, Lamas Finance, and BetMGM's partner Sports API are implemented adapters today.
 - All other markets are present in config and GUI through verified-blocked adapters with exact blocker reasons.
 - Live trading remains disabled by default for every market.
 - Credentials must stay in `.env`, shell environment variables, OS keychain tooling, or external credential files. They must not be stored in `data/config.json`.
@@ -83,8 +83,9 @@ historical price files; current quote pages, orderbooks, live trading, and copy
 activity remain unsupported because no stable automation API is documented.
 Hypermind describes API feeds as
 managed-service deliverables that require program access, not a public contract.
-Good Judgment Open remains an account-based forecasting site without a public
-export/API contract.
+Good Judgment Open is now covered through the documented Cultivate Forecasts
+REST contract. The instance URL and credentialed account eligibility remain
+operator-supplied and must be validated before use.
 
 Blinq's official site explicitly says its leverage layer trades Polymarket
 markets. It is therefore represented by a read-only Polymarket data alias only;
@@ -131,6 +132,16 @@ credential resolver, normalizes odds to implied probabilities, and provides
 fixture-backed local paper orders. The documented API has no order or account
 activity endpoint, so live betting and copy trading remain unsupported.
 
+## 2026-08-23 Good Judgment Open promotion note
+
+Good Judgment Open is now represented through the documented Cultivate
+Forecasts REST contract. The adapter covers question and answer discovery,
+answer probabilities, irregular prediction-set history, local paper previews,
+and a guarded forecast-submission boundary. The configured instance URL,
+credentials, account/region eligibility, and any live evidence remain
+operator-owned gates; submission is disabled by default and is not presented
+as exchange order execution.
+
 ## Market Blockers
 
 | Market id | Current adapter | Blocker | Required before full support | Reference |
@@ -153,7 +164,7 @@ activity endpoint, so live betting and copy trading remain unsupported.
 | `xo_market` | Implemented | Authenticated market discovery, outcome listing, orderbooks, alerts, local paper orders, and guarded signed live order posting are implemented through official XO Markets HMAC endpoints. Copy trading is unsupported. | Keep live order posting disabled by default, require HMAC credentials, and add order/fill management only through documented XO endpoints. | [XO documentation](https://xotrade.co/documentation.html), [XO](https://xotrade.co) |
 | `manifold` | Implemented | Official market discovery, binary/multiple-choice probability parsing, alerts, paper orders, and guarded authenticated MANA betting are implemented. The public `/v0/bets?username=...` feed is normalized into a `manifold:<username>` activity identity for wallet tracking and simulation-first copy previews. The documented `/v0/bets?contractId=...` feed is also normalized into per-fill trade history with timestamp filters. CLOB orderbook reading remains unsupported, and copy never places live orders automatically. | Keep live MANA betting and copy simulation disabled by default, require `MANIFOLD_API_KEY` for authenticated calls, validate the safe prefixed username identity, do not scrape, and only add multi-answer live betting where the documented `/v0/multi-bet` shape maps safely to the app order model. | [Manifold API docs](https://docs.manifold.markets/api), [Manifold bet schema](https://raw.githubusercontent.com/ManifoldMarkets/manifold/main/common/src/bet.ts) |
 | `metaculus` | Implemented | Authenticated read-only post/question discovery, accessible forecast-value parsing, and access-controlled Community Prediction aggregation history are implemented through the official Metaculus API. History is normalized as irregular point snapshots through `list_candles`; no OHLCV, resampling, trading, paper trading, orderbook, or copy-trading claim is made because Metaculus is a forecasting platform, not a trading venue. Unavailable forecasts/history produce clear errors. | Keep `METACULUS_API_TOKEN` required for API calls, respect Metaculus data-use restrictions and account access tier, do not scrape, and do not add trading controls unless Metaculus documents a trading product. | [Metaculus API](https://www.metaculus.com/api/), [Metaculus OpenAPI contract](https://github.com/Metaculus/metaculus/blob/main/docs/openapi.yml), [Metaculus API changes](https://www.metaculus.com/notebooks/42554/changes-to-the-metaculus-api/) |
-| `good_judgment_open` | Verified blocked | Verified 2026-08-21: Good Judgment Open has public question pages and account-based forecasting, but no public documented API, SDK, or export endpoint suitable for app integration. Public HTML scraping and private session automation are intentionally unsupported. | Implement only if Good Judgment publishes documented API/export access or grants explicit export access with terms that permit integration. | [Good Judgment Open](https://www.gjopen.com), [Good Judgment Open questions](https://www.gjopen.com/questions), [Good Judgment Open privacy](https://www.gjopen.com/privacy) |
+| `good_judgment_open` | Implemented | The adapter uses Cultivate Forecasts' documented REST contract for question discovery, answer probabilities, irregular prediction-set history, local paper previews, and guarded forecast submission. It does not scrape HTML or model forecasts as exchange fills. | Keep the instance base URL and credentials environment-only, validate account/region eligibility, keep live submission disabled by default, and treat the forecast endpoint as a credentialed update surface rather than exchange execution. | [Cultivate Forecasts API reference](https://cultivatelabs.github.io/forecasts-api-docs/), [Good Judgment Open](https://www.gjopen.com), [Good Judgment Open questions](https://www.gjopen.com/questions) |
 | `hypermind` | Verified blocked | Verified 2026-08-21: Hypermind describes dashboards, PDF reports, and API feeds as managed service deliverables, but does not publish a public API contract, SDK, or self-service data endpoint. | Implement only with Hypermind-provided API feed documentation, program credentials, and terms that permit app integration. | [Hypermind Crowd](https://www.hypermind.com/products-services/crowd), [Hypermind Prescience](https://www.hypermind.com/products-services/prescience), [Hypermind prediction market](https://predict.hypermind.com) |
 | `iowa_electronic_markets` | Implemented | Archive-only implementation: IEM publishes an official historical price archive and documented fixed-width/text price-file format. The adapter uses explicit archive inventory for daily historical candles, latest archived prices, alerts, and dry-run orders; current quote pages, orderbooks, live trading, and copy activity remain unsupported because no stable public automation API is documented. | Keep the inventory explicit, validate official IEM archive hosts, keep paper mode local/dry-run, and add current quotes or live orders only after IEM publishes a supported API and account terms for automation. | [Iowa historical archive](https://iemweb.biz.uiowa.edu/historicaldata/), [IEM price-file format](https://iemweb.biz.uiowa.edu/historicaldata/uspoliticalmarkets/1996elections/1996powellnomination_wta/1996powellnomination_wta_fileformat.txt), [Iowa Electronic Markets](https://iem.uiowa.edu/) |
 | `infer` | Verified blocked | Verified 2026-05-26; re-verified 2026-08-17: INFER-pub now redirects to the RAND Forecasting Initiative permanent read-only archive. Accounts, forecasting, and comments are no longer available; the archive preserves questions and leaderboards but does not publish a supported API or export contract. | Keep this entry fail-closed unless a maintained official export/API is published; do not scrape the archive or automate private sessions. | [INFER-pub](https://www.infer-pub.com), [RAND Forecasting Initiative archive](https://www.randforecastinginitiative.org/), [RFI questions](https://www.randforecastinginitiative.org/questions) |

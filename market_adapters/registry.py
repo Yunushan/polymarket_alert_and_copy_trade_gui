@@ -19,19 +19,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://factmachine.io",
         ],
     },
-    "good_judgment_open": {
-        "reason": (
-            "Verified 2026-08-21: Good Judgment Open has public question pages and account-based "
-            "forecasting, but no public documented API, SDK, or export endpoint suitable for app integration. "
-            "HTML scraping and private session automation are intentionally unsupported."
-        ),
-        "references": [
-            "https://www.gjopen.com",
-            "https://www.gjopen.com/questions",
-            "https://www.gjopen.com/privacy",
-        ],
-        "last_reviewed": "2026-08-21",
-    },
     "hypermind": {
         "reason": (
             "Verified 2026-08-21: Hypermind describes dashboards, PDF reports, and API feeds as managed "
@@ -186,6 +173,7 @@ def build_default_registry() -> AdapterRegistry:
     from .frenzy import FrenzyFinanceAdapter
     from .fanduel_predicts import FanDuelPredictsAdapter
     from .gemini import GeminiPredictionAdapter
+    from .good_judgment_open import GoodJudgmentOpenAdapter
     from .hyperliquid import HyperliquidAdapter
     from .hedgehog import HedgehogMarketsAdapter
     from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKRForecastTraderAdapter
@@ -255,6 +243,7 @@ def build_default_registry() -> AdapterRegistry:
         FanDuelPredictsAdapter,
         ManifoldAdapter,
         MetaculusAdapter,
+        GoodJudgmentOpenAdapter,
         LimitlessAdapter,
         SxBetAdapter,
         AzuroAdapter,
@@ -311,6 +300,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(FanDuelPredictsAdapter, replace=True)
     registry.register_adapter(ManifoldAdapter, replace=True)
     registry.register_adapter(MetaculusAdapter, replace=True)
+    registry.register_adapter(GoodJudgmentOpenAdapter, replace=True)
     registry.register_adapter(LimitlessAdapter, replace=True)
     registry.register_adapter(SxBetAdapter, replace=True)
     registry.register_adapter(AzuroAdapter, replace=True)

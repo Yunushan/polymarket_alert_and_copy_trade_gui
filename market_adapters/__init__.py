@@ -16,6 +16,7 @@ from .frenzy import FrenzyFinanceAdapter
 from .fanduel_predicts import FanDuelPredictsAdapter
 from .errors import MarketAdapterError, MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .gemini import GeminiPredictionAdapter
+from .good_judgment_open import GoodJudgmentOpenAdapter
 from .hyperliquid import HyperliquidAdapter
 from .hedgehog import HedgehogMarketsAdapter
 from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKREventContractsAdapter, IBKRForecastTraderAdapter
@@ -91,6 +92,7 @@ __all__ = [
     "FrenzyFinanceAdapter",
     "FanDuelPredictsAdapter",
     "GeminiPredictionAdapter",
+    "GoodJudgmentOpenAdapter",
     "GnosisPredictionMarketsAdapter",
     "HyperliquidAdapter",
     "HedgehogMarketsAdapter",
