@@ -926,7 +926,8 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Official ProphetX affiliate Market Data and guarded Trading API integration is implemented with offline fixtures. Configure partner/API credentials; live submission stays disabled by default, supports the documented BUY quote shape only, and requires approved account/KYC/region access."
+        "prophet_exchange_order_management_enabled": false,
+        "notes": "Official ProphetX affiliate Market Data and guarded Trading API integration is implemented with offline fixtures, including wallet balance/transaction reads and fixed single/batch cancellation. Configure partner/API credentials; live submission and order management stay disabled by default, support the documented BUY quote shape only, require the separate prophet_exchange_order_management_enabled opt-in for cancellation, and require approved account/KYC/region access."
       }
     },
     "sporttrade_products": {

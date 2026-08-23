@@ -1,0 +1,15 @@
+{
+  "next": 42,
+  "data": {
+    "transactions": [
+      {
+        "id": 42,
+        "timestamp": "2026-08-10T14:00:00Z",
+        "actionType": "settle",
+        "value": 150.0,
+        "profit": 50.0,
+        "refId": "550e8400-e29b-41d4-a716-446655440000"
+      }
+    ]
+  }
+}

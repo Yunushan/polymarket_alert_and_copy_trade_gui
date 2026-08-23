@@ -1,0 +1,9 @@
+{
+  "data": {
+    "succeed_orders": [
+      {"order_id": "order-1", "status": "cancelled"},
+      {"order_id": "order-2", "status": "cancelled"}
+    ],
+    "failed_orders": []
+  }
+}

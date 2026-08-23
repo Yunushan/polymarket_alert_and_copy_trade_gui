@@ -303,6 +303,103 @@ class MarketSentinelCliTests(unittest.TestCase):
         })])
         self.assertEqual(order_payload["data"]["operation"], "cancel_order")
 
+    def test_prophet_exchange_account_and_cancellation_commands_forward_documented_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="prophet_exchange")
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("balance", "transactions"),
+            account_recovery=account_recovery,
+            order_management_operations=("cancel_order", "cancel_orders"),
+            manage_orders=manage_orders,
+        )
+        common_patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "transactions",
+                        "--market",
+                        "prophet_exchange",
+                        "--cursor",
+                        "41",
+                        "--limit",
+                        "25",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(account_calls, [("transactions", {"cursor": "41", "limit": 25})])
+        self.assertEqual(json.loads(stdout.getvalue())["data"]["operation"], "transactions")
+
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "prophet_exchange",
+                        "--order-id",
+                        "order-1",
+                        "--external-id",
+                        "external-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(order_calls, [("cancel_order", {
+            "order_id": "order-1",
+            "external_id": "external-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+        self.assertEqual(json.loads(stdout.getvalue())["data"]["operation"], "cancel_order")
+
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_orders",
+                        "--market",
+                        "prophet_exchange",
+                        "--instructions",
+                        '[{"order_id":"order-1","external_id":"external-1"}]',
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(order_calls[-1][0], "cancel_orders")
+        self.assertEqual(order_calls[-1][1]["orders"], [{"order_id": "order-1", "external_id": "external-1"}])
+
     def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
         cfg = SimpleNamespace(selected_market_id="myriad_markets")
         calls = []

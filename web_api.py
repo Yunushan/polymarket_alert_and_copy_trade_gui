@@ -3700,6 +3700,15 @@ def market_account_payload(
                 if _query_value(query_params, "after_time")
                 else _query_float(query_params, "from"),
             }
+    elif normalized_market_id == "prophet_exchange":
+        if normalized_operation == "balance":
+            kwargs = {}
+        else:
+            raw_cursor = _query_value(query_params, "cursor") or _query_value(query_params, "next")
+            kwargs = {
+                "cursor": raw_cursor or None,
+                "limit": _clamp_int(_query_value(query_params, "limit", "10"), 10, 1, 500),
+            }
     elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": _query_value(query_params, "status") or "",
@@ -3902,6 +3911,7 @@ def market_order_management_payload(
         )
     for key in (
         "order_id",
+        "external_id",
         "order_ids",
         "token_id",
         "token_ids",

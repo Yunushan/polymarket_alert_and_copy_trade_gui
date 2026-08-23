@@ -1385,6 +1385,7 @@ PREDICT_FUN_ACCOUNT_OPERATIONS = (
 )
 IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
 MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
+PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1401,6 +1402,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + PREDICT_FUN_ACCOUNT_OPERATIONS
         + IBKR_ACCOUNT_OPERATIONS
         + MANIFOLD_ACCOUNT_OPERATIONS
+        + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1645,6 +1647,14 @@ def run_market_account(args: argparse.Namespace) -> int:
                 "before_time": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
                 "after_time": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
             }
+    elif market_id == "prophet_exchange":
+        if operation == "balance":
+            kwargs = {}
+        else:
+            kwargs = {
+                "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 10, 1, 500),
+            }
     elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": str(getattr(args, "status", "") or "").strip(),
@@ -1751,6 +1761,7 @@ PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS = ("remove_orders", "remove_orders_by_ha
 XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
 IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders", "modify_order")
 MANIFOLD_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order",)
+PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1768,6 +1779,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + XMARKET_ORDER_MANAGEMENT_OPERATIONS
         + IBKR_ORDER_MANAGEMENT_OPERATIONS
         + MANIFOLD_ORDER_MANAGEMENT_OPERATIONS
+        + PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1800,7 +1812,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         ) and not (market_id == "hyperliquid" and isinstance(parsed, dict)):
             if not (market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"} and operation == "modify_order" and isinstance(parsed, dict)):
                 raise ValueError("--instructions must contain a JSON array (or a Myriad/Hyperliquid/IBKR JSON object).")
-        if operation in {"batch_create_orders", "batch_cancel_orders"} or (market_id == "polymarket" and operation == "cancel_orders"):
+        if operation in {"batch_create_orders", "batch_cancel_orders"} or (market_id == "polymarket" and operation == "cancel_orders") or (market_id == "prophet_exchange" and operation == "cancel_orders"):
             payload["orders"] = parsed
         elif market_id == "myriad_markets" and operation == "batch_modify_orders":
             if not isinstance(parsed, dict):
@@ -1829,6 +1841,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
     _put_optional(payload, "confirm_global_cancel", getattr(args, "confirm_global_cancel", None))
     for key, argument in (
         ("order_id", "order_id"),
+        ("external_id", "external_id"),
         ("order_ids", "order_ids"),
         ("token_id", "token_id"),
         ("token_ids", "token_ids"),
@@ -2896,7 +2909,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, IBKR event contracts, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Predict.fun, Probable, Smarkets, or Xmarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, IBKR event contracts, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Prophet Exchange, Predict.fun, Probable, Smarkets, or Xmarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2918,6 +2931,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact global-cancel text is required (venue-specific; e.g. CANCEL ALL BETS, CANCEL ALL LIMITLESS ORDERS, CANCEL ALL MATCHBOOK OFFERS, or CANCEL ALL OPINION ORDERS).",
     )
     market_orders.add_argument("--order-id", default=None, help="Venue order identifier for single-order mutations.")
+    market_orders.add_argument("--external-id", default=None, help="Prophet Exchange external id paired with the returned order id.")
     market_orders.add_argument("--order-ids", default=None, help="Probable comma-separated order ids for batch cancellation.")
     market_orders.add_argument("--token-id", default=None, help="Probable token id for order cancellation.")
     market_orders.add_argument("--token-ids", default=None, help="Probable comma-separated token ids for scoped reads.")

@@ -55,6 +55,9 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertEqual(health["account_recovery_operations"], ["balance", "transactions"])
+        self.assertEqual(health["order_management_operations"], ["cancel_order", "cancel_orders"])
+        self.assertEqual(health["order_management_endpoints"], ["POST /mm/cancel_order", "POST /mm/cancel_multiple_orders"])
 
     def test_market_data_contracts_quotes_and_paper_order(self) -> None:
         adapter, calls = self._market_data_adapter()
@@ -139,6 +142,85 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
             adapter.place_paper_order(
                 PaperOrderRequest("prophet_exchange", "101:555:1:line_1", "BUY", 1, 0.0)
             )
+
+    def test_account_recovery_and_guarded_cancellation(self) -> None:
+        adapter = ProphetExchangeAdapter(
+            {
+                "prophet_exchange_access_token": "fixture-access-token",
+                "prophet_exchange_api_base_url": "https://api.test/partner",
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "prophet_exchange_order_management_enabled": True,
+            }
+        )
+        read_calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            read_calls.append((url, dict(params or {}), dict(headers or {})))
+            if url.endswith("/v4/mm/get_balance"):
+                return load_fixture("balance")
+            if url.endswith("/v4/mm/get_transactions"):
+                return load_fixture("transactions")
+            raise AssertionError(f"unexpected ProphetX account URL: {url}")
+
+        mutation_calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            mutation_calls.append((method, url, dict(json_body or {}), dict(headers or {})))
+            if url.endswith("/mm/cancel_order"):
+                return load_fixture("cancel_response")
+            if url.endswith("/mm/cancel_multiple_orders"):
+                return load_fixture("cancel_multiple_response")
+            raise AssertionError(f"unexpected ProphetX mutation URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+
+        balance = adapter.account_recovery("balance")
+        transactions = adapter.account_recovery("transactions", cursor="41", limit=25)
+        self.assertEqual(balance["data"]["balance"], 1000.0)
+        self.assertEqual(transactions["next"], 42)
+        self.assertEqual(read_calls[0][1], {})
+        self.assertEqual(read_calls[1][1], {"next": 41, "limit": 25})
+
+        single = adapter.manage_orders(
+            "cancel_order",
+            order_id="order-1",
+            external_id="external-1",
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        batch = adapter.manage_orders(
+            "cancel_orders",
+            orders=[
+                {"order_id": "order-1", "external_id": "external-1"},
+                {"order_id": "order-2", "external_id": "external-2"},
+            ],
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        self.assertEqual(single["response"]["data"]["order"]["status"], "cancelled")
+        self.assertEqual(batch["response"]["data"]["failed_orders"], [])
+        self.assertEqual(mutation_calls[0][2], {"external_id": "external-1", "order_id": "order-1"})
+        self.assertEqual(
+            mutation_calls[1][2],
+            {
+                "data": [
+                    {"external_id": "external-1", "order_id": "order-1"},
+                    {"external_id": "external-2", "order_id": "order-2"},
+                ]
+            },
+        )
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_order",
+                order_id="order-1",
+                external_id="../unsafe",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_orders", orders=[], confirm_order_management="wrong")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("transactions", cursor="-1")
 
 
 if __name__ == "__main__":

@@ -788,6 +788,83 @@ class WebApiTests(unittest.TestCase):
             "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
         })])
 
+    def test_prophet_exchange_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="prophet_exchange",
+            display_name="Prophet Exchange",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("balance", "transactions")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_orders")  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["prophet_exchange"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "transactions",
+            {"cursor": ["41"], "limit": ["25"]},
+        )
+        self.assertEqual(account["data"]["operation"], "transactions")
+        self.assertEqual(account_calls, [("transactions", {"cursor": "41", "limit": 25})])
+
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "cancel_order",
+            {
+                "order_id": "order-1",
+                "external_id": "external-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls, [("cancel_order", {
+            "market_id": "",
+            "instructions": None,
+            "customer_ref": "",
+            "market_version": None,
+            "async_request": False,
+            "confirm_global_cancel": "",
+            "order_id": "order-1",
+            "external_id": "external-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+
+        batch = market_order_management_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "cancel_orders",
+            {
+                "orders": [{"order_id": "order-1", "external_id": "external-1"}],
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            },
+        )
+        self.assertEqual(batch["data"], {"status": "accepted"})
+        self.assertEqual(order_calls[-1][1]["orders"], [{"order_id": "order-1", "external_id": "external-1"}])
+
     def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

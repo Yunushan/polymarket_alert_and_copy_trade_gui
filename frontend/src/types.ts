@@ -196,7 +196,8 @@ export type MarketAccountOperation =
   | "portfolio"
   | "subaccounts"
   | "spot_balances"
-  | "positions_by_address";
+  | "positions_by_address"
+  | "transactions";
 
 export interface MarketAccountPayload {
   market_id: string;

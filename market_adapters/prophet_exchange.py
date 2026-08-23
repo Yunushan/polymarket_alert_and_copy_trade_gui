@@ -34,9 +34,16 @@ PROPHET_EXCHANGE_REFERENCES = (
     "https://docs.prophetx.co/",
     "https://docs.prophetx.co/docs/market-data-integration",
     "https://docs.prophetx.co/docs/integration",
+    "https://docs.prophetx.co/docs/wallets",
     "https://docs.prophetx.co/reference/post_auth-login-2",
     "https://docs.prophetx.co/reference/get_mm-search-markets-2",
 )
+
+PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
+PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
+PROPHET_EXCHANGE_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+PROPHET_EXCHANGE_TRANSACTION_LIMIT_MAX = 500
+PROPHET_EXCHANGE_CANCEL_BATCH_MAX = 100
 
 _NUMERIC_ID_RE = re.compile(r"^[0-9]{1,32}$")
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -49,6 +56,8 @@ class ProphetExchangeAdapter(MarketAdapter):
     # The documented Trading API submit_order shape is a market-maker quote
     # (strike_id, decimal price, quantity), not a consumer sell/close order.
     live_order_sides = ("BUY",)
+    account_recovery_operations = PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
+    order_management_operations = PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> None:
         super().__init__(config, **kwargs)
@@ -104,6 +113,19 @@ class ProphetExchangeAdapter(MarketAdapter):
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "live_order_shape": "external_id + strike_id + decimal price + quantity",
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "GET /v4/mm/get_balance",
+                    "GET /v4/mm/get_transactions",
+                ],
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool(
+                    "prophet_exchange_order_management_enabled", False
+                ),
+                "order_management_endpoints": [
+                    "POST /mm/cancel_order",
+                    "POST /mm/cancel_multiple_orders",
+                ],
             }
         )
         return health
@@ -215,6 +237,103 @@ class ProphetExchangeAdapter(MarketAdapter):
             "response": response,
         }
 
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read the documented ProphetX market-maker wallet feeds."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "Prophet Exchange account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+        if normalized == "balance":
+            return self._get("/v4/mm/get_balance", trading=True)
+
+        params: Dict[str, Any] = {}
+        raw_cursor = kwargs.get("cursor", kwargs.get("next"))
+        if raw_cursor not in (None, ""):
+            params["next"] = self._non_negative_integer(raw_cursor, "transaction cursor")
+        params["limit"] = self._bounded_transaction_limit(kwargs.get("limit", 10))
+        return self._get("/v4/mm/get_transactions", params=params, trading=True)
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Cancel ProphetX market-maker orders through fixed documented paths."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            raise MarketConfigurationError(
+                "Prophet Exchange order-management operation must be one of: "
+                + ", ".join(self.order_management_operations)
+                + "."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("prophet_exchange_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Prophet Exchange order management is disabled by adapter config. "
+                "Set prophet_exchange_order_management_enabled=true only after reviewing live-order risk controls."
+            )
+        self.ensure_live_trading_enabled("Prophet Exchange order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != PROPHET_EXCHANGE_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Prophet Exchange order management requires exact confirmation text "
+                f"{PROPHET_EXCHANGE_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Prophet Exchange order cancellation does not support async_request.")
+
+        if normalized == "cancel_order":
+            order = self._cancel_order_entry(kwargs.get("order_id"), kwargs.get("external_id"))
+            endpoint = "/mm/cancel_order"
+            request_body: Dict[str, Any] = order
+        else:
+            raw_orders = kwargs.get("orders")
+            if raw_orders in (None, ""):
+                raw_orders = kwargs.get("instructions")
+            if not isinstance(raw_orders, list) or not raw_orders:
+                raise MarketConfigurationError(
+                    "Prophet Exchange cancel_orders requires a non-empty JSON array of order entries."
+                )
+            if len(raw_orders) > PROPHET_EXCHANGE_CANCEL_BATCH_MAX:
+                raise MarketConfigurationError(
+                    f"Prophet Exchange cancel_orders is limited to {PROPHET_EXCHANGE_CANCEL_BATCH_MAX} entries."
+                )
+            orders = []
+            seen_order_ids = set()
+            seen_external_ids = set()
+            for entry in raw_orders:
+                if not isinstance(entry, Mapping):
+                    raise MarketConfigurationError("Prophet Exchange cancel_orders entries must be objects.")
+                order = self._cancel_order_entry(entry.get("order_id"), entry.get("external_id"))
+                if order["order_id"] in seen_order_ids or order["external_id"] in seen_external_ids:
+                    raise MarketConfigurationError("Prophet Exchange cancel_orders entries must be unique.")
+                seen_order_ids.add(order["order_id"])
+                seen_external_ids.add(order["external_id"])
+                orders.append(order)
+            endpoint = "/mm/cancel_multiple_orders"
+            request_body = {"data": orders}
+
+        response = self._request_json("POST", endpoint, request_body, trading=True)
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "request": request_body,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "endpoint": f"POST {endpoint}",
+                "references": list(PROPHET_EXCHANGE_REFERENCES),
+            },
+            "response": response,
+        }
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
@@ -321,6 +440,40 @@ class ProphetExchangeAdapter(MarketAdapter):
             raise MarketConfigurationError("Prophet Exchange login response did not include an access token.")
         self._access_token = str(value)
         return {"Authorization": self._access_token}
+
+    @classmethod
+    def _cancel_order_entry(cls, order_id: Any, external_id: Any) -> Dict[str, str]:
+        clean_order_id = cls._safe_reference(order_id, "order")
+        clean_external_id = cls._safe_reference(external_id, "external")
+        return {"external_id": clean_external_id, "order_id": clean_order_id}
+
+    @staticmethod
+    def _safe_reference(value: Any, label: str) -> str:
+        clean = str(value or "").strip()
+        if not clean or not _SEGMENT_RE.fullmatch(clean):
+            raise MarketConfigurationError(
+                f"Prophet Exchange {label} reference must be a non-empty path-safe token."
+            )
+        return clean
+
+    @staticmethod
+    def _non_negative_integer(value: Any, label: str) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Prophet Exchange {label} must be an integer.") from exc
+        if number < 0:
+            raise MarketConfigurationError(f"Prophet Exchange {label} must be non-negative.")
+        return number
+
+    @classmethod
+    def _bounded_transaction_limit(cls, value: Any) -> int:
+        limit = cls._non_negative_integer(value, "transaction limit")
+        if limit < 1 or limit > PROPHET_EXCHANGE_TRANSACTION_LIMIT_MAX:
+            raise MarketConfigurationError(
+                f"Prophet Exchange transaction limit must be between 1 and {PROPHET_EXCHANGE_TRANSACTION_LIMIT_MAX}."
+            )
+        return limit
 
     def _validate_order(
         self, order: PaperOrderRequest
