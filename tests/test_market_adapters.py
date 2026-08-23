@@ -171,7 +171,7 @@ HISTORY_CAPABILITIES = {
     "opinion_labs": {"trade_history", "candle_history"},
     "betfair_exchange": {"trade_history"},
     "matchbook": {"trade_history"},
-    "sx_bet": {"trade_history"},
+    "sx_bet": {"trade_history", "candle_history"},
     "gemini_titan": {"trade_history", "candle_history"},
     "iowa_electronic_markets": {"candle_history"},
     "space": {"trade_history", "candle_history"},

@@ -55,6 +55,7 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.orderbook_reading)
         self.assertTrue(adapter.capabilities.trade_history)
+        self.assertTrue(adapter.capabilities.candle_history)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
@@ -122,6 +123,33 @@ class SxBetAdapterTests(unittest.TestCase):
             adapter.list_trades(f"{MARKET_HASH}:ONE", limit=101)
         with self.assertRaises(MarketConfigurationError):
             adapter.list_trades(f"{MARKET_HASH}:ONE", after=10, before=9)
+
+    def test_list_candles_derives_bounded_ohlcv_from_public_trade_tape(self) -> None:
+        adapter = self.make_adapter()
+
+        candles = adapter.list_candles(
+            f"{MARKET_HASH}:ONE",
+            resolution="1m",
+            from_timestamp=1780344000,
+            to_timestamp=1780344060,
+        )
+
+        self.assertEqual(len(candles), 1)
+        candle = candles[0]
+        self.assertEqual(candle.timestamp, 1780344000.0)
+        self.assertAlmostEqual(candle.open, 0.4)
+        self.assertAlmostEqual(candle.high, 0.4)
+        self.assertAlmostEqual(candle.low, 0.4)
+        self.assertAlmostEqual(candle.close, 0.4)
+        self.assertAlmostEqual(candle.volume or 0, 2.5)
+        self.assertTrue(candle.raw["derived"])
+        self.assertEqual(candle.raw["source"], "sx_bet_public_trade_tape")
+        self.assertEqual(candle.raw["trade_ids"], ["0xtrade-one"])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(f"{MARKET_HASH}:ONE", resolution="2h")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(f"{MARKET_HASH}:ONE", from_timestamp=10, to_timestamp=9)
 
     def test_paper_order_builds_unsigned_order_payload(self) -> None:
         adapter = self.make_adapter()

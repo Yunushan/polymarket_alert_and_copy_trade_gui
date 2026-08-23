@@ -12,6 +12,7 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketTrade,
@@ -253,6 +254,78 @@ class SxBetAdapter(MarketAdapter):
             if len(trades) >= desired:
                 break
         return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from SX Bet's public trade tape.
+
+        SX Bet documents public trades, but not an exchange candle endpoint.
+        This method deliberately derives candles from the normalized trade
+        page, marks the result as derived, and retains source trade ids in
+        ``raw`` so callers can audit the aggregation.  The upstream page is
+        bounded to the configured trade limit (at most 100 rows).
+        """
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError("SX Bet candle history requires to_timestamp to be at or after from_timestamp.")
+
+        trades = self.list_trades(
+            contract_id,
+            limit=self._candle_trade_limit(),
+            before=end_ts,
+            after=start_ts,
+        )
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in trades:
+            timestamp = trade.timestamp
+            if timestamp is None or not math.isfinite(float(timestamp)) or timestamp < 0:
+                continue
+            bucket_timestamp = int(float(timestamp) // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {"open": trade.price, "high": trade.price, "low": trade.price, "close": trade.price, "volume": 0.0, "trade_ids": []},
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += max(0.0, float(trade.size))
+            bucket["trade_ids"].append(trade.trade_id)
+
+        canonical_contract_id = self._split_contract_id(contract_id)
+        contract = self._contract_id(*canonical_contract_id)
+        candles: List[MarketCandle] = []
+        for bucket_timestamp in sorted(buckets):
+            bucket = buckets[bucket_timestamp]
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=contract,
+                    timestamp=float(bucket_timestamp),
+                    open=float(bucket["open"]),
+                    high=float(bucket["high"]),
+                    low=float(bucket["low"]),
+                    close=float(bucket["close"]),
+                    volume=float(bucket["volume"]),
+                    raw={
+                        "source": "sx_bet_public_trade_tape",
+                        "derived": True,
+                        "resolution": str(resolution or "").strip().lower(),
+                        "interval_seconds": interval,
+                        "trade_ids": list(bucket["trade_ids"]),
+                    },
+                )
+            )
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -898,6 +971,35 @@ class SxBetAdapter(MarketAdapter):
         if not math.isfinite(timestamp) or timestamp < 0:
             raise MarketConfigurationError(f"SX Bet {label} timestamp must be a finite nonnegative epoch second.")
         return timestamp
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+            "1w": 604800,
+        }
+        normalized = str(resolution or "").strip().lower()
+        try:
+            return intervals[normalized]
+        except KeyError as exc:
+            supported = ", ".join(intervals)
+            raise MarketConfigurationError(f"SX Bet candle resolution must be one of: {supported}.") from exc
+
+    def _candle_trade_limit(self) -> int:
+        raw_limit = self.config.get("sx_bet_candle_trade_limit", 100)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("SX Bet candle trade limit must be an integer between 1 and 100.") from exc
+        if limit < 1 or limit > 100:
+            raise MarketConfigurationError("SX Bet candle trade limit must be between 1 and 100.")
+        return limit
 
     @staticmethod
     def _timestamp_seconds(value: Any) -> Optional[float]:
