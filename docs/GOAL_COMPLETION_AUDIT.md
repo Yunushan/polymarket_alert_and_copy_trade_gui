@@ -49,6 +49,13 @@ unpromoted and cannot be inferred from local tests or CI configuration.
 
 ### Account-recovery parity
 
+Predict.fun's documented public order-match feed is also covered: the adapter
+normalizes `GET /v1/orders/matches` into outcome-filtered BUY/SELL trades,
+converts the documented ISO or millisecond execution timestamps, and applies
+the shared local time bounds without inventing a private-account requirement.
+The endpoint, fixture, and parser behavior are covered by the Predict.fun
+adapter tests and the generic market-history API route.
+
 Gemini's documented authenticated recovery methods are also available through
 the allow-listed CLI `markets account <operation>` command and the web/API
 route `/api/markets/{market_id}/account/{operation}`. The React Markets view

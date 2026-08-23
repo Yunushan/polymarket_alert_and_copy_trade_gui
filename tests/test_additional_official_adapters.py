@@ -2730,7 +2730,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter = PredictFunAdapter()
         fixtures = {
             name: load_fixture("predict_fun", name)
-            for name in ("account", "orders", "order_detail", "activity", "positions", "timeseries")
+            for name in ("account", "orders", "order_detail", "activity", "positions", "timeseries", "matches")
         }
         calls = []
 
@@ -2740,6 +2740,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             if url.endswith("/account"):
                 self.assertEqual(headers["Authorization"], "Bearer jwt-token")
                 return fixtures["account"]
+            if url.endswith("/orders/matches"):
+                self.assertEqual(params, {"first": 25, "marketId": 9001})
+                return fixtures["matches"]
             if url.endswith("/orders"):
                 self.assertEqual(params, {"first": 25, "after": "next", "status": "OPEN", "marketId": 9001})
                 self.assertEqual(headers["Authorization"], "Bearer jwt-token")
@@ -2770,6 +2773,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "positions_by_address",
                 address="0x1111111111111111111111111111111111111111",
             )
+            yes_trades = adapter.list_trades("9001:YES", limit=25, after=1733312000, before=1733317000)
+            no_trades = adapter.list_trades("9001:NO", limit=25, after=1733312000, before=1733317000)
             candles = adapter.list_candles("9001:YES", from_timestamp=1733312000, to_timestamp=1733317000)
 
         self.assertEqual(account["data"]["address"], "0x1111111111111111111111111111111111111111")
@@ -2778,6 +2783,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(activity["data"][0]["eventName"], "ORDER_MATCHED")
         self.assertEqual(positions["data"][0]["outcome"], "YES")
         self.assertEqual(public_positions["data"][0]["id"], "position-1")
+        self.assertEqual([trade.trade_id for trade in yes_trades], ["0xpredictmatchbuy"])
+        self.assertEqual(yes_trades[0].side, "BUY")
+        self.assertEqual(yes_trades[0].price, 0.48)
+        self.assertEqual(yes_trades[0].size, 5.0)
+        self.assertEqual(yes_trades[0].timestamp, 1733312400.0)
+        self.assertEqual([trade.trade_id for trade in no_trades], ["0xpredictmatchsell"])
+        self.assertEqual(no_trades[0].side, "SELL")
         self.assertEqual([c.close for c in candles], [0.54, 0.57])
         self.assertEqual(candles[0].timestamp, 1733312400.0)
 

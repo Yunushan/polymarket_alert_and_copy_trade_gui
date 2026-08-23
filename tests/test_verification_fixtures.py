@@ -242,6 +242,7 @@ class VerificationFixtureTests(unittest.TestCase):
             (FIXTURE_ROOT / "opinion_labs" / "price_history.json").read_text(encoding="utf-8")
         )
         predict_markets = json.loads((FIXTURE_ROOT / "predict_fun" / "markets.json").read_text(encoding="utf-8"))
+        predict_matches = json.loads((FIXTURE_ROOT / "predict_fun" / "matches.json").read_text(encoding="utf-8"))
         xo_markets = json.loads((FIXTURE_ROOT / "xo_market" / "markets.json").read_text(encoding="utf-8"))
         betfair_catalogue = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "market_catalogue.json").read_text(encoding="utf-8")
@@ -299,6 +300,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("p", opinion_price_history["result"]["history"][0])
         self.assertIsInstance(predict_markets.get("data"), list)
         self.assertIn("outcomes", predict_markets["data"][0])
+        self.assertIsInstance(predict_matches.get("data"), list)
+        self.assertIn("taker", predict_matches["data"][0])
+        self.assertIn("priceExecuted", predict_matches["data"][0])
         self.assertIsInstance(xo_markets.get("markets"), list)
         self.assertIn("outcomes", xo_markets["markets"][0])
         self.assertIsInstance(betfair_catalogue.get("result"), list)

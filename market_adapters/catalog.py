@@ -335,6 +335,7 @@ PREDICT_FUN_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     candle_history=True,
     alerts=True,
     paper_trading=True,
@@ -845,7 +846,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="predict_fun",
         display_name="Predict.fun",
         homepage_url="https://predict.fun",
-        description="Official Predict.fun REST API adapter for market discovery, orderbooks, prices, timeseries, account recovery, dry-run orders, and guarded signed/relay order operations.",
+        description="Official Predict.fun REST API adapter for market discovery, orderbooks, prices, public match history, timeseries, account recovery, dry-run orders, and guarded signed/relay order operations.",
         capabilities=PREDICT_FUN_CAPABILITIES,
     ),
     MarketMetadata(

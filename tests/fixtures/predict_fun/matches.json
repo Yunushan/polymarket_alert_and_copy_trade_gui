@@ -1,0 +1,48 @@
+{
+  "success": true,
+  "cursor": "next-matches",
+  "data": [
+    {
+      "market": {
+        "id": 9001,
+        "outcomes": [
+          {"name": "Yes", "indexSet": 1, "onChainId": "1"},
+          {"name": "No", "indexSet": 2, "onChainId": "2"}
+        ]
+      },
+      "taker": {
+        "quoteType": "Bid",
+        "outcome": {"name": "Yes", "indexSet": 1, "onChainId": "1"},
+        "signer": "0x1111111111111111111111111111111111111111"
+      },
+      "amountFilled": "5",
+      "priceExecuted": "0.48",
+      "makers": [],
+      "transactionHash": "0xpredictmatchbuy",
+      "executedAt": "2024-12-04T11:40:00.000Z"
+    },
+    {
+      "market": {"id": 9001},
+      "taker": {
+        "quoteType": "Ask",
+        "outcome": {"name": "No", "indexSet": 2, "onChainId": "2"}
+      },
+      "amountFilled": 2,
+      "priceExecuted": 0.61,
+      "makers": [],
+      "transactionHash": "0xpredictmatchsell",
+      "executedAt": 1733316000000
+    },
+    {
+      "market": {"id": 9002},
+      "taker": {
+        "quoteType": "Bid",
+        "outcome": {"name": "Yes", "indexSet": 1, "onChainId": "1"}
+      },
+      "amountFilled": 99,
+      "priceExecuted": 0.5,
+      "transactionHash": "0xothermarket",
+      "executedAt": 1733312400000
+    }
+  ]
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -11,6 +12,7 @@ from .types import (
     MarketCandle,
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -25,6 +27,7 @@ PREDICT_FUN_REFERENCES = (
     "https://dev.predict.fun/get-markets-25326905e0",
     "https://dev.predict.fun/get-the-orderbook-for-a-market-25326908e0",
     "https://dev.predict.fun/get-market-timeseries-25326910e0",
+    "https://dev.predict.fun/get-order-match-events-25663812e0",
     "https://dev.predict.fun/get-orders-25326902e0",
     "https://dev.predict.fun/get-positions-32675933e0",
     "https://dev.predict.fun/get-account-activity-32534697e0",
@@ -84,6 +87,7 @@ class PredictFunAdapter(MarketAdapter):
                     "GET /v1/positions",
                     "GET /v1/positions/{address}",
                 ],
+                "public_trade_endpoints": ["GET /v1/orders/matches"],
                 "order_management_endpoints": [
                     "POST /v1/orders/remove",
                     "POST /orders/remove-by-hash",
@@ -219,6 +223,104 @@ class PredictFunAdapter(MarketAdapter):
             )
         candles.sort(key=lambda item: item.timestamp)
         return candles
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Normalize Predict.fun's documented public order-match feed.
+
+        Predict.fun exposes executed matches at ``GET /v1/orders/matches``.
+        The feed is market-filterable but does not provide the shared numeric
+        time bounds, so the adapter applies those bounds locally and filters
+        the requested outcome before returning normalized trades.  ``Bid`` and
+        ``Ask`` quote types are mapped to BUY and SELL respectively; the raw
+        match payload remains attached for callers that need maker/taker data.
+        """
+
+        self.ensure_capability("trade_history")
+        market_id, outcome = self._split_contract_id(contract_id)
+        safe_market_id = self._market_id_param(market_id)
+        desired = self._bounded_int(limit, "trade limit", minimum=1, maximum=100, default=50)
+        lower = self._timestamp_bound(after, "after")
+        upper = self._timestamp_bound(before, "before")
+        if lower is not None and upper is not None and upper < lower:
+            raise MarketConfigurationError("Predict.fun trade history before must not precede after.")
+
+        payload = self._get("/orders/matches", params={"first": desired, "marketId": safe_market_id})
+        rows = self._list_from_payload(payload, "data", "matches")
+        canonical = self._contract_id(market_id, outcome)
+        trades: List[MarketTrade] = []
+        for index, row in enumerate(rows):
+            row_market = row.get("market")
+            if not isinstance(row_market, Mapping):
+                row_market = {}
+            row_market_id = str(row.get("marketId") or row_market.get("id") or row_market.get("marketId") or "").strip()
+            if row_market_id and row_market_id != market_id:
+                continue
+
+            taker = row.get("taker") if isinstance(row.get("taker"), Mapping) else {}
+            outcome_payload: Any = taker.get("outcome") or row.get("outcome")
+            if outcome_payload is None:
+                makers = row.get("makers")
+                if isinstance(makers, list):
+                    for maker in makers:
+                        if isinstance(maker, Mapping) and maker.get("outcome") is not None:
+                            outcome_payload = maker.get("outcome")
+                            break
+            if outcome_payload is None or not self._outcome_matches(outcome_payload, outcome):
+                continue
+
+            price = self._safe_probability(row.get("priceExecuted") or row.get("price") or row.get("executionPrice"))
+            size = row.get("amountFilled") or row.get("filledAmount") or row.get("amount") or row.get("size")
+            try:
+                parsed_size = float(size)
+            except (TypeError, ValueError):
+                parsed_size = None
+            timestamp = self._timestamp_value(row.get("executedAt") or row.get("timestamp") or row.get("time"))
+            if price is None or parsed_size is None or not self._is_positive_number(parsed_size) or timestamp is None:
+                continue
+            if lower is not None and timestamp < lower:
+                continue
+            if upper is not None and timestamp > upper:
+                continue
+
+            quote_type = taker.get("quoteType") or taker.get("quote_type")
+            if not quote_type:
+                makers = row.get("makers")
+                if isinstance(makers, list) and makers and isinstance(makers[0], Mapping):
+                    quote_type = makers[0].get("quoteType") or makers[0].get("quote_type")
+            side = {"BID": "BUY", "ASK": "SELL"}.get(str(quote_type or "").strip().upper())
+            if side is None:
+                continue
+            trade_id = str(
+                row.get("transactionHash")
+                or row.get("tradeId")
+                or row.get("trade_id")
+                or row.get("id")
+                or f"predict_fun:{market_id}:{int(timestamp * 1000)}:{index}"
+            ).strip()
+            if not trade_id:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=parsed_size,
+                    timestamp=timestamp,
+                    raw=dict(row),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
 
     def account_recovery(self, operation: str, **kwargs: Any) -> Any:
         """Read Predict.fun's documented authenticated account surfaces."""
@@ -564,6 +666,19 @@ class PredictFunAdapter(MarketAdapter):
 
     @classmethod
     def _timestamp_value(cls, value: Any) -> Optional[float]:
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                try:
+                    value = float(text)
+                except ValueError:
+                    try:
+                        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    except ValueError:
+                        return None
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    return parsed.timestamp()
         try:
             number = float(value)
         except (TypeError, ValueError):
@@ -572,6 +687,30 @@ class PredictFunAdapter(MarketAdapter):
             return None
         # Predict.fun timeseries uses milliseconds in its API responses.
         return number / 1000.0 if number > 10_000_000_000 else number
+
+    @staticmethod
+    def _outcome_matches(value: Any, requested: str) -> bool:
+        """Match a documented outcome object or label to a contract outcome."""
+
+        requested_value = str(requested or "").strip().upper()
+        if not requested_value:
+            return False
+        candidates: List[Any] = []
+        if isinstance(value, Mapping):
+            for key in ("name", "title", "label", "side", "outcome", "outcomeName", "id", "outcomeId", "onChainId", "indexSet"):
+                if value.get(key) is not None:
+                    candidates.append(value.get(key))
+        else:
+            candidates.append(value)
+        for candidate in candidates:
+            text = str(candidate).strip().upper()
+            if text == requested_value:
+                return True
+            if requested_value == "YES" and text in {"Y", "TRUE"}:
+                return True
+            if requested_value == "NO" and text in {"N", "FALSE"}:
+                return True
+        return False
 
     def _event_from_market(self, market: Mapping[str, Any]) -> MarketEvent:
         market_id = self._market_id(market)
