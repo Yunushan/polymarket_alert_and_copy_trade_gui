@@ -24,6 +24,21 @@ class ActivityIdentityTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             require_activity_identity("manifold", "manifold:../etc/passwd")
 
+    def test_metadao_identity_requires_canonical_solana_base58_key(self) -> None:
+        wallet = "11111111111111111111111111111111"
+        self.assertEqual(
+            normalize_activity_identity("metadao", wallet),
+            f"solana:{wallet}",
+        )
+        self.assertEqual(
+            normalize_activity_identity("metadao", f"SOLANA:{wallet}"),
+            f"solana:{wallet}",
+        )
+        for value in ("0x" + "11" * 20, "solana:not-a-wallet", "1" * 31):
+            self.assertIsNone(normalize_activity_identity("metadao", value))
+        with self.assertRaises(MarketConfigurationError):
+            require_activity_identity("metadao", "not-a-wallet")
+
 
 if __name__ == "__main__":
     unittest.main()

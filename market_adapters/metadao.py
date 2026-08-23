@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .identity import require_activity_identity
 from .types import (
     MarketCandle,
     MarketContract,
@@ -97,7 +98,8 @@ class MetaDAOAdapter(MarketAdapter):
     and a slot-bounded public spot-swap tape, but not depth or a user-order
     endpoint. The adapter maps those documented rows to the shared market
     model, derives bounded candles from exact swap legs, and keeps paper orders
-    local.
+    local. Swap rows include the documented maker wallet, so bounded wallet
+    activity can be filtered locally for simulation-first copy previews.
     The documented Futarchy API also exposes a configurable Solana router for
     swaps; live forwarding is limited to an operator-reviewed, externally
     signed transaction targeted at an explicit router allow-list. The adapter
@@ -131,6 +133,11 @@ class MetaDAOAdapter(MarketAdapter):
                 "wallet_transaction_required": True,
                 "trade_history_source": "public_futarchyamm_spot_swaps",
                 "trade_history_coverage": "bounded_recent",
+                "copy_trading_supported": True,
+                "copy_activity_source": "public_futarchyamm_spot_swaps",
+                "copy_activity_coverage": "bounded_recent",
+                "activity_ticker_limit": self._activity_ticker_limit(),
+                "activity_trade_scan_limit": self._activity_trade_scan_limit(),
                 "history_slot_window": history_slot_window,
                 "history_max_windows": history_max_windows,
                 "history_event_cap": history_event_cap,
@@ -207,6 +214,72 @@ class MetaDAOAdapter(MarketAdapter):
             source="metadao_futarchy_dex_api",
             raw={"ticker": dict(row)},
         )
+
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return bounded public swap activity for a Solana wallet.
+
+        MetaDAO's official DexScreener-compatible swap rows include ``maker``
+        and a stable transaction/event identity.  The endpoint is global and
+        slot-ranged rather than wallet-ranged, so this method scans a bounded
+        recent slice for a bounded number of published tickers, filters makers
+        locally, and never claims complete wallet history.
+        """
+
+        self.ensure_capability("copy_trading")
+        identity = require_activity_identity(self.market_id, wallet_address)
+        wallet = identity.split(":", 1)[1]
+        desired = self._activity_limit(limit)
+        ticker_limit = self._activity_ticker_limit()
+        scan_limit = self._activity_trade_scan_limit()
+        rows = self._tickers()
+        activities: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for ticker in rows[:ticker_limit]:
+            ticker_id = self._ticker_id(ticker)
+            if not ticker_id:
+                continue
+            contract_id = self._contract_id(ticker_id)
+            scan = self._scan_public_trades(
+                contract_id,
+                before=None,
+                after=None,
+                desired_limit=scan_limit,
+                require_creation_coverage=False,
+                require_desired_after_cutoff=False,
+            )
+            for trade in scan["trades"]:
+                raw = trade.raw if isinstance(trade.raw, Mapping) else {}
+                maker = str(raw.get("maker") or "").strip()
+                if maker != wallet:
+                    continue
+                identity_key = (trade.contract_id, trade.trade_id)
+                if identity_key in seen:
+                    continue
+                seen.add(identity_key)
+                event = raw.get("event") if isinstance(raw.get("event"), Mapping) else {}
+                activities.append(
+                    {
+                        "activityId": f"metadao:{trade.trade_id}",
+                        "proxyWallet": identity,
+                        "asset": trade.contract_id,
+                        "contract_id": trade.contract_id,
+                        "market_id": self.market_id,
+                        "side": trade.side,
+                        "size": trade.size,
+                        "price": trade.price,
+                        "timestamp": int(trade.timestamp or 0),
+                        "transactionHash": str(event.get("txnId") or "").strip(),
+                        "slug": ticker_id,
+                        "outcome": str(self._value(ticker, "base_symbol", "base_name") or "BASE"),
+                        "source": "metadao_dexscreener_spot_swaps",
+                        "maker": maker,
+                        "trade_id": trade.trade_id,
+                        "raw": dict(raw),
+                    }
+                )
+
+        activities.sort(key=lambda row: (int(row.get("timestamp") or 0), str(row.get("activityId") or "")), reverse=True)
+        return activities[:desired]
 
     def list_trades(
         self,
@@ -460,10 +533,36 @@ class MetaDAOAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
+        self.ensure_capability("copy_trading")
+        identity = require_activity_identity(
             self.market_id,
-            "copy_trading",
-            "MetaDAO copy trading is unsupported because the official API does not expose account-activity mirroring.",
+            activity.get("proxyWallet") or activity.get("proxy_wallet") or activity.get("wallet"),
+        )
+        raw = activity.get("raw") if isinstance(activity.get("raw"), Mapping) else {}
+        maker = str(activity.get("maker") or raw.get("maker") or "").strip()
+        if maker and identity != f"solana:{maker}":
+            raise MarketConfigurationError("MetaDAO activity maker does not match proxyWallet.")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("MetaDAO activity has no contract id.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in self.live_order_sides:
+            raise MarketConfigurationError("MetaDAO activity side must be BUY or SELL.")
+        size = self._strict_positive_number(activity.get("size"), "activity size")
+        price = self._strict_positive_number(activity.get("price"), "activity price")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={
+                    "activity": dict(activity),
+                    "source": "metadao_public_maker_swaps",
+                    "activity_identity": identity,
+                },
+            )
         )
 
     def _scan_public_trades(
@@ -735,6 +834,24 @@ class MetaDAOAdapter(MarketAdapter):
         if number < 1 or number > 500 or str(number) != str(value).strip():
             raise MarketConfigurationError("MetaDAO trade history limit must be between 1 and 500.")
         return number
+
+    @staticmethod
+    def _activity_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("MetaDAO activity limit must be an integer.")
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketConfigurationError("MetaDAO activity limit must be an integer.") from exc
+        if number < 1 or number > 100 or str(number) != str(value).strip():
+            raise MarketConfigurationError("MetaDAO activity limit must be between 1 and 100.")
+        return number
+
+    def _activity_ticker_limit(self) -> int:
+        return self._bounded_int_config("metadao_activity_ticker_limit", 100, minimum=1, maximum=100)
+
+    def _activity_trade_scan_limit(self) -> int:
+        return self._bounded_int_config("metadao_activity_trade_scan_limit", 100, minimum=1, maximum=500)
 
     @staticmethod
     def _history_timestamp(value: Any, label: str) -> float:

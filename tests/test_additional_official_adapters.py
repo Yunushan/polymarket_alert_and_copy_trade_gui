@@ -1116,8 +1116,32 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             adapter.get_orderbook(order.contract_id)
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
-        with self.assertRaises(UnsupportedFeatureError):
-            adapter.copy_trade_from_activity({"side": "BUY"})
+
+    def test_metadao_public_maker_activity_supports_bounded_simulation_copy(self) -> None:
+        adapter, contract_id, _requests = self._metadao_history_adapter()
+        wallet = "11111111111111111111111111111111"
+
+        activities = adapter.list_activity(wallet, limit=2)
+
+        self.assertTrue(adapter.capabilities.copy_trading)
+        self.assertEqual(len(activities), 2)
+        self.assertTrue(all(row["proxyWallet"] == f"solana:{wallet}" for row in activities))
+        self.assertTrue(all(row["asset"] == contract_id for row in activities))
+        self.assertTrue(all(row["side"] in {"BUY", "SELL"} for row in activities))
+        self.assertTrue(all(row["transactionHash"] for row in activities))
+        self.assertEqual(activities[0]["source"], "metadao_dexscreener_spot_swaps")
+
+        copied = adapter.copy_trade_from_activity(activities[0])
+        self.assertTrue(copied.accepted)
+        self.assertEqual(copied.contract_id, contract_id)
+        self.assertEqual(copied.raw["request"]["ticker_id"], contract_id.rsplit(":", 1)[0])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("not-a-solana-wallet")
+        mismatched = dict(activities[0])
+        mismatched["maker"] = "22222222222222222222222222222222"
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity(mismatched)
 
     def _metadao_history_adapter(
         self, *, config=None, latest_block=None, pair=None, events=None, tickers=None

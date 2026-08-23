@@ -72,7 +72,9 @@ METADAO_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Public swap rows include maker wallets; the adapter filters a bounded
+    # recent slice locally and only creates simulation-first paper previews.
+    copy_trading=True,
     api_required=True,
     credentials_required=False,
     kyc_required=False,
@@ -535,7 +537,7 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
             "bounded recent public spot-swap history, derived OHLCV candles, alerts, local paper orders, and "
             "guarded externally signed Solana router transactions; omitted time bounds return only a bounded recent "
             "slice, explicit out-of-window bounds fail closed, and full-history completeness is not claimed. "
-            "Orderbook depth, wallet signing, approvals, settlement, and copy trading remain operator-owned or unsupported."
+            "Orderbook depth, wallet signing, approvals, and settlement remain operator-owned or unsupported; wallet copy is bounded and simulation-first."
         ),
         capabilities=METADAO_CAPABILITIES,
     ),

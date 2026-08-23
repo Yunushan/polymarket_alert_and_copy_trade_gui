@@ -2970,14 +2970,14 @@ def _wallets_from_copy_payload(
 
     wallets: List[str] = []
     for raw in raw_values:
-        raw_wallet = str(raw or "").strip().lower()
+        raw_wallet = str(raw or "").strip()
         if not raw_wallet:
             continue
         normalized = normalize_activity_identity(market_id, raw_wallet)
         if not normalized:
             if str(market_id or "").strip().lower() == "manifold":
                 raise ValueError("follow_wallets must contain only safe manifold:<username> activity identities.")
-            raise ValueError("follow_wallets must contain only valid 0x wallet/proxyWallet addresses.")
+            raise ValueError("follow_wallets must contain only valid activity identities (0x or Solana wallets).")
         if normalized not in wallets:
             wallets.append(normalized)
     return wallets
@@ -3107,7 +3107,8 @@ def copy_trade_preview_from_activity(
     followed_wallets = settings.normalized_follow_wallets()
     if not followed_wallets:
         return {"status": "skipped", "reason": "follow wallet is not set"}
-    if str(activity.get("proxyWallet") or "").strip().lower() not in followed_wallets:
+    activity_identity = normalize_activity_identity(market_id, activity.get("proxyWallet"))
+    if not activity_identity or activity_identity not in followed_wallets:
         return {"status": "skipped", "reason": "activity wallet does not match follow wallet"}
     side = str(activity.get("side") or "").strip().upper()
     if side not in {"BUY", "SELL"}:

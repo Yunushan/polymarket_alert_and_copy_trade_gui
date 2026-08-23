@@ -4338,7 +4338,7 @@ class App(tk.Tk):
         market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
         wallets: List[str] = []
         for part in re.split(r"[,;\s]+", raw):
-            candidate = part.strip().lower()
+            candidate = part.strip()
             if not candidate:
                 continue
             wallet = normalize_activity_identity(market_id, candidate)
@@ -4470,7 +4470,8 @@ class App(tk.Tk):
         if not followed_wallets:
             return
 
-        if str(item.get("proxyWallet") or "").lower() not in followed_wallets:
+        activity_identity = normalize_activity_identity(market_id, item.get("proxyWallet"))
+        if not activity_identity or activity_identity not in followed_wallets:
             return
 
         side = str(item.get("side") or "").upper()
