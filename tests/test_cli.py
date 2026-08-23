@@ -503,6 +503,78 @@ class MarketSentinelCliTests(unittest.TestCase):
             ],
         )
 
+    def test_myriad_portfolio_and_market_positions_commands_forward_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("portfolio", "market_positions"),
+            account_recovery=account_recovery,
+        )
+        wallet = "0x0000000000000000000000000000000000000001"
+        patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patch("sys.stdout", io.StringIO()):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets", "account", "portfolio", "--market", "myriad_markets",
+                        "--wallet", wallet, "--page", "2", "--limit", "10",
+                        "--trading-model", "ob", "--min-shares", "1.5",
+                        "--account-market-id", "501", "--network-id", "56",
+                        "--token-address", wallet, "--status", "ongoing", "--keyword", "btc",
+                        "--sort", "desc", "--sort-by", "profit", "--exclude-history",
+                        "--group-by-event", "--compact",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets", "account", "market_positions", "--market", "myriad_markets",
+                        "--wallet", wallet, "--topics", "crypto,macro", "--market-ids", "56:501,56:502",
+                        "--state", "open", "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(account_calls[0][0], "portfolio")
+        self.assertEqual(account_calls[0][1]["page"], 2)
+        self.assertEqual(account_calls[0][1]["trading_model"], "ob")
+        self.assertEqual(account_calls[0][1]["exclude_history"], True)
+        self.assertEqual(account_calls[1], (
+            "market_positions",
+            {
+                "wallet": wallet,
+                "limit": 25,
+                "page": 1,
+                "trading_model": "all",
+                "min_shares": None,
+                "market_slug": None,
+                "market_id": None,
+                "network_id": None,
+                "token_address": None,
+                "status": None,
+                "keyword": None,
+                "sort": None,
+                "sort_by": None,
+                "exclude_history": False,
+                "group_by_event": False,
+                "state": "open",
+                "topics": "crypto,macro",
+                "market_ids": "56:501,56:502",
+            },
+        ))
+
     def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
         cfg = SimpleNamespace(selected_market_id="myriad_markets")
         calls = []

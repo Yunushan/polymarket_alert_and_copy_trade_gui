@@ -1387,7 +1387,7 @@ IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
 MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
 PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
-MYRIAD_ACCOUNT_OPERATIONS = ("account_activity",)
+MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1670,6 +1670,32 @@ def run_market_account(args: argparse.Namespace) -> int:
             "wallet": str(getattr(args, "wallet", "") or "").strip(),
             "limit": _cli_clamp_int(getattr(args, "limit", None), 25, 1, 100),
         }
+        if operation in {"portfolio", "market_positions"}:
+            kwargs.update(
+                {
+                    "page": _cli_clamp_int(getattr(args, "page", None), 1, 1, 10_000),
+                    "trading_model": str(getattr(args, "trading_model", "all") or "all").strip(),
+                    "min_shares": str(getattr(args, "min_shares", "") or "").strip() or None,
+                    "market_slug": str(getattr(args, "market_slug", "") or "").strip() or None,
+                    "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+                    "network_id": str(getattr(args, "network_id", "") or "").strip() or None,
+                    "token_address": str(getattr(args, "token_address", "") or "").strip() or None,
+                    "status": str(getattr(args, "status", "") or "").strip() or None,
+                    "keyword": str(getattr(args, "keyword", "") or "").strip() or None,
+                    "sort": str(getattr(args, "sort", "") or "").strip() or None,
+                    "sort_by": str(getattr(args, "sort_by", "") or "").strip() or None,
+                    "exclude_history": bool(getattr(args, "exclude_history", False)),
+                    "group_by_event": bool(getattr(args, "group_by_event", False)),
+                }
+            )
+            if operation == "market_positions":
+                kwargs.update(
+                    {
+                        "state": str(getattr(args, "state", "") or "").strip() or None,
+                        "topics": str(getattr(args, "topics", "") or "").strip() or None,
+                        "market_ids": str(getattr(args, "market_ids", "") or "").strip() or None,
+                    }
+                )
     elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": str(getattr(args, "status", "") or "").strip(),
@@ -2878,6 +2904,17 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--trade-id", default=None, help="Optional Polymarket trade id for fill reads.")
     market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
     market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
+    market_account.add_argument("--trading-model", default="all", help="Myriad account model: amm, ob, or all.")
+    market_account.add_argument("--min-shares", default="", help="Myriad minimum position shares.")
+    market_account.add_argument("--network-id", default="", help="Myriad account network id.")
+    market_account.add_argument("--token-address", default="", help="Myriad account token address.")
+    market_account.add_argument("--keyword", default="", help="Myriad account search keyword.")
+    market_account.add_argument("--sort-by", default="", help="Myriad portfolio sort field.")
+    market_account.add_argument("--exclude-history", action="store_true", help="Myriad portfolio: exclude historical positions.")
+    market_account.add_argument("--group-by-event", action="store_true", help="Myriad portfolio: group positions by event.")
+    market_account.add_argument("--state", default="", help="Myriad market-position state filter.")
+    market_account.add_argument("--topics", default="", help="Myriad market-position comma-separated topics.")
+    market_account.add_argument("--market-ids", default="", help="Myriad market-position comma-separated market ids.")
     market_account.add_argument("--event-types", default="", help="Predict.fun comma-separated account activity event types.")
     market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
     market_account.add_argument("--event-type-id", default="", help="Betfair event type id filter.")

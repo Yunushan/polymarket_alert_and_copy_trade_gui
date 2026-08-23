@@ -191,6 +191,19 @@ interface MarketReadForm {
   account_subaccount: string;
   account_count_filter: string;
   account_market_slug: string;
+  account_page: string;
+  account_trading_model: string;
+  account_min_shares: string;
+  account_network_id: string;
+  account_token_address: string;
+  account_keyword: string;
+  account_sort: string;
+  account_sort_by: string;
+  account_state: string;
+  account_topics: string;
+  account_market_ids: string;
+  account_exclude_history: boolean;
+  account_group_by_event: boolean;
   account_on_behalf_of: string;
   account_historical: boolean;
   resolution: string;
@@ -456,6 +469,19 @@ function emptyMarketReadForm(): MarketReadForm {
     account_subaccount: "",
     account_count_filter: "",
     account_market_slug: "",
+    account_page: "1",
+    account_trading_model: "all",
+    account_min_shares: "",
+    account_network_id: "",
+    account_token_address: "",
+    account_keyword: "",
+    account_sort: "",
+    account_sort_by: "",
+    account_state: "",
+    account_topics: "",
+    account_market_ids: "",
+    account_exclude_history: false,
+    account_group_by_event: false,
     account_on_behalf_of: "",
     account_historical: false,
     resolution: "1h",
@@ -997,13 +1023,26 @@ export default function App() {
             subaccount: form.account_subaccount.trim() || undefined,
             count_filter: form.account_count_filter.trim() || undefined,
             market_slug: form.account_market_slug.trim() || undefined,
+            page: form.account_page.trim() || undefined,
+            trading_model: form.account_trading_model.trim() || undefined,
+            min_shares: form.account_min_shares.trim() || undefined,
+            network_id: form.account_network_id.trim() || undefined,
+            token_address: form.account_token_address.trim() || undefined,
+            keyword: form.account_keyword.trim() || undefined,
+            sort: form.account_sort.trim() || undefined,
+            sort_by: form.account_sort_by.trim() || undefined,
+            state: form.account_state.trim() || undefined,
+            topics: form.account_topics.trim() || undefined,
+            market_ids: form.account_market_ids.trim() || undefined,
+            exclude_history: form.account_exclude_history,
+            group_by_event: form.account_group_by_event,
             on_behalf_of: form.account_on_behalf_of.trim() || undefined,
             historical: form.account_historical,
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
             limit: marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : marketId === "matchbook" && form.account_operation === "current_offers" ? 20 : 50,
-            page: marketId === "opinion_labs" ? 1 : undefined
+            ...(marketId === "opinion_labs" ? { page: 1 } : {})
           });
           setMarketRead((current) => ({ ...current, account: payload }));
           setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
@@ -2943,6 +2982,114 @@ function MarketsView({
                 placeholder="For Limitless user orders"
               />
             </label>
+            {selectedMarket.market_id === "myriad_markets" ? (
+              <>
+                <label>
+                  <span>Myriad account page</span>
+                  <input
+                    value={marketReadForm.account_page}
+                    onChange={(event) => onMarketReadFormChange({ account_page: event.target.value })}
+                    placeholder="1–10000"
+                  />
+                </label>
+                <label>
+                  <span>Myriad trading model</span>
+                  <input
+                    value={marketReadForm.account_trading_model}
+                    onChange={(event) => onMarketReadFormChange({ account_trading_model: event.target.value })}
+                    placeholder="amm, ob, all"
+                  />
+                </label>
+                <label>
+                  <span>Myriad minimum shares</span>
+                  <input
+                    value={marketReadForm.account_min_shares}
+                    onChange={(event) => onMarketReadFormChange({ account_min_shares: event.target.value })}
+                    placeholder="Optional non-negative number"
+                  />
+                </label>
+                <label>
+                  <span>Myriad network id</span>
+                  <input
+                    value={marketReadForm.account_network_id}
+                    onChange={(event) => onMarketReadFormChange({ account_network_id: event.target.value })}
+                    placeholder="Optional chain id"
+                  />
+                </label>
+                <label>
+                  <span>Myriad token address</span>
+                  <input
+                    value={marketReadForm.account_token_address}
+                    onChange={(event) => onMarketReadFormChange({ account_token_address: event.target.value })}
+                    placeholder="0x…"
+                  />
+                </label>
+                <label>
+                  <span>Myriad keyword</span>
+                  <input
+                    value={marketReadForm.account_keyword}
+                    onChange={(event) => onMarketReadFormChange({ account_keyword: event.target.value })}
+                    placeholder="Optional search"
+                  />
+                </label>
+                <label>
+                  <span>Myriad sort</span>
+                  <input
+                    value={marketReadForm.account_sort}
+                    onChange={(event) => onMarketReadFormChange({ account_sort: event.target.value })}
+                    placeholder="asc or desc"
+                  />
+                </label>
+                <label>
+                  <span>Myriad sort by</span>
+                  <input
+                    value={marketReadForm.account_sort_by}
+                    onChange={(event) => onMarketReadFormChange({ account_sort_by: event.target.value })}
+                    placeholder="Documented portfolio field"
+                  />
+                </label>
+                <label>
+                  <span>Myriad position state</span>
+                  <input
+                    value={marketReadForm.account_state}
+                    onChange={(event) => onMarketReadFormChange({ account_state: event.target.value })}
+                    placeholder="For market_positions"
+                  />
+                </label>
+                <label>
+                  <span>Myriad topics</span>
+                  <input
+                    value={marketReadForm.account_topics}
+                    onChange={(event) => onMarketReadFormChange({ account_topics: event.target.value })}
+                    placeholder="Comma-separated"
+                  />
+                </label>
+                <label>
+                  <span>Myriad market ids</span>
+                  <input
+                    value={marketReadForm.account_market_ids}
+                    onChange={(event) => onMarketReadFormChange({ account_market_ids: event.target.value })}
+                    placeholder="Comma-separated"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_exclude_history}
+                    onChange={(event) => onMarketReadFormChange({ account_exclude_history: event.target.checked })}
+                  />
+                  <span>Exclude Myriad portfolio history</span>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_group_by_event}
+                    onChange={(event) => onMarketReadFormChange({ account_group_by_event: event.target.checked })}
+                  />
+                  <span>Group Myriad portfolio by event</span>
+                </label>
+              </>
+            ) : null}
             <label>
               <span>Delegated profile</span>
               <input

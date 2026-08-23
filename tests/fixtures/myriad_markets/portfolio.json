@@ -1,0 +1,16 @@
+{
+  "data": [
+    {
+      "marketId": 501,
+      "marketSlug": "btc-above-100k-2026",
+      "networkId": 56,
+      "outcomeId": 1,
+      "outcomeTitle": "Yes",
+      "shares": 20.0,
+      "value": 12.2,
+      "status": "ongoing",
+      "profit": 1.2
+    }
+  ],
+  "pagination": {"page": 1, "limit": 25, "total": 1}
+}

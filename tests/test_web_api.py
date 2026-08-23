@@ -959,6 +959,74 @@ class WebApiTests(unittest.TestCase):
             ],
         )
 
+    def test_myriad_portfolio_payload_forwards_documented_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad Markets",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("portfolio", "market_positions")  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        wallet = "0x0000000000000000000000000000000000000001"
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "portfolio",
+            {
+                "wallet": [wallet],
+                "page": ["2"],
+                "limit": ["10"],
+                "trading_model": ["ob"],
+                "min_shares": ["1.5"],
+                "market_slug": ["btc-above-100k-2026"],
+                "market_id": ["501"],
+                "network_id": ["56"],
+                "token_address": [wallet],
+                "status": ["ongoing"],
+                "keyword": ["btc"],
+                "sort": ["desc"],
+                "sort_by": ["profit"],
+                "exclude_history": ["true"],
+                "group_by_event": ["true"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "portfolio")
+        self.assertEqual(account_calls[0], (
+            "portfolio",
+            {
+                "wallet": wallet,
+                "limit": 10,
+                "page": 2,
+                "trading_model": "ob",
+                "min_shares": "1.5",
+                "market_slug": "btc-above-100k-2026",
+                "market_id": "501",
+                "network_id": "56",
+                "token_address": wallet,
+                "status": "ongoing",
+                "keyword": "btc",
+                "sort": "desc",
+                "sort_by": "profit",
+                "exclude_history": True,
+                "group_by_event": True,
+            },
+        ))
+
     def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

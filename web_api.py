@@ -3720,6 +3720,32 @@ def market_account_payload(
             "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
             "limit": _clamp_int(_query_value(query_params, "limit", "25"), 25, 1, 100),
         }
+        if normalized_operation in {"portfolio", "market_positions"}:
+            kwargs.update(
+                {
+                    "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10_000),
+                    "trading_model": _query_value(query_params, "trading_model", "all"),
+                    "min_shares": _query_value(query_params, "min_shares"),
+                    "market_slug": _query_value(query_params, "market_slug"),
+                    "market_id": _query_value(query_params, "market_id"),
+                    "network_id": _query_value(query_params, "network_id"),
+                    "token_address": _query_value(query_params, "token_address"),
+                    "status": _query_value(query_params, "status"),
+                    "keyword": _query_value(query_params, "keyword"),
+                    "sort": _query_value(query_params, "sort"),
+                    "sort_by": _query_value(query_params, "sort_by"),
+                    "exclude_history": _query_bool(query_params, "exclude_history", False),
+                    "group_by_event": _query_bool(query_params, "group_by_event", False),
+                }
+            )
+            if normalized_operation == "market_positions":
+                kwargs.update(
+                    {
+                        "state": _query_value(query_params, "state"),
+                        "topics": _query_value(query_params, "topics"),
+                        "market_ids": _query_value(query_params, "market_ids"),
+                    }
+                )
     elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": _query_value(query_params, "status") or "",

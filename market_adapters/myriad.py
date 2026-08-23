@@ -4,6 +4,7 @@ import math
 import hashlib
 import hmac
 import json
+import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -25,7 +26,7 @@ from .types import (
 
 
 DEFAULT_MYRIAD_BASE_URL = "https://api-v2.myriadprotocol.com"
-MYRIAD_ACCOUNT_OPERATIONS = ("account_activity",)
+MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
 MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
     "batch_cancel_orders",
@@ -69,7 +70,11 @@ class MyriadAdapter(MarketAdapter):
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "account_recovery_operations": list(self.account_recovery_operations),
-                "public_account_endpoints": ["GET /users/{address}/events"],
+                "public_account_endpoints": [
+                    "GET /users/{address}/events",
+                    "GET /users/{address}/portfolio",
+                    "GET /users/{address}/markets",
+                ],
                 "order_management_operations": list(self.order_management_operations),
                 "order_management_enabled": self.config_bool("myriad_order_management_enabled", False),
                 "authenticated_order_management_endpoints": [
@@ -468,21 +473,170 @@ class MyriadAdapter(MarketAdapter):
                 + ", ".join(self.account_recovery_operations)
                 + "."
             )
-        self.ensure_capability("copy_trading")
         wallet = require_activity_identity(
             self.market_id,
             kwargs.get("wallet") or kwargs.get("address"),
         )
-        desired = self._bounded_activity_limit(kwargs.get("limit", 25), strict=True)
-        payload = self._fetch_activity_payload(wallet, desired)
+        if normalized == "account_activity":
+            self.ensure_capability("copy_trading")
+            desired = self._bounded_activity_limit(kwargs.get("limit", 25), strict=True)
+            payload = self._fetch_activity_payload(wallet, desired)
+            return {
+                "source": "myriad_user_event_feed",
+                "endpoint": "/users/{address}/events",
+                "wallet": wallet,
+                "limit": desired,
+                "activities": self._normalize_activity_payload(wallet, payload, desired),
+                "raw": payload,
+            }
+
+        if normalized == "portfolio":
+            endpoint = "/users/{address}/portfolio"
+            source = "myriad_user_portfolio"
+            params = self._portfolio_query(kwargs)
+            rows_key = "positions"
+        else:
+            endpoint = "/users/{address}/markets"
+            source = "myriad_user_market_positions"
+            params = self._market_positions_query(kwargs)
+            rows_key = "markets"
+        payload = self._get(endpoint.format(address=wallet), params=params)
         return {
-            "source": "myriad_user_event_feed",
-            "endpoint": "/users/{address}/events",
+            "source": source,
+            "endpoint": endpoint,
             "wallet": wallet,
-            "limit": desired,
-            "activities": self._normalize_activity_payload(wallet, payload, desired),
+            "parameters": params,
+            rows_key: self._list_from_payload(payload, "data", "items", "results", rows_key),
             "raw": payload,
         }
+
+    def _portfolio_query(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+        params = self._account_page_query(kwargs)
+        params["trading_model"] = self._account_trading_model(
+            kwargs.get("trading_model", self.config.get("myriad_account_trading_model", "all"))
+        )
+        self._account_optional_query(params, kwargs)
+        for key, label in (("status", "status"), ("sort_by", "sort_by")):
+            value = kwargs.get(key)
+            if value not in (None, ""):
+                params[key] = self._account_token(value, f"portfolio {label}")
+        sort = str(kwargs.get("sort") or "").strip().lower()
+        if sort:
+            if sort not in {"asc", "desc"}:
+                raise MarketConfigurationError("Myriad portfolio sort must be asc or desc.")
+            params["sort"] = sort
+        params["exclude_history"] = self._account_bool(kwargs.get("exclude_history"), "exclude_history")
+        group_by_event = kwargs.get("group_by_event")
+        if group_by_event not in (None, ""):
+            params["group_by_event"] = self._account_bool(group_by_event, "group_by_event")
+        return params
+
+    def _market_positions_query(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+        params = self._account_page_query(kwargs)
+        params["trading_model"] = self._account_trading_model(
+            kwargs.get("trading_model", self.config.get("myriad_account_trading_model", "all"))
+        )
+        self._account_optional_query(params, kwargs)
+        state = str(kwargs.get("state") or "").strip().lower()
+        if state:
+            params["state"] = self._account_token(state, "market_positions state")
+        for key, label in (("topics", "topics"), ("market_ids", "market_ids")):
+            value = kwargs.get(key)
+            if value not in (None, "", [], ()):
+                params[key] = ",".join(self._account_csv(value, f"market_positions {label}", max_items=50))
+        return params
+
+    def _account_page_query(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+        page = self._bounded_account_int(kwargs.get("page"), "page", 1, 10_000, 1)
+        limit = self._bounded_account_int(kwargs.get("limit"), "limit", 1, 100, 25)
+        return {"page": page, "limit": limit}
+
+    def _account_optional_query(self, params: Dict[str, Any], kwargs: Mapping[str, Any]) -> None:
+        min_shares = kwargs.get("min_shares")
+        if min_shares not in (None, ""):
+            value = self._finite_number(min_shares)
+            if value is None or value < 0:
+                raise MarketConfigurationError("Myriad min_shares must be a finite non-negative number.")
+            params["min_shares"] = value
+        market_slug = kwargs.get("market_slug")
+        if market_slug not in (None, ""):
+            params["market_slug"] = self._account_token(market_slug, "market_slug")
+        market_id = kwargs.get("market_id")
+        if market_id not in (None, ""):
+            params["market_id"] = self._bounded_account_int(market_id, "market_id", 1, 2_147_483_647, None)
+        network_id = kwargs.get("network_id", self.config.get("myriad_network_id"))
+        if network_id not in (None, ""):
+            params["network_id"] = self._bounded_account_int(network_id, "network_id", 1, 2_147_483_647, None)
+        token_address = kwargs.get("token_address")
+        if token_address not in (None, ""):
+            params["token_address"] = require_activity_identity(self.market_id, token_address)
+        keyword = kwargs.get("keyword")
+        if keyword not in (None, ""):
+            params["keyword"] = self._account_text(keyword, "keyword")
+
+    @staticmethod
+    def _bounded_account_int(value: Any, label: str, minimum: int, maximum: int, default: Optional[int]) -> int:
+        if value in (None, ""):
+            if default is None:
+                raise MarketConfigurationError(f"Myriad account {label} is required.")
+            return default
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Myriad account {label} must be an integer.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Myriad account {label} must be an integer.") from exc
+        if parsed < minimum or parsed > maximum:
+            raise MarketConfigurationError(
+                f"Myriad account {label} must be between {minimum} and {maximum}."
+            )
+        return parsed
+
+    @staticmethod
+    def _account_trading_model(value: Any) -> str:
+        normalized = str(value or "all").strip().lower()
+        if normalized not in {"amm", "ob", "all"}:
+            raise MarketConfigurationError("Myriad trading_model must be amm, ob, or all.")
+        return normalized
+
+    @staticmethod
+    def _account_bool(value: Any, label: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value in (None, ""):
+            return False
+        normalized = str(value).strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        raise MarketConfigurationError(f"Myriad account {label} must be a boolean.")
+
+    @classmethod
+    def _account_csv(cls, value: Any, label: str, *, max_items: int) -> List[str]:
+        raw_values = list(value) if isinstance(value, (list, tuple)) else str(value or "").split(",")
+        values = [str(item).strip() for item in raw_values if str(item).strip()]
+        if len(values) > max_items:
+            raise MarketConfigurationError(f"Myriad {label} accepts at most {max_items} values.")
+        if len(set(values)) != len(values):
+            raise MarketConfigurationError(f"Myriad {label} cannot contain duplicates.")
+        for token in values:
+            cls._account_token(token, label)
+        return values
+
+    @staticmethod
+    def _account_token(value: Any, label: str) -> str:
+        token = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", token):
+            raise MarketConfigurationError(f"Myriad account {label} contains an invalid value.")
+        return token
+
+    @staticmethod
+    def _account_text(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text or len(text) > 200 or any(ord(char) < 32 for char in text):
+            raise MarketConfigurationError(f"Myriad account {label} must be 1-200 printable characters.")
+        return text
 
     def _fetch_activity_payload(self, wallet: str, desired: int) -> Any:
         params: Dict[str, Any] = {

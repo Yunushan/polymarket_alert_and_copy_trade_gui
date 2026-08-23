@@ -2532,16 +2532,37 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         adapter = MyriadAdapter({"myriad_network_id": 56})
         events = load_fixture("myriad_markets", "user_events")
+        portfolio = load_fixture("myriad_markets", "portfolio")
+        market_positions = load_fixture("myriad_markets", "market_positions")
         request_limits = []
 
         def fake_get_json(url: str, *, params=None, headers=None):
-            self.assertTrue(url.endswith(f"/users/{wallet}/events"))
-            self.assertEqual(params["page"], 1)
-            request_limits.append(params["limit"])
-            self.assertEqual(params["trading_model"], "all")
-            self.assertEqual(params["only_relevant"], "true")
-            self.assertEqual(params["network_id"], 56)
-            return events
+            if url.endswith(f"/users/{wallet}/events"):
+                self.assertEqual(params["page"], 1)
+                request_limits.append(params["limit"])
+                self.assertEqual(params["trading_model"], "all")
+                self.assertEqual(params["only_relevant"], "true")
+                self.assertEqual(params["network_id"], 56)
+                return events
+            if url.endswith(f"/users/{wallet}/portfolio"):
+                self.assertEqual(params["page"], 2)
+                self.assertEqual(params["limit"], 10)
+                self.assertEqual(params["trading_model"], "all")
+                self.assertEqual(params["min_shares"], 1.5)
+                self.assertEqual(params["market_slug"], "btc-above-100k-2026")
+                self.assertEqual(params["market_id"], 501)
+                self.assertEqual(params["network_id"], 56)
+                self.assertEqual(params["token_address"], wallet)
+                self.assertEqual(params["status"], "ongoing")
+                self.assertEqual(params["exclude_history"], True)
+                self.assertEqual(params["group_by_event"], True)
+                return portfolio
+            if url.endswith(f"/users/{wallet}/markets"):
+                self.assertEqual(params["state"], "open")
+                self.assertEqual(params["topics"], "crypto,macro")
+                self.assertEqual(params["market_ids"], "56:501,56:502")
+                return market_positions
+            self.fail(f"unexpected Myriad account URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
         activities = adapter.list_activity(wallet)
@@ -2559,13 +2580,48 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(sell["price"], 0.39)
 
         recovered = adapter.account_recovery("account_activity", wallet=wallet, limit=10)
-        self.assertEqual(adapter.health_check()["account_recovery_operations"], ["account_activity"])
+        self.assertEqual(
+            adapter.health_check()["account_recovery_operations"],
+            ["account_activity", "portfolio", "market_positions"],
+        )
         self.assertEqual(recovered["source"], "myriad_user_event_feed")
         self.assertEqual(recovered["wallet"], wallet)
         self.assertEqual(recovered["limit"], 10)
         self.assertIs(recovered["raw"], events)
         self.assertEqual(len(recovered["activities"]), 2)
         self.assertEqual(request_limits, [25, 10])
+
+        recovered_portfolio = adapter.account_recovery(
+            "portfolio",
+            wallet=wallet,
+            page=2,
+            limit=10,
+            min_shares="1.5",
+            market_slug="btc-above-100k-2026",
+            market_id="501",
+            token_address=wallet,
+            status="ongoing",
+            exclude_history=True,
+            group_by_event=True,
+        )
+        self.assertEqual(
+            adapter.health_check()["account_recovery_operations"],
+            ["account_activity", "portfolio", "market_positions"],
+        )
+        self.assertEqual(recovered_portfolio["source"], "myriad_user_portfolio")
+        self.assertEqual(recovered_portfolio["positions"][0]["marketId"], 501)
+        self.assertIs(recovered_portfolio["raw"], portfolio)
+
+        recovered_markets = adapter.account_recovery(
+            "market_positions",
+            wallet=wallet,
+            topics="crypto,macro",
+            market_ids="56:501,56:502",
+            state="open",
+        )
+        self.assertEqual(recovered_markets["source"], "myriad_user_market_positions")
+        self.assertEqual(recovered_markets["markets"][0]["state"], "open")
+        self.assertIs(recovered_markets["raw"], market_positions)
 
         result = adapter.copy_trade_from_activity(sell)
         self.assertTrue(result.accepted)
@@ -2578,6 +2634,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             adapter.account_recovery("unsupported", wallet=wallet)
         with self.assertRaises(MarketConfigurationError):
             adapter.account_recovery("account_activity", wallet=wallet, limit=101)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("portfolio", wallet=wallet, trading_model="invalid")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("market_positions", wallet=wallet, topics="bad/topic")
 
     def test_opinion_adapter_requires_key_and_maps_market_data(self) -> None:
         adapter = OpinionAdapter()

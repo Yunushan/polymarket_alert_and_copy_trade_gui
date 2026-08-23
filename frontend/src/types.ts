@@ -194,6 +194,7 @@ export type MarketAccountOperation =
   | "current_bets"
   | "current_offers"
   | "portfolio"
+  | "market_positions"
   | "subaccounts"
   | "spot_balances"
   | "positions_by_address"
