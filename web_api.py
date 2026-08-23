@@ -29,7 +29,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
-from market_adapters import build_default_registry, support_matrix_entry
+from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
 from market_adapters.errors import UnsupportedFeatureError
@@ -856,10 +856,12 @@ def markets_payload(cfg: AppConfig, registry: Optional[AdapterRegistry] = None) 
     registry = registry or build_default_registry()
     markets = [market_health_payload(meta, cfg, registry) for meta in MARKET_CATALOG]
     support_matrix = [market["support"] for market in markets]
+    support_summary = support_matrix_summary(support_matrix)
     return {
         "selected_market_id": cfg.selected_market_id,
         "markets": markets,
         "support_matrix": support_matrix,
+        "support_summary": support_summary,
         "counts": {
             "total": len(markets),
             "enabled": sum(1 for market in markets if market["enabled"]),
@@ -887,6 +889,7 @@ def market_support_payload(
         return {
             "selected_market_id": payload["selected_market_id"],
             "markets": payload["support_matrix"],
+            "support_summary": payload["support_summary"],
             "counts": payload["counts"],
         }
     rows = [row for row in payload["support_matrix"] if row["market_id"] == normalized]
@@ -896,6 +899,7 @@ def market_support_payload(
         "selected_market_id": normalized,
         "market": rows[0],
         "markets": rows,
+        "support_summary": payload["support_summary"],
         "counts": payload["counts"],
     }
 

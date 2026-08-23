@@ -13,7 +13,8 @@ capability as permission to send an order without the adapter's safety gates.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional
+from collections import Counter
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from .base import MarketAdapter
 from .capability_audit import capability_contract_issues
@@ -32,6 +33,39 @@ SUPPORT_OPERATIONS = (
     "live_trading",
     "copy_trading",
 )
+
+
+def support_matrix_summary(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Summarize canonical support states without re-evaluating adapters.
+
+    The support matrix is the source of truth for both runtime/API reporting
+    and the catalog snapshot in ``GOAL.md``.  Keeping this aggregation here
+    prevents each consumer from maintaining a subtly different count and
+    makes stale documentation detectable by the verifier.
+    """
+
+    materialized = list(rows)
+    implementation_counts = Counter(str(row.get("implementation_status") or "unavailable") for row in materialized)
+    operation_counts: Dict[str, Dict[str, int]] = {}
+    for operation in SUPPORT_OPERATIONS:
+        counts = Counter(
+            str((row.get("operations") or {}).get(operation, {}).get("status") or "unavailable")
+            for row in materialized
+        )
+        operation_counts[operation] = {
+            status: int(counts[status])
+            for status in ("supported", "guarded", "unsupported", "blocked", "unavailable")
+            if counts[status]
+        }
+    return {
+        "total_markets": len(materialized),
+        "implementation": {
+            status: int(implementation_counts[status])
+            for status in ("implemented", "verified_blocked", "unavailable")
+            if implementation_counts[status]
+        },
+        "operations": operation_counts,
+    }
 
 
 _CAPABILITY_LABELS = {
@@ -217,4 +251,4 @@ def support_matrix_entry(
     }
 
 
-__all__ = ["SUPPORT_OPERATIONS", "support_matrix_entry"]
+__all__ = ["SUPPORT_OPERATIONS", "support_matrix_entry", "support_matrix_summary"]

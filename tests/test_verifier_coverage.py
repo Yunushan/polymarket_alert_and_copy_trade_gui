@@ -53,3 +53,6 @@ class VerifierCoverageTests(unittest.TestCase):
                 verify.run_adapter_fixture_coverage_check()
 
         self.assertIn("missing mappings: polymarket", str(ctx.exception))
+
+    def test_support_matrix_snapshot_matches_goal_document(self) -> None:
+        verify.run_support_matrix_snapshot_check()

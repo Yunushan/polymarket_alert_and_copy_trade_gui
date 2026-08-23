@@ -565,12 +565,16 @@ class WebApiTests(unittest.TestCase):
         self.assertGreaterEqual(payload["counts"]["total"], 1)
         self.assertGreaterEqual(payload["counts"]["implemented"], 1)
         self.assertEqual(len(payload["support_matrix"]), payload["counts"]["total"])
+        self.assertEqual(payload["support_summary"]["total_markets"], payload["counts"]["total"])
+        self.assertEqual(payload["support_summary"]["implementation"]["implemented"], 57)
+        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 8)
         self.assertEqual(kalshi["support"]["operations"]["paper_trading"]["status"], "supported")
         self.assertEqual(kalshi["support"]["operations"]["live_trading"]["status"], "guarded")
 
         support = market_support_payload(cfg, market_id="kalshi")
         self.assertEqual(support["market"]["market_id"], "kalshi")
         self.assertEqual(support["markets"], [support["market"]])
+        self.assertEqual(support["support_summary"], payload["support_summary"])
 
     def test_market_history_payloads_serialize_normalized_records(self) -> None:
         adapter = MarketAdapter({})

@@ -285,6 +285,69 @@ def run_adapter_catalog_check() -> None:
     print(f"[ok] adapter catalog ({len(MARKET_CATALOG)} markets)")
 
 
+def run_support_matrix_snapshot_check() -> None:
+    """Keep the human catalog snapshot synchronized with the canonical matrix."""
+
+    from market_adapters import (
+        MARKET_CATALOG,
+        VERIFIED_BLOCKERS,
+        build_default_registry,
+        support_matrix_entry,
+        support_matrix_summary,
+    )
+
+    registry = build_default_registry()
+    rows = [
+        support_matrix_entry(
+            registry.get_metadata(market_id),
+            registry.create(market_id),
+            blocker=VERIFIED_BLOCKERS.get(market_id),
+        )
+        for market_id in (market.market_id for market in MARKET_CATALOG)
+    ]
+    summary = support_matrix_summary(rows)
+    goal_text = (ROOT / "GOAL.md").read_text(encoding="utf-8")
+
+    implementation = summary["implementation"]
+    expected_header_lines = (
+        f"- Total markets: {summary['total_markets']}",
+        f"- Implemented adapters: {implementation.get('implemented', 0)}",
+        f"- Verified-blocked adapters: {implementation.get('verified_blocked', 0)}",
+    )
+    missing = [line for line in expected_header_lines if line not in goal_text]
+    if missing:
+        raise SystemExit("GOAL.md catalog snapshot is stale: " + "; ".join(missing))
+
+    labels = {
+        "market_discovery": "Market/event discovery supported",
+        "alerts": "Alerts supported",
+        "price_reading": "Read-only price data supported",
+        "orderbook_reading": "Orderbook reading supported",
+        "trade_history": "Trade history supported",
+        "candle_history": "Candle history supported",
+        "paper_trading": "Paper trading supported",
+        "live_trading": "Live trading supported",
+        "copy_trading": "Copy trading supported",
+    }
+    expected_operation_lines: list[str] = []
+    for operation, label in labels.items():
+        counts = summary["operations"][operation]
+        parts = []
+        if counts.get("supported"):
+            parts.append(f"{counts['supported']} yes")
+        if counts.get("guarded"):
+            parts.append(f"{counts['guarded']} guarded/off by default")
+        if counts.get("unsupported"):
+            parts.append(f"{counts['unsupported']} unsupported")
+        if counts.get("blocked"):
+            parts.append(f"{counts['blocked']} blocked")
+        expected_operation_lines.append(f"- {label}: {', '.join(parts)}")
+    missing = [line for line in expected_operation_lines if line not in goal_text]
+    if missing:
+        raise SystemExit("GOAL.md capability snapshot is stale: " + "; ".join(missing))
+    print("[ok] support matrix snapshot")
+
+
 def run_project_metadata_check() -> None:
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     if data.get("build-system", {}).get("requires") != ["setuptools>=77"]:
@@ -1589,6 +1652,7 @@ def main() -> None:
     run_compile_check()
     run_static_analysis()
     run_adapter_catalog_check()
+    run_support_matrix_snapshot_check()
     run_project_metadata_check()
     run_release_version_check()
     run_config_example_check()
