@@ -120,7 +120,7 @@ Current catalog snapshot:
 - Orderbook reading supported: 26 yes, 42 no
 - Paper trading supported: 53 yes, 15 no
 - Live trading supported: 36 guarded/off by default, 32 no
-- Copy trading supported: 5 yes, 63 no (Polymarket, Opinion Labs, Manifold, Myriad, and Hyperliquid HIP-4 wallet fills; all simulation-first and guarded)
+- Copy trading supported: 6 yes, 62 no (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, and Predict.fun authenticated account activity; all simulation-first and guarded)
 
 Important status rules:
 
