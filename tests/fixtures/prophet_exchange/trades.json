@@ -1,0 +1,30 @@
+{
+  "data": {
+    "next_cursor": "",
+    "trades": [
+      {
+        "id": 7001,
+        "matched_at": "2026-08-10T14:00:01Z",
+        "order_id": "order-filled-1",
+        "price": 2.0,
+        "profit": 0.0,
+        "quantity": 5.0,
+        "status": "filled",
+        "strike": 0.0,
+        "winning_status": "tbd"
+      },
+      {
+        "id": 7002,
+        "matched_at": "2026-08-10T14:00:02Z",
+        "order_id": "order-other-contract",
+        "price": 1.8,
+        "profit": 0.0,
+        "quantity": 3.0,
+        "status": "filled",
+        "strike": 0.0,
+        "winning_status": "tbd"
+      }
+    ]
+  },
+  "last_synced_at": "2026-08-10T14:00:03Z"
+}

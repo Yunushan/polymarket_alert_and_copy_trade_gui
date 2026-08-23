@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -19,12 +20,14 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .types import (
     MarketContract,
+    MarketCandle,
     MarketEvent,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 
 
@@ -37,12 +40,14 @@ PROPHET_EXCHANGE_REFERENCES = (
     "https://docs.prophetx.co/docs/wallets",
     "https://docs.prophetx.co/reference/post_auth-login-2",
     "https://docs.prophetx.co/reference/get_mm-search-markets-2",
+    "https://partner-docs.prophetx.co/swagger/mm/index.html",
 )
 
 PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
 PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
 PROPHET_EXCHANGE_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 PROPHET_EXCHANGE_TRANSACTION_LIMIT_MAX = 500
+PROPHET_EXCHANGE_TRADE_LIMIT_MAX = 100
 PROPHET_EXCHANGE_CANCEL_BATCH_MAX = 100
 
 _NUMERIC_ID_RE = re.compile(r"^[0-9]{1,32}$")
@@ -206,6 +211,162 @@ class ProphetExchangeAdapter(MarketAdapter):
             source="prophetx_affiliate_market_data",
             raw=book.raw,
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Normalize the documented v4 filled-trade feed.
+
+        ProphetX's ``get_trades`` rows carry the matched price, quantity,
+        timestamp, and order id, while the contract identity is returned by
+        the documented ``get_order/{id}`` endpoint.  Each row is therefore
+        enriched through that fixed path and is discarded unless its event,
+        market, outcome, and strike identify the requested contract exactly.
+        The market-maker API exposes a BUY quote shape only, so BUY is the
+        explicit side for this adapter rather than an inferred sell/close.
+        """
+
+        self.ensure_capability("trade_history")
+        event_id, market_id, outcome_id, line_id = self._split_contract_id(contract_id)
+        desired = self._bounded_trade_limit(limit)
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        if after_ts is not None and before_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Prophet Exchange trade history requires before to be at or after after.")
+
+        params: Dict[str, Any] = {"limit": desired}
+        if after_ts is not None:
+            params["from"] = int(after_ts)
+        if before_ts is not None:
+            params["to"] = int(before_ts)
+        payload = self._get("/v4/mm/get_trades", params=params, trading=True)
+        rows = self._rows(payload, "trades")
+        target_selection, _target_market = self._selection_for_contract(
+            event_id, market_id, outcome_id, line_id
+        )
+        target_strike = self._value(target_selection, "strike_id", "strikeId")
+        trades: List[MarketTrade] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            trade_id = self._id(raw, "trade_id", "tradeId")
+            order_id = self._value(raw, "order_id", "orderId")
+            price = self._probability(self._value(raw, "price", "odds", "decimal_price", "decimalPrice"))
+            size = self._positive_float(self._value(raw, "quantity", "size", "stake", "amount"))
+            timestamp = self._timestamp_seconds(
+                self._value(raw, "matched_at", "matchedAt", "timestamp", "created_at", "createdAt")
+            )
+            if not trade_id or order_id in (None, "") or price is None or size is None or timestamp is None:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            order = self._order_for_trade(order_id)
+            if not self._order_matches_contract(
+                order,
+                event_id,
+                market_id,
+                outcome_id,
+                line_id,
+                target_strike,
+            ):
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(event_id, market_id, outcome_id, line_id),
+                    trade_id=trade_id,
+                    side="BUY",
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw={
+                        "source": "prophetx_v4_get_trades",
+                        "side_inferred": "BUY_ONLY_MARKET_MAKER_API",
+                        "trade": dict(raw),
+                        "order": dict(order),
+                    },
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from authenticated matched trades."""
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError(
+                "Prophet Exchange candle history requires to_timestamp to be at or after from_timestamp."
+            )
+        trades = self.list_trades(
+            contract_id,
+            limit=self._bounded_trade_limit(self.config.get("prophet_exchange_candle_trade_limit", 100)),
+            before=end_ts,
+            after=start_ts,
+        )
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in trades:
+            if trade.timestamp is None:
+                continue
+            bucket_timestamp = int(float(trade.timestamp) // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {
+                    "open": trade.price,
+                    "high": trade.price,
+                    "low": trade.price,
+                    "close": trade.price,
+                    "volume": 0.0,
+                    "trade_ids": [],
+                },
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += trade.size
+            bucket["trade_ids"].append(trade.trade_id)
+
+        event_id, market_id, outcome_id, line_id = self._split_contract_id(contract_id)
+        canonical = self._contract_id(event_id, market_id, outcome_id, line_id)
+        normalized_resolution = str(resolution or "").strip().lower()
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "prophetx_v4_authenticated_trades",
+                    "derived": True,
+                    "resolution": normalized_resolution,
+                    "interval_seconds": interval,
+                    "trade_ids": list(bucket["trade_ids"]),
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -381,6 +542,40 @@ class ProphetExchangeAdapter(MarketAdapter):
             headers=self._headers(required=True, trading=trading),
         )
 
+    def _order_for_trade(self, order_id: Any) -> Mapping[str, Any]:
+        safe_order_id = self._safe_reference(order_id, "order")
+        payload = self._get(f"/v4/mm/get_order/{safe_order_id}", trading=True)
+        mapping = self._mapping_payload(payload)
+        order = mapping.get("order") if isinstance(mapping.get("order"), Mapping) else mapping
+        return dict(order) if isinstance(order, Mapping) else {}
+
+    @classmethod
+    def _order_matches_contract(
+        cls,
+        order: Mapping[str, Any],
+        event_id: str,
+        market_id: str,
+        outcome_id: str,
+        line_id: str,
+        target_strike: Any,
+    ) -> bool:
+        row_event = cls._value(order, "sport_event_id", "event_id", "eventId")
+        row_market = cls._value(order, "market_id", "marketId")
+        row_outcome = cls._value(order, "outcome_id", "outcomeId")
+        if str(row_event or "").strip() != event_id:
+            return False
+        if str(row_market or "").strip() != market_id:
+            return False
+        if str(row_outcome or "").strip() != outcome_id:
+            return False
+        row_line = cls._value(order, "line_id", "lineId")
+        if row_line not in (None, "") and str(row_line).strip() != line_id:
+            return False
+        row_strike = cls._value(order, "strike_id", "strikeId")
+        if target_strike not in (None, "") and row_strike not in (None, ""):
+            return str(row_strike).strip() == str(target_strike).strip()
+        return True
+
     def _request_json(
         self,
         method: str,
@@ -474,6 +669,67 @@ class ProphetExchangeAdapter(MarketAdapter):
                 f"Prophet Exchange transaction limit must be between 1 and {PROPHET_EXCHANGE_TRANSACTION_LIMIT_MAX}."
             )
         return limit
+
+    @classmethod
+    def _bounded_trade_limit(cls, value: Any) -> int:
+        limit = cls._non_negative_integer(value, "trade limit")
+        if limit < 1 or limit > PROPHET_EXCHANGE_TRADE_LIMIT_MAX:
+            raise MarketConfigurationError(
+                f"Prophet Exchange trade limit must be between 1 and {PROPHET_EXCHANGE_TRADE_LIMIT_MAX}."
+            )
+        return limit
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if not math.isfinite(number):
+                return None
+            return number / 1000.0 if number > 100_000_000_000 else number
+        text = str(value).strip()
+        try:
+            number = float(text)
+        except ValueError:
+            number = None
+        if number is not None and math.isfinite(number):
+            return number / 1000.0 if number > 100_000_000_000 else number
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    @classmethod
+    def _history_timestamp(cls, value: Any, label: str) -> float:
+        timestamp = cls._timestamp_seconds(value)
+        if timestamp is None or timestamp < 0 or not math.isfinite(timestamp):
+            raise MarketConfigurationError(
+                f"Prophet Exchange {label} timestamp must be a valid non-negative epoch or ISO time."
+            )
+        return timestamp
+
+    @staticmethod
+    def _candle_interval(resolution: Any) -> int:
+        normalized = str(resolution or "").strip().lower()
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14_400,
+            "1d": 86_400,
+            "1w": 604_800,
+        }
+        if normalized not in intervals:
+            raise MarketConfigurationError(
+                "Prophet Exchange candle resolution must be one of: " + ", ".join(intervals)
+            )
+        return intervals[normalized]
 
     def _validate_order(
         self, order: PaperOrderRequest

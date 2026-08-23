@@ -51,6 +51,8 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.event_listing)
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.trade_history)
+        self.assertTrue(adapter.capabilities.candle_history)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
@@ -92,6 +94,61 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
 
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({})
+
+    def test_authenticated_trades_and_derived_candles_use_fixed_v4_contracts(self) -> None:
+        adapter = ProphetExchangeAdapter(
+            {
+                "prophet_exchange_access_token": "fixture-access-token",
+                "prophet_exchange_api_base_url": "https://api.test/partner",
+            }
+        )
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, dict(params or {}), dict(headers or {})))
+            self.assertEqual(headers, {"Authorization": "fixture-access-token"})
+            if url.endswith("/v4/mm/get_trades"):
+                self.assertEqual(params.get("from"), 1786370400)
+                self.assertEqual(params.get("to"), 1786370401)
+                self.assertIn(params.get("limit"), {10, 100})
+                return load_fixture("trades")
+            if url.endswith("/v4/mm/get_order/order-filled-1"):
+                return load_fixture("order_filled")
+            if url.endswith("/v4/mm/get_order/order-other-contract"):
+                return load_fixture("order_other_contract")
+            if url.endswith("/v3/affiliate/get_markets"):
+                self.assertEqual(params, {"event_id": 101})
+                return load_fixture("markets")
+            raise AssertionError(f"unexpected ProphetX history URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        trades = adapter.list_trades(
+            "101:555:1:line_1",
+            limit=10,
+            after=1786370400,
+            before=1786370401,
+        )
+        self.assertEqual([trade.trade_id for trade in trades], ["7001"])
+        self.assertEqual(trades[0].side, "BUY")
+        self.assertAlmostEqual(trades[0].price, 0.5)
+        self.assertEqual(trades[0].size, 5.0)
+        self.assertEqual(trades[0].raw["order"]["strike_id"], "strike_1")
+
+        candles = adapter.list_candles(
+            "101:555:1:line_1",
+            resolution="1h",
+            from_timestamp=1786370400,
+            to_timestamp=1786370401,
+        )
+        self.assertEqual(len(candles), 1)
+        self.assertAlmostEqual(candles[0].open, 0.5)
+        self.assertAlmostEqual(candles[0].close, 0.5)
+        self.assertEqual(candles[0].volume, 5.0)
+        self.assertEqual(candles[0].raw["trade_ids"], ["7001"])
+        self.assertGreaterEqual(len(calls), 6)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("101:555:1:line_1", resolution="2h")
 
     def test_live_order_uses_guarded_trading_api_shape(self) -> None:
         adapter = ProphetExchangeAdapter(

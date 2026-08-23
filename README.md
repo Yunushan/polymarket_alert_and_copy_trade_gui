@@ -629,7 +629,7 @@ scan and produces simulation-first paper copy previews only; it requires a canon
 | Zeitgeist Prediction Pools (`zeitgeist_prediction_pools`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Reality.eth Markets (`reality_eth_markets`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Identity/jurisdiction limited |
 | SportsTrade (`sportstrade`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Prophet Exchange (`prophet_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
+| Prophet Exchange (`prophet_exchange`) | Implemented | Yes | Yes (authenticated filled trades and bounded derived candles) | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Sporttrade Prediction / Exchange Products (`sporttrade_products`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Matchbook (`matchbook`) | Implemented | Yes | Yes | Yes (matched bets plus bounded derived candles, settled/current bets) | Guarded, off by default; cancel/edit offer mutations are separately opt-in | Yes, simulation-first | Required | Exchange account/API keys | Region/KYC limited |
 | Meta Arena (`meta_arena`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |

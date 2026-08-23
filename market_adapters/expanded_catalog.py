@@ -233,6 +233,8 @@ PROPHET_EXCHANGE_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -622,7 +624,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.prophetx.co/docs/integration",
         description=(
             "Official ProphetX Market Data and Trading API adapter for tournament/event/market discovery, "
-            "available-quantity quotes, local paper orders, and guarded authenticated market-maker orders."
+            "available-quantity quotes, authenticated filled trades with derived candles, local paper orders, "
+            "and guarded authenticated market-maker orders."
         ),
         capabilities=PROPHET_EXCHANGE_CAPABILITIES,
     ),
