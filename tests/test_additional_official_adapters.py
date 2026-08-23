@@ -2323,18 +2323,20 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.manage_orders("cancel_order", order_id=1, confirm_order_management="wrong")
 
-    def test_myriad_adapter_maps_questions_outcomes_prices_orderbooks_and_dry_run_quotes(self) -> None:
+    def test_myriad_adapter_maps_official_events_outcomes_prices_orderbooks_and_dry_run_quotes(self) -> None:
         adapter = MyriadAdapter()
-        questions = load_fixture("myriad_markets", "questions")
-        question = load_fixture("myriad_markets", "question")
+        events = load_fixture("myriad_markets", "events")
+        event = load_fixture("myriad_markets", "event")
         market = load_fixture("myriad_markets", "market")
         orderbook = load_fixture("myriad_markets", "orderbook")
 
         def fake_get_json(url: str, *, params=None, headers=None):
-            if url.endswith("/questions"):
-                return questions
-            if url.endswith("/questions/10"):
-                return question
+            if url.endswith("/markets"):
+                self.assertEqual(params["group_by_event"], True)
+                self.assertEqual(params["trading_model"], "all")
+                return events
+            if url.endswith("/events/event-10"):
+                return event
             if url.endswith("/markets/501"):
                 return market
             if url.endswith("/markets/501/orderbook"):
@@ -2345,7 +2347,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
 
         events = adapter.list_events("BTC")
-        contracts = adapter.list_contracts("10")
+        contracts = adapter.list_contracts("event-10")
+        standalone_contracts = adapter.list_contracts("501")
         price = adapter.get_price("501:1")
         book = adapter.get_orderbook("501:1")
         candles = adapter.list_candles(
@@ -2356,8 +2359,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         )
         paper = adapter.place_paper_order(PaperOrderRequest("myriad_markets", "501:1", "BUY", 20))
 
-        self.assertEqual(events[0].event_id, "10")
+        self.assertEqual(events[0].event_id, "event-10")
         self.assertEqual([contract.contract_id for contract in contracts], ["501:1", "501:2"])
+        self.assertEqual([contract.contract_id for contract in standalone_contracts], ["501:1", "501:2"])
         self.assertEqual(price.last, 0.61)
         self.assertEqual([level.price for level in book.bids], [0.62, 0.6])
         self.assertEqual([level.size for level in book.asks], [2.0, 1.0])

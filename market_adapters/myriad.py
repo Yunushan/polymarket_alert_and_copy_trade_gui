@@ -84,6 +84,14 @@ class MyriadAdapter(MarketAdapter):
                     "GET /users/{address}/portfolio",
                     "GET /users/{address}/markets",
                 ],
+                "public_market_endpoints": [
+                    "GET /markets?group_by_event=true",
+                    "GET /markets/{id}",
+                    "GET /events/{id}",
+                    "GET /markets/{id}/events",
+                    "GET /markets/{id}/orderbook",
+                    "GET /markets/{id}/trades",
+                ],
                 "order_management_operations": list(self.order_management_operations),
                 "position_intent_operations": list(self.position_intent_operations),
                 "position_intent_endpoints": [
@@ -113,16 +121,26 @@ class MyriadAdapter(MarketAdapter):
     def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
         self.ensure_capability("event_listing")
         desired = max(1, min(int(limit or 50), 100))
-        params: Dict[str, Any] = {"page": 1, "limit": desired}
+        params: Dict[str, Any] = {
+            "page": 1,
+            "limit": desired,
+            "trading_model": "all",
+            "group_by_event": True,
+        }
         if query:
             params["keyword"] = str(query).strip()
-        payload = self._get("/questions", params=params)
+        payload = self._get("/markets", params=params)
         questions = self._list_from_payload(payload, "data", "questions", "results")
         return [self._event_from_question(question) for question in questions[:desired]]
 
     def list_contracts(self, event_id: str) -> List[MarketContract]:
         self.ensure_capability("event_listing")
-        question = self._get_question(event_id)
+        clean = str(event_id or "").strip()
+        if not clean:
+            raise MarketConfigurationError("Myriad event id cannot be empty.")
+        # Grouped discovery returns event identifiers; standalone grouped rows
+        # are market identifiers and can be resolved through GET /markets/:id.
+        question = self._get_market(clean) if clean.isdigit() else self._get_event(clean)
         return self._contracts_from_question(question)
 
     def get_price(self, contract_id: str) -> PriceSnapshot:
@@ -802,17 +820,22 @@ class MyriadAdapter(MarketAdapter):
             "raw": dict(event),
         }
 
-    def _get_question(self, question_id: str) -> Mapping[str, Any]:
-        clean = str(question_id or "").strip()
+    def _get_event(self, event_id: str) -> Mapping[str, Any]:
+        clean = str(event_id or "").strip()
         if not clean:
-            raise MarketConfigurationError("Myriad question id cannot be empty.")
-        payload = self._get(f"/questions/{clean}")
+            raise MarketConfigurationError("Myriad event id cannot be empty.")
+        payload = self._get(f"/events/{clean}")
         data = payload.get("data") if isinstance(payload, Mapping) else None
         if isinstance(data, Mapping):
             return data
         if isinstance(payload, Mapping):
             return payload
-        raise MarketConfigurationError(f"Myriad question {clean!r} was not found.")
+        raise MarketConfigurationError(f"Myriad event {clean!r} was not found.")
+
+    # Kept as a narrow compatibility alias for callers that used the old
+    # private helper name; new requests always use the official event route.
+    def _get_question(self, question_id: str) -> Mapping[str, Any]:
+        return self._get_event(question_id)
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
         clean = str(market_id or "").strip()
@@ -1434,7 +1457,13 @@ class MyriadAdapter(MarketAdapter):
     @staticmethod
     def _markets_from_question(question: Mapping[str, Any]) -> List[Mapping[str, Any]]:
         markets = question.get("markets")
-        return [market for market in markets if isinstance(market, Mapping)] if isinstance(markets, list) else []
+        if isinstance(markets, list):
+            return [market for market in markets if isinstance(market, Mapping)]
+        # GET /markets?group_by_event=true returns standalone market rows
+        # when no parent event exists; treat the row as its own event wrapper.
+        if question.get("outcomes") and MyriadAdapter._market_id(question):
+            return [question]
+        return []
 
     @staticmethod
     def _outcomes_from_market(market: Mapping[str, Any]) -> List[Mapping[str, Any]]:
