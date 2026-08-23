@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
+from .identity import require_activity_identity
 from .types import (
     MarketContract,
     MarketEvent,
@@ -46,6 +47,7 @@ class ContextV2Adapter(MarketAdapter):
 
     metadata = get_market_metadata("context_v2")
     live_order_sides = ("BUY", "SELL")
+    account_recovery_operations = ("orders",)
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -87,6 +89,61 @@ class ContextV2Adapter(MarketAdapter):
         if needle:
             markets = [market for market in markets if needle in self._search_text(market)]
         return [self._event_from_market(market) for market in markets[:desired]]
+
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return normalized filled Context orders for a wallet.
+
+        The official Context SDK documents ``orders.list`` as a read-only
+        order feed that accepts ``trader``, ``status``, and ``limit`` filters.
+        Only fully filled orders are admitted to the copy workflow.  The
+        upstream order wire format uses 1e6-scaled integer price/size fields;
+        malformed, partial, cross-wallet, or non-binary rows fail closed.
+        """
+
+        self.ensure_capability("copy_trading")
+        wallet = require_activity_identity(self.market_id, wallet_address)
+        desired = self._bounded_limit(limit, maximum=100, label="Context activity limit")
+        payload = self._get(
+            "/orders",
+            params={"trader": wallet, "status": "filled", "limit": desired},
+        )
+        return self._normalize_order_activity(wallet, payload, desired)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read Context's documented, wallet-filtered order history."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "Context account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+        wallet = require_activity_identity(
+            self.market_id,
+            kwargs.get("wallet") or kwargs.get("trader") or kwargs.get("address"),
+        )
+        desired = self._bounded_limit(kwargs.get("limit", 100), maximum=100, label="Context order limit")
+        status = str(kwargs.get("status") or "filled").strip().lower()
+        if status not in {"open", "filled", "cancelled", "expired", "voided"}:
+            raise MarketConfigurationError(
+                "Context order status must be one of open, filled, cancelled, expired, or voided."
+            )
+        params: Dict[str, Any] = {"trader": wallet, "status": status, "limit": desired}
+        market_id = str(kwargs.get("market_id") or kwargs.get("marketId") or "").strip()
+        if market_id:
+            params["marketId"] = self._required_id(market_id, "market")
+        payload = self._get("/orders", params=params)
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "source": "context_orders",
+            "endpoint": "/orders",
+            "wallet": wallet,
+            "parameters": params,
+            "orders": [dict(row) for row in self._rows(payload, "orders", "data")],
+            "raw": payload,
+        }
 
     def list_contracts(self, event_id: str) -> List[MarketContract]:
         self.ensure_capability("event_listing")
@@ -299,6 +356,7 @@ class ContextV2Adapter(MarketAdapter):
                 f"for {float(order.size):.4f} shares"
                 + (f" at probability {float(order.limit_price):.4f}" if order.limit_price is not None else "")
             ),
+            average_price=order.limit_price,
             raw={"request": self._order_payload(order, signed=False), "dry_run": True},
         )
 
@@ -318,11 +376,106 @@ class ContextV2Adapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Context copy trading is unsupported because the official API does not provide account-activity mirroring.",
+        """Build a simulation-first paper order from a filled Context order."""
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Context activity has no market/outcome contract id.")
+        market_id, outcome_index = self._split_contract_id(contract_id)
+        activity_market = str(activity.get("marketId") or activity.get("market_id") or "").strip()
+        if activity_market and not self._identifiers_match(activity_market, market_id):
+            raise MarketConfigurationError("Context activity market id does not match its contract id.")
+        if activity.get("outcomeIndex") not in (None, ""):
+            if self._wire_integer(activity.get("outcomeIndex"), "activity outcomeIndex") != outcome_index:
+                raise MarketConfigurationError("Context activity outcome index does not match its contract id.")
+        status = str(activity.get("status") or "filled").strip().lower()
+        if status != "filled":
+            raise MarketConfigurationError("Context copy activity must have filled status.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in self.live_order_sides:
+            raise MarketConfigurationError("Context activity side must be BUY or SELL.")
+        size = self._positive_number(activity.get("size"))
+        if size is None:
+            raise MarketConfigurationError("Context activity size must be positive and finite.")
+        raw_price = activity.get("price")
+        limit_price = None if raw_price in (None, "") else self._probability(raw_price)
+        if raw_price not in (None, "") and limit_price is None:
+            raise MarketConfigurationError("Context activity reference price must be between 0 and 1.")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=self._contract_id(market_id, outcome_index),
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata={"activity": dict(activity), "source": "context_filled_order_feed"},
+            )
         )
+
+    @classmethod
+    def _normalize_order_activity(
+        cls,
+        wallet: str,
+        payload: Any,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        rows = cls._rows(payload, "orders", "data")
+        normalized: List[Dict[str, Any]] = []
+        for row in rows:
+            status = str(row.get("status") or "").strip().lower()
+            if status != "filled":
+                continue
+            row_wallet = str(row.get("trader") or row.get("wallet") or "").strip()
+            if not row_wallet or not cls._identifiers_match(row_wallet, wallet):
+                continue
+            market_id = str(row.get("marketId") or row.get("market_id") or "").strip()
+            if not market_id:
+                continue
+            try:
+                outcome_index = cls._wire_integer(row.get("outcomeIndex"), "order outcomeIndex")
+                side_index = cls._wire_integer(row.get("side"), "order side")
+            except MarketConfigurationError:
+                continue
+            if outcome_index not in (0, 1) or side_index not in (0, 1):
+                continue
+            price = cls._probability(row.get("price"))
+            size = cls._wire_size(row.get("filledSize"))
+            timestamp = cls._optional_timestamp(
+                row.get("insertedAt") or row.get("filledAt") or row.get("timestamp")
+            )
+            nonce = str(row.get("nonce") or row.get("orderId") or row.get("id") or "").strip()
+            if price is None or size is None or timestamp is None or not nonce:
+                continue
+            canonical = cls._contract_id(market_id, outcome_index)
+            normalized.append(
+                {
+                    "type": "TRADE",
+                    "activityType": "TRADE",
+                    "proxyWallet": wallet,
+                    "wallet": wallet,
+                    "asset": canonical,
+                    "contract_id": canonical,
+                    "marketId": market_id,
+                    "outcomeIndex": outcome_index,
+                    "outcome": "Yes" if outcome_index == 0 else "No",
+                    "side": "BUY" if side_index == 0 else "SELL",
+                    "size": size,
+                    "price": price,
+                    "timestamp": timestamp,
+                    "transactionHash": str(
+                        row.get("transactionHash") or row.get("txHash") or ""
+                    ).strip(),
+                    "activityId": f"context:{market_id}:{nonce}",
+                    "orderId": nonce,
+                    "status": status,
+                    "source": "context_filled_order_feed",
+                    "raw": dict(row),
+                }
+            )
+            if len(normalized) >= limit:
+                break
+        return normalized
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
         payload = self._get(f"/markets/{market_id}")
@@ -375,6 +528,23 @@ class ContextV2Adapter(MarketAdapter):
             "context_api_key", ("CONTEXT_API_KEY",), required=required, label="CONTEXT_API_KEY"
         )
         return {"Authorization": f"Bearer {credential.value}"} if credential else {}
+
+    @staticmethod
+    def _wire_size(value: Any) -> Optional[float]:
+        """Decode Context's 1e6-scaled filled-size field."""
+
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not number.is_finite() or number <= 0:
+            return None
+        normalized = number / Decimal(1_000_000)
+        try:
+            result = float(normalized)
+        except (OverflowError, ValueError):
+            return None
+        return result if math.isfinite(result) and result > 0 else None
 
     def _validate_order(self, order: PaperOrderRequest) -> Tuple[str, int]:
         self.ensure_order_market(order)

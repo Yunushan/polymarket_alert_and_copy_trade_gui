@@ -573,7 +573,7 @@ horizon or fail closed; arbitrary full-history completeness is not claimed.
 | Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
 | Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes (HIP-4 wallet fills/candles) | Yes | Guarded, off by default; signed cancel/cancel-by-cloid/modify/batch-modify/schedule-cancel also guarded | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes (trades/candles/account activity/portfolio/market positions) | Yes | Guarded, off by default; signed cancel/batch-cancel/cancel-all/batch-modify also guarded | Yes, simulation-first | Required | API credentials required | Jurisdiction varies |
-| Context V2 (`context_v2`) | Implemented | Yes | Yes (activity trades/price history) | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
+| Context V2 (`context_v2`) | Implemented | Yes | Yes (activity trades/price history; filled account orders) | Yes | Guarded, off by default | Yes, simulation-first | Required | API credentials required | Region/KYC limited |
 | Frenzy Finance (`frenzy_finance`) | Implemented | Yes | Yes | Yes | No (oracle/wallet gate) | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
 | XO Market (`xo_market`) | Implemented | Yes | Yes (public/account trades, candles, positions, orders, settlement, audit) | Yes | Guarded, off by default (cancel also guarded) | Yes, simulation-first | Required | API credentials required | Region/KYC limited |
 | Manifold Markets (`manifold`) | Implemented | Yes | Yes (probabilities/trades, bounded derived candles, account reads) | Yes | Guarded, off by default (bet placement/cancel) | Yes, simulation-first | Required | Optional API key | Not KYC limited |
@@ -628,6 +628,8 @@ horizon or fail closed; arbitrary full-history completeness is not claimed.
 | Sporttrade Prediction / Exchange Products (`sporttrade_products`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Matchbook (`matchbook`) | Implemented | Yes | Yes | Yes (matched bets plus bounded derived candles, settled/current bets) | Guarded, off by default; cancel/edit offer mutations are separately opt-in | Yes, simulation-first | Required | Exchange account/API keys | Region/KYC limited |
 | Meta Arena (`meta_arena`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
+
+Context V2 copy activity uses the official SDK's read-only `orders.list` filter (`trader`, `status=filled`, bounded `limit`). Only complete binary orders with matching wallet, BUY/SELL direction, 1e6-scaled filled size, probability price, nonce, and timestamp become simulation-first copy previews; no activity poll submits a live order.
 
 ## Verification
 

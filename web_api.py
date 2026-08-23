@@ -505,6 +505,9 @@ def activity_key(item: Mapping[str, Any]) -> str:
     tx = str(item.get("transactionHash") or item.get("transaction_hash") or "").strip().lower()
     if tx:
         return f"tx:{tx}"
+    activity_id = str(item.get("activityId") or item.get("activity_id") or "").strip().lower()
+    if activity_id:
+        return f"activity-id:{activity_id}"
     fields = ("timestamp", "proxyWallet", "asset", "side", "price", "size", "slug", "outcome")
     return "activity:" + "|".join(str(item.get(key) or "").strip().lower() for key in fields)
 

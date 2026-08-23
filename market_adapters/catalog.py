@@ -453,7 +453,10 @@ CONTEXT_V2_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The official SDK documents read-only orders.list filtering by trader and
+    # filled status; the adapter turns complete rows into paper-only copy
+    # previews and never submits a live order from activity polling.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -720,7 +723,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://context.markets",
         description=(
             "Official Context Markets v2 API adapter for market discovery, outcome prices, orderbooks, "
-            "market activity trades, binary price history, paper orders, and guarded wallet-signed order submission."
+            "market activity trades, binary price history, filled wallet-order activity, simulation-first copy "
+            "previews, paper orders, and guarded wallet-signed order submission."
         ),
         capabilities=CONTEXT_V2_CAPABILITIES,
     ),

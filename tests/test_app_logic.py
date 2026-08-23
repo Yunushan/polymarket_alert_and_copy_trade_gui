@@ -654,6 +654,10 @@ class AppLogicTests(unittest.TestCase):
 
     def test_activity_key_prefers_transaction_hash(self) -> None:
         self.assertEqual(activity_key({"transactionHash": "0xABC"}), "tx:0xabc")
+        self.assertEqual(
+            activity_key({"activityId": "Context:0xabc:0x1"}),
+            "activity-id:context:0xabc:0x1",
+        )
         fallback = activity_key({"timestamp": 1, "asset": "token", "side": "BUY"})
         self.assertTrue(fallback.startswith("activity:1|"))
 

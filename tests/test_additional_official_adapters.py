@@ -1887,7 +1887,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         orderbook = load_fixture("context_v2", "orderbook")
         activity = load_fixture("context_v2", "activity")
         prices = load_fixture("context_v2", "prices")
+        orders = load_fixture("context_v2", "orders")
         market_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        wallet = "0x3333333333333333333333333333333333333333"
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers, {"Authorization": "Bearer context-key"})
@@ -1903,6 +1905,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             if url.endswith(f"/markets/{market_id}/prices"):
                 self.assertIn(params["timeframe"], {"1h", "1d", "1M"})
                 return prices
+            if url.endswith("/orders"):
+                self.assertEqual(params["trader"], wallet)
+                self.assertIn(params["status"], {"filled", "open"})
+                return orders
             raise AssertionError(f"unexpected Context URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -1916,6 +1922,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             yes_candles = adapter.list_candles(order.contract_id, resolution="1d")
             no_candles = adapter.list_candles(f"{market_id}:1", resolution="1M")
             paper = adapter.place_paper_order(order)
+            activities = adapter.list_activity(wallet, limit=3)
+            recovered = adapter.account_recovery("orders", wallet=wallet, limit=3)
 
         self.assertEqual(events[0].event_id, market_id)
         self.assertEqual([contract.outcome for contract in contracts], ["Yes", "No"])
@@ -1929,6 +1937,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([round(c.close, 2) for c in no_candles], [0.58, 0.56, 0.53])
         self.assertTrue(paper.accepted)
         self.assertEqual(paper.raw["request"]["marketId"], market_id)
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["asset"], f"{market_id}:0")
+        self.assertEqual(activities[0]["side"], "BUY")
+        self.assertAlmostEqual(activities[0]["size"], 5.0)
+        self.assertAlmostEqual(activities[0]["price"], 0.44)
+        self.assertEqual(activities[0]["activityId"], f"context:{market_id}:0xabc1")
+        self.assertEqual(recovered["orders"][0]["nonce"], "0xabc1")
 
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
@@ -1971,8 +1986,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][3]["Authorization"], "Bearer context-key")
         self.assertEqual(calls[0][2]["outcomeIndex"], 0)
 
-        with self.assertRaises(UnsupportedFeatureError):
-            live_adapter.copy_trade_from_activity({"side": "BUY"})
+        copy_preview = live_adapter.copy_trade_from_activity(activities[0])
+        self.assertTrue(copy_preview.accepted)
+        self.assertAlmostEqual(copy_preview.average_price or 0.0, 0.44)
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.copy_trade_from_activity({"asset": f"{market_id}:0", "side": "BUY", "size": 1, "status": "open"})
 
     def test_dflow_adapter_maps_nested_markets_orderbooks_paper_orders_and_guarded_rpc_submission(self) -> None:
         adapter = DFlowAdapter()

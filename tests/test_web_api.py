@@ -36,6 +36,7 @@ from polymarket.gamma import ProfileResult
 from polymarket.http_client import PolymarketRateLimitError
 from polymarket.mdd import MDD_METHOD_MARK_REPLAY, MDD_METHOD_V2
 from web_api import (
+    activity_key,
     _fetch_polymarket_leaderboard_scan_rows,
     _read_json_body,
     add_wallet_watch,
@@ -369,6 +370,13 @@ class WebApiTests(unittest.TestCase):
             finally:
                 exc.close()
 
+    def test_activity_key_prefers_transaction_and_activity_ids(self) -> None:
+        self.assertEqual(activity_key({"transactionHash": "0xABC"}), "tx:0xabc")
+        self.assertEqual(
+            activity_key({"activity_id": "Context:0xabc:0x1"}),
+            "activity-id:context:0xabc:0x1",
+        )
+
     def test_loopback_detection_and_remote_server_token_gate(self) -> None:
         self.assertTrue(is_loopback_host("127.0.0.1"))
         self.assertTrue(is_loopback_host("::1"))
@@ -567,7 +575,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(len(payload["support_matrix"]), payload["counts"]["total"])
         self.assertEqual(payload["support_summary"]["total_markets"], payload["counts"]["total"])
         self.assertEqual(payload["support_summary"]["implementation"]["implemented"], 57)
-        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 18)
+        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 19)
         self.assertEqual(kalshi["support"]["operations"]["paper_trading"]["status"], "supported")
         self.assertEqual(kalshi["support"]["operations"]["live_trading"]["status"], "guarded")
 

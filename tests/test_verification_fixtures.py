@@ -563,6 +563,7 @@ class VerificationFixtureTests(unittest.TestCase):
         activity = json.loads((FIXTURE_ROOT / "context_v2" / "activity.json").read_text(encoding="utf-8"))
         prices = json.loads((FIXTURE_ROOT / "context_v2" / "prices.json").read_text(encoding="utf-8"))
         order = json.loads((FIXTURE_ROOT / "context_v2" / "order_response.json").read_text(encoding="utf-8"))
+        orders = json.loads((FIXTURE_ROOT / "context_v2" / "orders.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(markets.get("markets"), list)
         self.assertEqual(market["outcomeTokens"][0].startswith("0x"), True)
@@ -571,6 +572,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(activity["activity"][0]["type"], "trade")
         self.assertIsInstance(prices.get("prices"), list)
         self.assertEqual(order.get("success"), True)
+        self.assertIsInstance(orders.get("orders"), list)
+        self.assertEqual(orders["orders"][0]["status"], "filled")
+        self.assertIn("filledSize", orders["orders"][0])
 
     def test_smarkets_fixtures_cover_exchange_hierarchy_quotes_and_order_shapes(self) -> None:
         events = json.loads((FIXTURE_ROOT / "smarkets" / "events.json").read_text(encoding="utf-8"))
