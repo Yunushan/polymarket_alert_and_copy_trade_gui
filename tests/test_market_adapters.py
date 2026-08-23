@@ -154,6 +154,8 @@ VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
 HISTORY_CAPABILITIES = {
     "polymarket": {"trade_history", "candle_history"},
+    "blinq": {"trade_history", "candle_history"},
+    "coinbase_prediction_markets": {"trade_history", "candle_history"},
     "kalshi": {"trade_history", "candle_history"},
     "robinhood_prediction_markets": {"trade_history", "candle_history"},
     "kalshi_via_robinhood": {"trade_history", "candle_history"},

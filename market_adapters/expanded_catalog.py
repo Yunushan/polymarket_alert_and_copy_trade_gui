@@ -259,7 +259,9 @@ SPACE_CAPABILITIES = MarketCapabilities(
     live_trading=False,
     copy_trading=False,
     api_required=True,
-    credentials_required=False,
+    # Price history, discovery, and books remain public, but Polymarket's
+    # documented CLOB trade feed requires explicit readonly/L2 headers.
+    credentials_required=True,
     kyc_required=False,
     region_limited=True,
 )
@@ -270,6 +272,12 @@ BLINQ_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    # Blinq's documented product surface points at Polymarket markets.  The
+    # underlying Polymarket public price-history feed and authenticated
+    # read-only CLOB trade feed are safe to expose through this alias; these
+    # reads do not imply Blinq wallet or leverage access.
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     # Blinq does not publish a leverage or wallet-execution API.  The adapter
@@ -288,6 +296,11 @@ COINBASE_PREDICTION_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    # Coinbase documents Kalshi as the venue behind its prediction-market
+    # flow, so the public Kalshi trade and candlestick feeds are available on
+    # this read-only alias as well.
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -373,7 +386,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://help.coinbase.com/en/coinbase/trading-and-funding/prediction-markets/intro",
         description=(
             "Read-only Coinbase prediction-market alias over the official Kalshi venue market-data API. "
-            "It supports discovery, contracts, prices, orderbooks, alerts, and local paper orders; "
+            "It supports discovery, contracts, prices, orderbooks, public trades, candlesticks, alerts, "
+            "and local paper orders; "
             "Coinbase-specific live and copy-trading APIs are not published."
         ),
         capabilities=COINBASE_PREDICTION_CAPABILITIES,
@@ -552,7 +566,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://blinq.fi",
         description=(
             "Read-only Blinq alias over the official Polymarket market-data APIs for markets surfaced "
-            "by Blinq. Discovery, prices, orderbooks, alerts, and local paper orders are supported; "
+            "by Blinq. Discovery, prices, orderbooks, public trades, price-history points, alerts, and "
+            "local paper orders are supported; "
             "Blinq leverage, deposits, live wallet execution, and copy trading remain unsupported."
         ),
         capabilities=BLINQ_CAPABILITIES,

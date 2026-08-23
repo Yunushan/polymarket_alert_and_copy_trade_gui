@@ -18,7 +18,8 @@ from .polymarket import PolymarketAdapter
 BLINQ_REFERENCES = (
     "https://blinq.fi/",
     "https://predictions.blinq.fi/",
-    "https://docs.polymarket.com/",
+    "https://docs.polymarket.com/api-reference/trade/get-trades",
+    "https://docs.polymarket.com/api-reference/markets/get-prices-history",
 )
 
 
@@ -33,7 +34,11 @@ class BlinqAdapter(PolymarketAdapter):
             {
                 "alias_of": "polymarket",
                 "underlying_market_data_provider": "Polymarket",
-                "supported_public_data_scope": "Polymarket markets surfaced by Blinq",
+                "supported_public_data_scope": (
+                    "Polymarket markets surfaced by Blinq, including public price history and "
+                    "authenticated read-only CLOB trade history"
+                ),
+                "trade_history_requires_l2_auth": True,
                 "references": list(BLINQ_REFERENCES),
                 "blinq_leverage_api_supported": False,
                 "blinq_wallet_api_supported": False,

@@ -25,6 +25,7 @@ class BlinqAdapterTests(unittest.TestCase):
         self.assertFalse(health["blinq_wallet_api_supported"])
         self.assertFalse(health["live_trading_supported"])
         self.assertFalse(health["copy_trading_supported"])
+        self.assertTrue(health["trade_history_requires_l2_auth"])
 
     def test_lists_polymarket_contracts_for_blinq_market(self) -> None:
         adapter = BlinqAdapter()
@@ -54,6 +55,30 @@ class BlinqAdapterTests(unittest.TestCase):
         )
         self.assertTrue(paper.accepted)
         self.assertEqual(paper.filled_size, 0.0)
+
+    def test_exposes_underlying_polymarket_public_history_contracts(self) -> None:
+        adapter = BlinqAdapter()
+        with patch(
+            "market_adapters.polymarket.clob_auth.get_trades",
+            return_value=load_fixture("clob_trades.json"),
+        ), patch(
+            "market_adapters.polymarket.clob_rest.get_price_history",
+            return_value=load_fixture("price_history.json"),
+        ), patch.object(adapter, "_l2_read_headers", return_value={"POLY_ADDRESS": "fixture"}):
+            trades = adapter.list_trades("blinq-token-yes", limit=2)
+            candles = adapter.list_candles(
+                "blinq-token-yes",
+                resolution="1h",
+                from_timestamp=1760000000,
+                to_timestamp=1760000300,
+            )
+
+        self.assertTrue(adapter.capabilities.trade_history)
+        self.assertTrue(adapter.capabilities.candle_history)
+        self.assertEqual([trade.trade_id for trade in trades], ["clob-trade-1", "clob-trade-2"])
+        self.assertEqual([trade.market_id for trade in trades], ["blinq", "blinq"])
+        self.assertEqual([candle.close for candle in candles], [0.45, 0.47])
+        self.assertEqual([candle.market_id for candle in candles], ["blinq", "blinq"])
 
     def test_leverage_live_and_copy_operations_fail_closed(self) -> None:
         adapter = BlinqAdapter()
