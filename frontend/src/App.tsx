@@ -203,6 +203,8 @@ interface MarketReadForm {
   account_with_cash_outs: boolean;
   account_before: string;
   account_after: string;
+  account_before_time: string;
+  account_after_time: string;
   account_sport_id: string;
   account_side: string;
   account_offer_status: string;
@@ -508,6 +510,8 @@ function emptyMarketReadForm(): MarketReadForm {
     account_with_cash_outs: false,
     account_before: "",
     account_after: "",
+    account_before_time: "",
+    account_after_time: "",
     account_sport_id: "",
     account_side: "",
     account_offer_status: "",
@@ -1093,6 +1097,8 @@ export default function App() {
             with_cash_outs: form.account_with_cash_outs,
             before: form.account_before.trim() || undefined,
             after: form.account_after.trim() || undefined,
+            before_time: form.account_before_time.trim() || undefined,
+            after_time: form.account_after_time.trim() || undefined,
             sport_id: form.account_sport_id.trim() || undefined,
             side: form.account_side.trim() || undefined,
             offer_status: form.account_offer_status.trim() || undefined,
@@ -3084,6 +3090,26 @@ function MarketsView({
                     placeholder="Optional venue cursor or timestamp"
                   />
                 </label>
+                {selectedMarket.market_id === "manifold" ? (
+                  <>
+                    <label>
+                      <span>Manifold before timestamp</span>
+                      <input
+                        value={marketReadForm.account_before_time}
+                        onChange={(event) => onMarketReadFormChange({ account_before_time: event.target.value })}
+                        placeholder="Optional Unix seconds"
+                      />
+                    </label>
+                    <label>
+                      <span>Manifold after timestamp</span>
+                      <input
+                        value={marketReadForm.account_after_time}
+                        onChange={(event) => onMarketReadFormChange({ account_after_time: event.target.value })}
+                        placeholder="Optional Unix seconds"
+                      />
+                    </label>
+                  </>
+                ) : null}
               </>
             ) : null}
             {selectedMarket.market_id === "sx_bet" ? (

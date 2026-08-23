@@ -95,6 +95,8 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("account_with_cash_outs", source)
         self.assertIn("account_before", source)
         self.assertIn("account_after", source)
+        self.assertIn("account_before_time", source)
+        self.assertIn("account_after_time", source)
         self.assertIn("force: form.account_historical", source)
         self.assertIn('"order_by_client_id"', type_source)
 
