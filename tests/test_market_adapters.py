@@ -70,6 +70,7 @@ from market_adapters import (
     ZeitgeistAdapter,
     ZeitgeistPredictionPoolsAdapter,
     build_default_registry,
+    account_surface_issues,
     capability_contract_issues,
     create_stub_adapter,
 )
@@ -412,6 +413,23 @@ class AdapterFoundationTests(unittest.TestCase):
         for market_id in MARKET_IDS:
             with self.subTest(market_id=market_id):
                 self.assertEqual(capability_contract_issues(registry.create(market_id)), ())
+
+    def test_declared_authenticated_operations_have_cli_surfaces(self) -> None:
+        import market_sentinel_cli
+
+        registry = build_default_registry()
+        account_operations = frozenset(market_sentinel_cli.MARKET_ACCOUNT_OPERATIONS)
+        order_operations = frozenset(market_sentinel_cli.MARKET_ORDER_MANAGEMENT_OPERATIONS)
+        for market_id in MARKET_IDS:
+            with self.subTest(market_id=market_id):
+                self.assertEqual(
+                    account_surface_issues(
+                        registry.create(market_id),
+                        cli_account_operations=account_operations,
+                        cli_order_operations=order_operations,
+                    ),
+                    (),
+                )
 
     def test_stub_adapters_reject_all_operational_methods(self) -> None:
         registry = build_default_registry()

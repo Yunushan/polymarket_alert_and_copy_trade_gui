@@ -216,7 +216,14 @@ def run_static_analysis() -> None:
 
 
 def run_adapter_catalog_check() -> None:
-    from market_adapters import MARKET_CATALOG, MARKET_IDS, build_default_registry, capability_contract_issues
+    from market_adapters import (
+        MARKET_CATALOG,
+        MARKET_IDS,
+        account_surface_issues,
+        build_default_registry,
+        capability_contract_issues,
+    )
+    import market_sentinel_cli
 
     if len(MARKET_IDS) != len(set(MARKET_IDS)):
         raise SystemExit("Adapter catalog contains duplicate market ids.")
@@ -241,6 +248,19 @@ def run_adapter_catalog_check() -> None:
     ]
     if failures:
         raise SystemExit("Advertised adapter capabilities are not implementation-backed: " + " | ".join(failures))
+    account_failures = [
+        f"{market_id}: {'; '.join(issues)}"
+        for market_id in MARKET_IDS
+        if (
+            issues := account_surface_issues(
+                registry.create(market_id),
+                cli_account_operations=frozenset(market_sentinel_cli.MARKET_ACCOUNT_OPERATIONS),
+                cli_order_operations=frozenset(market_sentinel_cli.MARKET_ORDER_MANAGEMENT_OPERATIONS),
+            )
+        )
+    ]
+    if account_failures:
+        raise SystemExit("Authenticated operation surfaces are incomplete: " + " | ".join(account_failures))
     print(f"[ok] adapter catalog ({len(MARKET_CATALOG)} markets)")
 
 

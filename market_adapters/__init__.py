@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .azuro import AzuroAdapter
 from .base import MarketAdapter
-from .capability_audit import CORE_CAPABILITY_METHODS, capability_contract_issues
+from .capability_audit import CORE_CAPABILITY_METHODS, account_surface_issues, capability_contract_issues
 from .betmgm import BetMGMAdapter
 from .betfair import BetfairExchangeAdapter
 from .blinq import BlinqAdapter
@@ -160,6 +160,7 @@ __all__ = [
     "ZeitgeistPredictionPoolsAdapter",
     "ZeitgeistSdkMarketsAdapter",
     "build_default_registry",
+    "account_surface_issues",
     "create_stub_adapter",
     "create_verified_blocked_adapter",
     "capability_contract_issues",

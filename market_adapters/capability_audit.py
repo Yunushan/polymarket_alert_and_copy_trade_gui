@@ -56,3 +56,32 @@ def capability_contract_issues(adapter: MarketAdapter) -> tuple[str, ...]:
 
     return tuple(issues)
 
+
+def account_surface_issues(
+    adapter: MarketAdapter,
+    *,
+    cli_account_operations: frozenset[str] = frozenset(),
+    cli_order_operations: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Check that declared authenticated operations have concrete surfaces.
+
+    Account and order-management operations are intentionally separate from
+    public capability flags.  They still must have an adapter implementation,
+    and when a CLI operation registry is supplied the operation must be
+    selectable there so CLI/API/React cannot drift apart.
+    """
+
+    issues: list[str] = []
+    if adapter.account_recovery_operations:
+        if type(adapter).account_recovery is MarketAdapter.account_recovery:
+            issues.append("account recovery operations are declared but account_recovery is not implemented")
+        missing = sorted(set(adapter.account_recovery_operations) - cli_account_operations)
+        if missing:
+            issues.append("CLI account operation(s) missing: " + ", ".join(missing))
+    if adapter.order_management_operations:
+        if type(adapter).manage_orders is MarketAdapter.manage_orders:
+            issues.append("order-management operations are declared but manage_orders is not implemented")
+        missing = sorted(set(adapter.order_management_operations) - cli_order_operations)
+        if missing:
+            issues.append("CLI order operation(s) missing: " + ", ".join(missing))
+    return tuple(issues)
