@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -47,6 +47,7 @@ SX_BET_REFERENCES = (
     "https://docs.sx.bet/api-reference/get-order-v3-by-client-id",
     "https://docs.sx.bet/api-reference/get-trades-v3",
     "https://docs.sx.bet/api-reference/get-fills-v3",
+    "https://docs.sx.bet/api-reference/channel-fills-v3",
     "https://docs.sx.bet/api-reference/get-positions-v3",
     "https://docs.sx.bet/api-reference/get-user-balance-v3",
     "https://docs.sx.bet/api-reference/delete-orders-v3",
@@ -94,7 +95,7 @@ class SxBetAdapter(MarketAdapter):
                 "references": list(SX_BET_REFERENCES),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
-                "copy_trading_supported": False,
+                "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "account_recovery_operations": list(self.account_recovery_operations),
                 "order_management_operations": list(self.order_management_operations),
                 "account_api_version": "v3",
@@ -342,7 +343,7 @@ class SxBetAdapter(MarketAdapter):
                 + (f" at limit {order.limit_price:.4f}" if order.limit_price is not None else "")
             ),
             filled_size=0.0,
-            average_price=None,
+            average_price=order.limit_price,
             raw={"request": payload},
         )
 
@@ -626,11 +627,105 @@ class SxBetAdapter(MarketAdapter):
         return ",".join(unique)
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "SX Bet copy trading is unsupported because this adapter has no official account activity mirroring model.",
+        """Build a local copy preview from an authenticated SX Bet fill.
+
+        SX Bet's documented ``/fills-v3`` and account fill channel expose one
+        row per match, including the market, the backed outcome, protocol odds,
+        base-unit stake, fill identity, and lifecycle status.  SX Bet fills are
+        bets on the selected outcome (there is no separate sell-side fill), so
+        the shared order model receives a BUY paper intent only.  This method
+        never submits a live order.
+        """
+
+        self.ensure_capability("copy_trading")
+        raw_fill = activity.get("fill") if isinstance(activity.get("fill"), Mapping) else activity
+
+        contract_id = str(raw_fill.get("asset") or raw_fill.get("contract_id") or "").strip()
+        raw_market_hash = (
+            raw_fill.get("marketHash")
+            if raw_fill.get("marketHash") not in (None, "")
+            else raw_fill.get("market_hash")
         )
+        market_hash = str(raw_market_hash or "").strip()
+
+        backed_outcome = self._boolean(
+            raw_fill.get("isBettingOutcomeOne")
+            if raw_fill.get("isBettingOutcomeOne") not in (None, "")
+            else raw_fill.get("is_betting_outcome_one")
+        )
+        if backed_outcome is None:
+            raise MarketConfigurationError("SX Bet activity requires documented isBettingOutcomeOne direction.")
+        outcome = "ONE" if backed_outcome else "TWO"
+
+        if contract_id:
+            parsed_market_hash, parsed_outcome = self._split_contract_id(contract_id)
+            if market_hash and parsed_market_hash.lower() != market_hash.lower():
+                raise MarketConfigurationError("SX Bet activity marketHash does not match contract_id.")
+            if parsed_outcome != outcome:
+                raise MarketConfigurationError("SX Bet activity backed outcome does not match contract_id.")
+            market_hash = parsed_market_hash
+        elif market_hash:
+            contract_id = self._contract_id(market_hash, outcome)
+        else:
+            raise MarketConfigurationError("SX Bet activity requires contract_id or marketHash.")
+        if not re.fullmatch(r"0x[a-fA-F0-9]{64}", market_hash):
+            raise MarketConfigurationError("SX Bet activity marketHash must be a 32-byte 0x-prefixed hash.")
+
+        is_parlay = self._boolean(raw_fill.get("isParlay"))
+        if is_parlay:
+            raise MarketConfigurationError("SX Bet parlay fills cannot be copied as a single-outcome order.")
+        quarterline = str(raw_fill.get("quarterlineMarketHash") or raw_fill.get("quarterline_market_hash") or "").strip()
+        if quarterline:
+            raise MarketConfigurationError("SX Bet quarter-line fills are not supported by the two-outcome contract model.")
+
+        explicit_side = str(raw_fill.get("side") or "").strip().upper()
+        if explicit_side and explicit_side != "BUY":
+            raise MarketConfigurationError("SX Bet activity side must be BUY because fills represent backed outcomes.")
+
+        raw_size = raw_fill.get("size")
+        if raw_size in (None, ""):
+            raw_size = raw_fill.get("quantity")
+        if raw_size in (None, ""):
+            raw_amount = raw_fill.get("fillAmount")
+            if raw_amount in (None, ""):
+                raw_amount = raw_fill.get("fill_amount")
+            amount = self._safe_float(raw_amount)
+            raw_size = self._from_base_units(amount) if amount is not None else None
+        size = self._safe_float(raw_size)
+        if size is None or not math.isfinite(size) or size <= 0:
+            raise MarketConfigurationError("SX Bet activity fillAmount/size must be positive and finite.")
+
+        raw_price = raw_fill.get("price")
+        if raw_price in (None, ""):
+            raw_price = raw_fill.get("probability")
+        if raw_price in (None, ""):
+            raw_price = raw_fill.get("fillOdds")
+        price = self._scaled_probability(raw_price)
+        if price is None or price <= 0.0 or price >= 1.0:
+            raise MarketConfigurationError("SX Bet activity fill odds must map to a probability in (0, 1).")
+
+        status = str(raw_fill.get("status") or "").strip().upper()
+        if status not in {"MATCHED", "LOCKED", "SETTLED"}:
+            raise MarketConfigurationError("SX Bet activity status must be MATCHED, LOCKED, or SETTLED.")
+        fill_id = str(raw_fill.get("id") or raw_fill.get("matchId") or raw_fill.get("match_id") or "").strip()
+        if not fill_id:
+            raise MarketConfigurationError("SX Bet activity requires a documented fill id.")
+
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=self._contract_id(market_hash, outcome),
+                side="BUY",
+                size=size,
+                limit_price=price,
+                metadata={"activity": dict(raw_fill), "source": "sx_bet_authenticated_fills"},
+            )
+        )
+        preview.raw["source"] = "sx_bet_authenticated_fills"
+        preview.raw["activity"] = dict(raw_fill)
+        preview.raw["fill_id"] = fill_id
+        preview.raw["status"] = status
+        return preview
 
     def websocket_connection_info(
         self,

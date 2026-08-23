@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from market_adapters import PaperOrderRequest, SxBetAdapter
-from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sx_bet"
@@ -59,7 +59,7 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("api.sx.bet", health["api_base_url"])
         self.assertIn("realtime.sx.bet", health["websocket_url"])
 
@@ -250,14 +250,28 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertEqual(body["orders"][0]["totalBetSize"], "2000000")
         self.assertTrue(str(body["orders"][0]["signature"]).startswith("0x"))
 
-    def test_copy_trading_is_clear_unsupported_feature(self) -> None:
+    def test_copy_trading_builds_simulation_preview_from_authenticated_fill(self) -> None:
         adapter = self.make_adapter()
+        fill = load_fixture("fills_v3")["data"]["fills"][0]
 
-        with self.assertRaises(UnsupportedFeatureError) as ctx:
-            adapter.copy_trade_from_activity({})
+        result = adapter.copy_trade_from_activity(fill)
 
-        self.assertEqual(ctx.exception.feature, "copy_trading")
-        self.assertIn("unsupported", str(ctx.exception))
+        self.assertTrue(adapter.capabilities.copy_trading)
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.contract_id, f"{MARKET_HASH}:TWO")
+        self.assertEqual(result.average_price, 0.4)
+        self.assertAlmostEqual(result.filled_size, 0.0)
+        self.assertIn("BUY", result.message)
+        self.assertEqual(result.raw["source"], "sx_bet_authenticated_fills")
+        self.assertEqual(result.raw["fill_id"], fill["id"])
+        self.assertEqual(result.raw["status"], "LOCKED")
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fill, "status": "FAILED"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fill, "fillAmount": "0"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fill, "side": "SELL"})
 
     def test_v3_account_reads_use_allowlisted_paths_and_api_key(self) -> None:
         adapter = SxBetAdapter({"sx_bet_api_key": "fixture-key"})

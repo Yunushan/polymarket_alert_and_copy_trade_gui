@@ -211,7 +211,9 @@ SX_BET_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated v3 fills expose complete backed-outcome executions for
+    # local, simulation-first copy previews; previews never submit live bets.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
