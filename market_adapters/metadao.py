@@ -10,7 +10,15 @@ from urllib.parse import urlsplit
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
-from .types import MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import (
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
+    MarketTrade,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 DEFAULT_METADAO_API_BASE_URL = "https://market-api.metadao.fi"
@@ -19,12 +27,30 @@ METADAO_REFERENCES = (
     "https://api-docs.metadao.fi/api-reference/get-api-tickers",
     "https://api-docs.metadao.fi/configuration",
     "https://github.com/metaDAOproject/futarchy-external-api",
+    "https://github.com/metaDAOproject/futarchy-external-api/blob/89862a22abe1cf11d98804318901941f566d2fca/README.md#dexscreener-adapter-endpoints",
+    "https://github.com/metaDAOproject/futarchy-external-api/blob/89862a22abe1cf11d98804318901941f566d2fca/src/routes/dexscreener.ts",
 )
 
 _SOLANA_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _SOLANA_INDEX = {character: index for index, character in enumerate(_SOLANA_ALPHABET)}
 _SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,64}$")
 _SOLANA_SIGNATURE_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,128}$")
+_MAX_SAFE_INTEGER = 9_007_199_254_740_991
+_MAX_DEXSCREENER_SLOT_SPAN = 500_000
+_MAX_HISTORY_WINDOWS = 50
+_MAX_HISTORY_EVENTS = 250_000
+_DEFAULT_HISTORY_RESPONSE_BYTES = 16 * 1024 * 1024
+_MAX_HISTORY_RESPONSE_BYTES = 64 * 1024 * 1024
+_CANDLE_INTERVALS = {
+    "1m": 60,
+    "5m": 5 * 60,
+    "15m": 15 * 60,
+    "30m": 30 * 60,
+    "1h": 60 * 60,
+    "4h": 4 * 60 * 60,
+    "1d": 24 * 60 * 60,
+    "1w": 7 * 24 * 60 * 60,
+}
 
 
 def _decode_solana_address(value: Any, *, label: str) -> str:
@@ -44,13 +70,34 @@ def _decode_solana_address(value: Any, *, label: str) -> str:
     return text
 
 
+def _decode_solana_signature(value: Any, *, label: str) -> str:
+    text = str(value or "").strip()
+    if not _SOLANA_SIGNATURE_RE.fullmatch(text):
+        raise MarketConfigurationError(f"MetaDAO {label} must be a canonical base58 signature.")
+    number = 0
+    try:
+        for character in text:
+            number = number * 58 + _SOLANA_INDEX[character]
+    except KeyError as exc:
+        raise MarketConfigurationError(
+            f"MetaDAO {label} contains an invalid base58 character."
+        ) from exc
+    raw = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    leading_zeroes = len(text) - len(text.lstrip("1"))
+    if len((b"\x00" * leading_zeroes) + raw) != 64:
+        raise MarketConfigurationError(f"MetaDAO {label} must decode to exactly 64 bytes.")
+    return text
+
+
 class MetaDAOAdapter(MarketAdapter):
     """Public MetaDAO Futarchy DEX ticker adapter.
 
     MetaDAO's current official API is a public CoinGecko-compatible feed of
-    DAO/token pairs. It exposes prices, bid/ask summaries, volume, and
-    liquidity, but not depth or a user-order endpoint. The adapter maps those
-    documented rows to the shared market model and keeps paper orders local.
+    DAO/token pairs. It exposes prices, bid/ask summaries, volume, liquidity,
+    and a slot-bounded public spot-swap tape, but not depth or a user-order
+    endpoint. The adapter maps those documented rows to the shared market
+    model, derives bounded candles from exact swap legs, and keeps paper orders
+    local.
     The documented Futarchy API also exposes a configurable Solana router for
     swaps; live forwarding is limited to an operator-reviewed, externally
     signed transaction targeted at an explicit router allow-list. The adapter
@@ -62,6 +109,12 @@ class MetaDAOAdapter(MarketAdapter):
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
+        (
+            history_slot_window,
+            history_max_windows,
+            history_event_cap,
+            history_response_byte_cap,
+        ) = self._history_scan_limits()
         health.update(
             {
                 "api_base_url": self.api_base_url,
@@ -76,6 +129,13 @@ class MetaDAOAdapter(MarketAdapter):
                 "rpc_configured": bool(self._configured_rpc_url),
                 "allowlisted_router_program_count": len(self.router_program_ids),
                 "wallet_transaction_required": True,
+                "trade_history_source": "public_futarchyamm_spot_swaps",
+                "trade_history_coverage": "bounded_recent",
+                "history_slot_window": history_slot_window,
+                "history_max_windows": history_max_windows,
+                "history_event_cap": history_event_cap,
+                "history_response_byte_cap": history_response_byte_cap,
+                "candle_history_derived": True,
             }
         )
         return health
@@ -147,6 +207,151 @@ class MetaDAOAdapter(MarketAdapter):
             source="metadao_futarchy_dex_api",
             raw={"ticker": dict(row)},
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return recent public FutarchyAMM spot swaps from bounded slot scans.
+
+        MetaDAO's official DexScreener endpoint is slot-ranged rather than
+        cursor- or timestamp-ranged.  Calls therefore walk backwards from the
+        latest indexed slot in finite, non-overlapping windows.  Caller-supplied
+        timestamp bounds fail closed unless the scan proves it reached the
+        requested boundary (or the pair's creation slot).
+        """
+
+        self.ensure_capability("trade_history")
+        desired = self._history_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("MetaDAO trade history requires before to be at or after after.")
+
+        scan = self._scan_public_trades(
+            contract_id,
+            before=before_ts,
+            after=after_ts,
+            desired_limit=desired,
+            # Estimated Solana block timestamps are not guaranteed to be
+            # monotonic. Any lower timestamp bound therefore requires a scan
+            # through the pair's creation slot before completeness is claimed.
+            require_creation_coverage=after_ts is not None,
+            require_desired_after_cutoff=before_ts is not None and after_ts is None,
+        )
+        trades = sorted(scan["trades"], key=self._trade_order_key, reverse=True)
+        return trades[:desired]
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive deterministic bounded OHLCV candles from public spot swaps."""
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        requested_start = (
+            self._history_timestamp(from_timestamp, "from_timestamp")
+            if from_timestamp is not None
+            else None
+        )
+        end_ts = (
+            self._history_timestamp(to_timestamp, "to_timestamp")
+            if to_timestamp is not None
+            else None
+        )
+        if requested_start is not None and end_ts is not None and end_ts < requested_start:
+            raise MarketConfigurationError(
+                "MetaDAO candle history requires to_timestamp to be at or after from_timestamp."
+            )
+
+        # A timestamp inside a candle cannot prove the earlier part of that
+        # bucket. Start at the next boundary so the first emitted bucket is
+        # complete; an already-aligned timestamp remains inclusive.
+        candle_start: Optional[float] = None
+        if requested_start is not None:
+            candle_start = float(math.ceil(requested_start / interval) * interval)
+            if end_ts is not None and candle_start > end_ts:
+                self._validate_history_identity_and_limits(contract_id)
+                return []
+
+        scan = self._scan_public_trades(
+            contract_id,
+            before=end_ts,
+            after=candle_start,
+            desired_limit=None,
+            require_creation_coverage=requested_start is not None or end_ts is not None,
+            require_desired_after_cutoff=False,
+        )
+        chronological = sorted(scan["trades"], key=self._trade_order_key)
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in chronological:
+            if trade.timestamp is None:
+                continue
+            bucket_timestamp = int(float(trade.timestamp) // interval * interval)
+            if candle_start is not None and bucket_timestamp < int(candle_start):
+                continue
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {
+                    "open": trade.price,
+                    "high": trade.price,
+                    "low": trade.price,
+                    "close": trade.price,
+                    "volume": 0.0,
+                    "trade_ids": [],
+                },
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            volume = float(bucket["volume"]) + trade.size
+            if not math.isfinite(volume):
+                raise MarketConfigurationError("MetaDAO derived candle volume must remain finite.")
+            bucket["volume"] = volume
+            bucket["trade_ids"].append(trade.trade_id)
+
+        scan_truncated = not bool(scan["reached_creation"])
+        if buckets and scan_truncated:
+            earliest_bucket = min(buckets)
+            del buckets[earliest_bucket]
+
+        canonical = str(scan["contract_id"])
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "metadao_dexscreener_spot_swaps",
+                    "derived": True,
+                    "resolution": str(resolution).strip().lower(),
+                    "pair_id": scan["pair_id"],
+                    "trade_ids": list(bucket["trade_ids"]),
+                    "scanned_from_slot": scan["scanned_from_slot"],
+                    "scanned_to_slot": scan["scanned_to_slot"],
+                    "reached_creation": bool(scan["reached_creation"]),
+                    "history_coverage": (
+                        "bounded_slot_slice" if scan_truncated else "complete_pair_scan"
+                    ),
+                    "partial": scan_truncated,
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
 
     def get_orderbook(self, contract_id: str):
         raise UnsupportedFeatureError(
@@ -233,8 +438,14 @@ class MetaDAOAdapter(MarketAdapter):
             "sendTransaction",
             [signed, {"encoding": "base64", "skipPreflight": False}],
         )
-        if not isinstance(signature, str) or not _SOLANA_SIGNATURE_RE.fullmatch(signature):
-            raise MarketHTTPError("MetaDAO RPC did not return a valid transaction signature.")
+        try:
+            signature = _decode_solana_signature(
+                signature, label="RPC transaction signature"
+            )
+        except MarketConfigurationError as exc:
+            raise MarketHTTPError(
+                "MetaDAO RPC did not return a valid transaction signature."
+            ) from exc
         return {
             "market_id": self.market_id,
             "contract_id": self._contract_id(ticker_id),
@@ -255,6 +466,378 @@ class MetaDAOAdapter(MarketAdapter):
             "MetaDAO copy trading is unsupported because the official API does not expose account-activity mirroring.",
         )
 
+    def _scan_public_trades(
+        self,
+        contract_id: str,
+        *,
+        before: Optional[float],
+        after: Optional[float],
+        desired_limit: Optional[int],
+        require_creation_coverage: bool,
+        require_desired_after_cutoff: bool,
+    ) -> Dict[str, Any]:
+        ticker_id = self._split_contract_id(contract_id)
+        canonical = self._contract_id(ticker_id)
+        ticker = self._find_ticker(ticker_id)
+        if not ticker:
+            raise MarketConfigurationError(f"MetaDAO ticker {ticker_id!r} was not found.")
+
+        pool_id = _decode_solana_address(
+            self._value(ticker, "pool_id", "poolId"), label="history pool id"
+        )
+        base_mint = _decode_solana_address(
+            self._value(ticker, "base_currency", "baseCurrency"), label="history base mint"
+        )
+        quote_mint = _decode_solana_address(
+            self._value(ticker, "target_currency", "targetCurrency"), label="history quote mint"
+        )
+        if ticker_id != f"{base_mint}_{quote_mint}":
+            raise MarketConfigurationError(
+                "MetaDAO ticker identity does not match its documented base/quote mint pair."
+            )
+
+        pair_payload = self.runtime.get_json(
+            self._url("/dexscreener/pair"), params={"id": pool_id}, headers={}
+        )
+        if not isinstance(pair_payload, Mapping) or not isinstance(pair_payload.get("pair"), Mapping):
+            raise MarketConfigurationError("MetaDAO /dexscreener/pair returned an unsupported payload shape.")
+        pair = pair_payload["pair"]
+        if str(pair.get("id") or "").strip() != pool_id:
+            raise MarketConfigurationError("MetaDAO history pair id does not match the ticker pool id.")
+        if str(pair.get("asset0Id") or "").strip() != base_mint:
+            raise MarketConfigurationError("MetaDAO history pair asset0 does not match the ticker base mint.")
+        if str(pair.get("asset1Id") or "").strip() != quote_mint:
+            raise MarketConfigurationError("MetaDAO history pair asset1 does not match the ticker quote mint.")
+        # Do not use ``dexKey`` as an identity field. MetaDAO's pinned route
+        # implementation currently emits ``futarchyAMM`` while its official
+        # README example uses ``futarchy``. The immutable pool/base/quote keys
+        # above provide the exact attribution needed by this adapter.
+        created_slot = self._positive_safe_integer(
+            pair.get("createdAtBlockNumber"), "pair createdAtBlockNumber"
+        )
+        created_timestamp = self._positive_safe_integer(
+            pair.get("createdAtBlockTimestamp"), "pair createdAtBlockTimestamp"
+        )
+        created_transaction_id = _decode_solana_signature(
+            pair.get("createdAtTxnId"), label="pair createdAtTxnId"
+        )
+
+        latest_payload = self.runtime.get_json(
+            self._url("/dexscreener/latest-block"), params=None, headers={}
+        )
+        if not isinstance(latest_payload, Mapping) or not isinstance(latest_payload.get("block"), Mapping):
+            raise MarketConfigurationError(
+                "MetaDAO /dexscreener/latest-block returned an unsupported payload shape."
+            )
+        latest = latest_payload["block"]
+        latest_slot = self._positive_safe_integer(latest.get("blockNumber"), "latest blockNumber")
+        self._positive_safe_integer(
+            latest.get("blockTimestamp"), "latest blockTimestamp"
+        )
+        if latest_slot < created_slot:
+            raise MarketConfigurationError("MetaDAO latest indexed block predates the selected pair.")
+
+        slot_span, max_windows, event_cap, response_byte_cap = self._history_scan_limits()
+
+        trades_by_id: Dict[str, MarketTrade] = {}
+        seen_trade_ids: set[str] = set()
+        raw_event_count = 0
+        reached_creation = False
+        saw_creation_event = False
+        scanned_from_slot = latest_slot
+        scanned_to_slot = latest_slot
+        to_slot = latest_slot
+
+        for _window_index in range(max_windows):
+            from_slot = max(created_slot, to_slot - slot_span)
+            payload = self.runtime.get_json(
+                self._url("/dexscreener/events"),
+                params={"fromBlock": from_slot, "toBlock": to_slot},
+                headers={},
+                max_response_bytes=response_byte_cap,
+            )
+            if not isinstance(payload, Mapping) or not isinstance(payload.get("events"), list):
+                raise MarketConfigurationError(
+                    "MetaDAO /dexscreener/events returned an unsupported payload shape."
+                )
+            rows = payload["events"]
+            raw_event_count += len(rows)
+            if raw_event_count > event_cap:
+                raise MarketConfigurationError(
+                    "MetaDAO history event cap was exceeded before the requested range was complete."
+                )
+
+            scanned_from_slot = min(scanned_from_slot, from_slot)
+            for raw_event in rows:
+                if not isinstance(raw_event, Mapping):
+                    continue
+                if str(raw_event.get("pairId") or "").strip() != pool_id:
+                    # This endpoint is global. Rows for other pairs neither
+                    # contribute history nor prove timestamp coverage, and
+                    # their schema is outside this pair's trust boundary.
+                    continue
+                trade = self._trade_from_event(
+                    raw_event,
+                    contract_id=canonical,
+                    pair_id=pool_id,
+                    ticker=ticker,
+                    pair=pair,
+                    from_slot=from_slot,
+                    to_slot=to_slot,
+                )
+                if int(trade.raw["block_number"]) == created_slot:
+                    event_transaction_id = str(raw_event.get("txnId") or "").strip()
+                    if event_transaction_id == created_transaction_id:
+                        if int(float(trade.timestamp or 0)) != created_timestamp:
+                            raise MarketConfigurationError(
+                                "MetaDAO pair creation event timestamp does not match pair metadata."
+                            )
+                        saw_creation_event = True
+                if trade.trade_id in seen_trade_ids:
+                    raise MarketConfigurationError(
+                        "MetaDAO history returned a duplicate swap event identifier."
+                    )
+                seen_trade_ids.add(trade.trade_id)
+                if before is not None and (trade.timestamp is None or trade.timestamp > before):
+                    continue
+                if after is not None and (trade.timestamp is None or trade.timestamp < after):
+                    continue
+                trades_by_id[trade.trade_id] = trade
+
+            reached_creation = from_slot == created_slot
+            if reached_creation:
+                break
+            if not require_creation_coverage and desired_limit is not None:
+                if len(trades_by_id) >= desired_limit:
+                    break
+            to_slot = from_slot - 1
+
+        if require_creation_coverage and not reached_creation:
+            raise MarketConfigurationError(
+                "MetaDAO bounded slot scan could not prove timestamp coverage through pair creation."
+            )
+        if reached_creation and not saw_creation_event:
+            raise MarketConfigurationError(
+                "MetaDAO creation-slot history did not contain the pair's declared first swap."
+            )
+        if (
+            require_desired_after_cutoff
+            and desired_limit is not None
+            and len(trades_by_id) < desired_limit
+            and not reached_creation
+        ):
+            raise MarketConfigurationError(
+                "MetaDAO bounded slot scan could not prove the requested number of trades before the cutoff."
+            )
+
+        return {
+            "contract_id": canonical,
+            "pair_id": pool_id,
+            "trades": list(trades_by_id.values()),
+            "reached_creation": reached_creation,
+            "scanned_from_slot": scanned_from_slot,
+            "scanned_to_slot": scanned_to_slot,
+        }
+
+    def _trade_from_event(
+        self,
+        event: Mapping[str, Any],
+        *,
+        contract_id: str,
+        pair_id: str,
+        ticker: Mapping[str, Any],
+        pair: Mapping[str, Any],
+        from_slot: int,
+        to_slot: int,
+    ) -> MarketTrade:
+        if str(event.get("eventType") or "").strip().lower() != "swap":
+            raise MarketConfigurationError("MetaDAO history event type must be swap.")
+        if str(event.get("pairId") or "").strip() != pair_id:
+            raise MarketConfigurationError("MetaDAO history event targets a different pair.")
+
+        buy_keys_present = event.get("asset1In") not in (None, "") or event.get("asset0Out") not in (None, "")
+        sell_keys_present = event.get("asset0In") not in (None, "") or event.get("asset1Out") not in (None, "")
+        if buy_keys_present == sell_keys_present:
+            raise MarketConfigurationError("MetaDAO history event must contain exactly one BUY or SELL leg pair.")
+        if buy_keys_present:
+            quote_amount = self._strict_positive_number(event.get("asset1In"), "event asset1In")
+            size = self._strict_positive_number(event.get("asset0Out"), "event asset0Out")
+            side = "BUY"
+        else:
+            size = self._strict_positive_number(event.get("asset0In"), "event asset0In")
+            quote_amount = self._strict_positive_number(event.get("asset1Out"), "event asset1Out")
+            side = "SELL"
+
+        price = self._strict_positive_number(event.get("priceNative"), "event priceNative")
+        calculated_price = quote_amount / size
+        if not math.isclose(price, calculated_price, rel_tol=1e-9, abs_tol=1e-12):
+            raise MarketConfigurationError("MetaDAO history event priceNative does not match its swap legs.")
+
+        block = event.get("block")
+        if not isinstance(block, Mapping):
+            raise MarketConfigurationError("MetaDAO history event block must be an object.")
+        block_number = self._nonnegative_integer(block.get("blockNumber"), "event blockNumber")
+        if block_number < from_slot or block_number > to_slot:
+            raise MarketConfigurationError(
+                "MetaDAO history event blockNumber falls outside its requested slot window."
+            )
+        timestamp = float(
+            self._positive_safe_integer(block.get("blockTimestamp"), "event blockTimestamp")
+        )
+        transaction_index = self._nonnegative_integer(event.get("txnIndex"), "event txnIndex")
+        event_index = self._nonnegative_integer(event.get("eventIndex"), "event eventIndex")
+        transaction_id = _decode_solana_signature(
+            event.get("txnId"), label="history event txnId"
+        )
+        maker = _decode_solana_address(event.get("maker"), label="history event maker")
+        trade_id = f"{transaction_id}:{transaction_index}:{event_index}"
+        return MarketTrade(
+            market_id=self.market_id,
+            contract_id=contract_id,
+            trade_id=trade_id,
+            side=side,
+            price=price,
+            size=size,
+            timestamp=timestamp,
+            raw={
+                "source": "metadao_dexscreener_spot_swaps",
+                "event": dict(event),
+                "ticker": dict(ticker),
+                "pair": dict(pair),
+                "pair_id": pair_id,
+                "block_number": block_number,
+                "transaction_index": transaction_index,
+                "event_index": event_index,
+                "maker": maker,
+                "quote_size": quote_amount,
+            },
+        )
+
+    @staticmethod
+    def _trade_order_key(trade: MarketTrade) -> tuple[int, int, int, str, float]:
+        raw = trade.raw if isinstance(trade.raw, Mapping) else {}
+        return (
+            int(raw.get("block_number") or 0),
+            int(raw.get("transaction_index") or 0),
+            int(raw.get("event_index") or 0),
+            trade.trade_id,
+            float(trade.timestamp if trade.timestamp is not None else -1),
+        )
+
+    @staticmethod
+    def _history_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("MetaDAO trade history limit must be an integer.")
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketConfigurationError("MetaDAO trade history limit must be an integer.") from exc
+        if number < 1 or number > 500 or str(number) != str(value).strip():
+            raise MarketConfigurationError("MetaDAO trade history limit must be between 1 and 500.")
+        return number
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"MetaDAO {label} must be a non-negative Unix timestamp.")
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketConfigurationError(f"MetaDAO {label} must be a non-negative Unix timestamp.") from exc
+        if not math.isfinite(number) or number < 0:
+            raise MarketConfigurationError(f"MetaDAO {label} must be a non-negative Unix timestamp.")
+        return number
+
+    @staticmethod
+    def _nonnegative_integer(value: Any, label: str) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"MetaDAO {label} must be a non-negative safe integer.")
+        if isinstance(value, int):
+            number = value
+        elif isinstance(value, float):
+            if not math.isfinite(value) or not value.is_integer():
+                raise MarketConfigurationError(
+                    f"MetaDAO {label} must be a non-negative safe integer."
+                )
+            number = int(value)
+        else:
+            raise MarketConfigurationError(f"MetaDAO {label} must be a non-negative safe integer.")
+        if number < 0 or number > _MAX_SAFE_INTEGER:
+            raise MarketConfigurationError(f"MetaDAO {label} must be a non-negative safe integer.")
+        return number
+
+    @staticmethod
+    def _strict_positive_number(value: Any, label: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise MarketConfigurationError(f"MetaDAO {label} must be positive and finite.")
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise MarketConfigurationError(
+                f"MetaDAO {label} must be positive and finite."
+            ) from exc
+        if not math.isfinite(number) or number <= 0:
+            raise MarketConfigurationError(f"MetaDAO {label} must be positive and finite.")
+        return number
+
+    @classmethod
+    def _positive_safe_integer(cls, value: Any, label: str) -> int:
+        number = cls._nonnegative_integer(value, label)
+        if number == 0:
+            raise MarketConfigurationError(f"MetaDAO {label} must be a positive safe integer.")
+        return number
+
+    def _bounded_int_config(self, key: str, default: int, *, minimum: int, maximum: int) -> int:
+        value = self.config.get(key, default)
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"MetaDAO config {key} must be an integer.")
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketConfigurationError(f"MetaDAO config {key} must be an integer.") from exc
+        if str(number) != str(value).strip() or number < minimum or number > maximum:
+            raise MarketConfigurationError(
+                f"MetaDAO config {key} must be between {minimum} and {maximum}."
+            )
+        return number
+
+    def _history_scan_limits(self) -> tuple[int, int, int, int]:
+        return (
+            self._bounded_int_config(
+                "metadao_history_slot_window",
+                500_000,
+                minimum=1,
+                maximum=_MAX_DEXSCREENER_SLOT_SPAN,
+            ),
+            self._bounded_int_config(
+                "metadao_history_max_windows",
+                3,
+                minimum=1,
+                maximum=_MAX_HISTORY_WINDOWS,
+            ),
+            self._bounded_int_config(
+                "metadao_history_event_cap",
+                50_000,
+                minimum=1,
+                maximum=_MAX_HISTORY_EVENTS,
+            ),
+            self._bounded_int_config(
+                "metadao_history_response_byte_cap",
+                _DEFAULT_HISTORY_RESPONSE_BYTES,
+                minimum=1_024,
+                maximum=_MAX_HISTORY_RESPONSE_BYTES,
+            ),
+        )
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        key = str(resolution or "").strip().lower()
+        interval = _CANDLE_INTERVALS.get(key)
+        if interval is None:
+            supported = ", ".join(_CANDLE_INTERVALS)
+            raise MarketConfigurationError(f"MetaDAO candle resolution must be one of: {supported}.")
+        return interval
+
     def _tickers(self) -> List[Mapping[str, Any]]:
         payload = self.runtime.get_json(self._url("/api/tickers"), params=None, headers={})
         if isinstance(payload, list):
@@ -267,10 +850,18 @@ class MetaDAOAdapter(MarketAdapter):
         raise MarketConfigurationError("MetaDAO /api/tickers returned an unsupported payload shape.")
 
     def _find_ticker(self, ticker_id: str) -> Mapping[str, Any]:
-        for row in self._tickers():
-            if self._ticker_id(row) == ticker_id:
-                return row
-        return {}
+        matches = [row for row in self._tickers() if self._ticker_id(row) == ticker_id]
+        if len(matches) > 1:
+            raise MarketConfigurationError(
+                f"MetaDAO ticker {ticker_id!r} is ambiguous across multiple pools."
+            )
+        return matches[0] if matches else {}
+
+    def _validate_history_identity_and_limits(self, contract_id: str) -> None:
+        self._history_scan_limits()
+        ticker_id = self._split_contract_id(contract_id)
+        if not self._find_ticker(ticker_id):
+            raise MarketConfigurationError(f"MetaDAO ticker {ticker_id!r} was not found.")
 
     def _event_from_row(self, row: Mapping[str, Any], ticker_id: str) -> MarketEvent:
         return MarketEvent(
@@ -307,7 +898,7 @@ class MetaDAOAdapter(MarketAdapter):
             raise MarketConfigurationError("MetaDAO order side must be BUY or SELL.")
         try:
             size = float(order.size)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise MarketConfigurationError("MetaDAO order size must be numeric.") from exc
         if not math.isfinite(size) or size <= 0:
             raise MarketConfigurationError("MetaDAO order size must be positive and finite.")
@@ -336,11 +927,11 @@ class MetaDAOAdapter(MarketAdapter):
 
     @staticmethod
     def _positive_number(value: Any) -> Optional[float]:
-        if value in (None, ""):
+        if value in (None, "") or isinstance(value, bool):
             return None
         try:
             number = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
         return number if math.isfinite(number) and number > 0 else None
 
@@ -353,7 +944,12 @@ class MetaDAOAdapter(MarketAdapter):
         return None
 
     def _url(self, path: str) -> str:
-        if path != "/api/tickers":
+        if path not in {
+            "/api/tickers",
+            "/dexscreener/latest-block",
+            "/dexscreener/pair",
+            "/dexscreener/events",
+        }:
             raise MarketConfigurationError("MetaDAO request path is not an approved official endpoint.")
         return f"{self.api_base_url}{path}"
 

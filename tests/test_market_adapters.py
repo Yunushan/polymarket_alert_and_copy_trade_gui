@@ -191,6 +191,7 @@ HISTORY_CAPABILITIES = {
     "omen": {"trade_history", "candle_history"},
     "gnosis_prediction_markets": {"trade_history", "candle_history"},
     "seer": {"candle_history"},
+    "metadao": {"trade_history", "candle_history"},
 }
 
 

@@ -1,0 +1,117 @@
+{
+  "events": [
+    {
+      "block": {
+        "blockNumber": 312000010,
+        "blockTimestamp": 1733040060
+      },
+      "eventType": "swap",
+      "txnId": "1111111111111111111111111111111111111111111111111111111111111112",
+      "txnIndex": 0,
+      "eventIndex": 0,
+      "maker": "11111111111111111111111111111111",
+      "pairId": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+      "asset1In": 40.0,
+      "asset0Out": 500.0,
+      "priceNative": 0.08,
+      "reserves": {
+        "asset0": 1000000.0,
+        "asset1": 80000.0
+      }
+    },
+    {
+      "block": {
+        "blockNumber": 312000020,
+        "blockTimestamp": 1733040120
+      },
+      "eventType": "swap",
+      "txnId": "1111111111111111111111111111111111111111111111111111111111111113",
+      "txnIndex": 0,
+      "eventIndex": 0,
+      "maker": "11111111111111111111111111111111",
+      "pairId": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+      "asset0In": 300.0,
+      "asset1Out": 24.6,
+      "priceNative": 0.082,
+      "reserves": {
+        "asset0": 1000300.0,
+        "asset1": 79975.4
+      }
+    },
+    {
+      "block": {
+        "blockNumber": 312000030,
+        "blockTimestamp": 1733043540
+      },
+      "eventType": "swap",
+      "txnId": "1111111111111111111111111111111111111111111111111111111111111114",
+      "txnIndex": 0,
+      "eventIndex": 0,
+      "maker": "11111111111111111111111111111111",
+      "pairId": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+      "asset1In": 19.75,
+      "asset0Out": 250.0,
+      "priceNative": 0.079
+    },
+    {
+      "block": {
+        "blockNumber": 312000040,
+        "blockTimestamp": 1733043660
+      },
+      "eventType": "swap",
+      "txnId": "1111111111111111111111111111111111111111111111111111111111111115",
+      "txnIndex": 0,
+      "eventIndex": 0,
+      "maker": "11111111111111111111111111111111",
+      "pairId": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+      "asset1In": 8.5,
+      "asset0Out": 100.0,
+      "priceNative": 0.085
+    },
+    {
+      "block": {
+        "blockNumber": 312000050,
+        "blockTimestamp": 1733043720
+      },
+      "eventType": "swap",
+      "txnId": "1111111111111111111111111111111111111111111111111111111111111116",
+      "txnIndex": 0,
+      "eventIndex": 0,
+      "maker": "11111111111111111111111111111111",
+      "pairId": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+      "asset0In": 200.0,
+      "asset1Out": 16.2,
+      "priceNative": 0.081
+    },
+    {
+      "block": {
+        "blockNumber": 312000050,
+        "blockTimestamp": 1733043720
+      },
+      "eventType": "swap",
+      "txnId": "1111111111111111111111111111111111111111111111111111111111111117",
+      "txnIndex": 1,
+      "eventIndex": 0,
+      "maker": "11111111111111111111111111111111",
+      "pairId": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+      "asset1In": 8.3,
+      "asset0Out": 100.0,
+      "priceNative": 0.083
+    },
+    {
+      "block": {
+        "blockNumber": 312000060,
+        "blockTimestamp": 1733043780
+      },
+      "eventType": "swap",
+      "txnId": "1111111111111111111111111111111111111111111111111111111111111118",
+      "txnIndex": 0,
+      "eventIndex": 0,
+      "maker": "11111111111111111111111111111111",
+      "pairId": "11111111111111111111111111111111",
+      "asset1In": 999.0,
+      "asset0Out": 1.0,
+      "priceNative": 999.0
+    }
+  ]
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import base64
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -626,12 +627,47 @@ class VerificationFixtureTests(unittest.TestCase):
 
     def test_metadao_fixtures_cover_official_ticker_shapes(self) -> None:
         tickers = json.loads((FIXTURE_ROOT / "metadao" / "tickers.json").read_text(encoding="utf-8"))
+        latest = json.loads((FIXTURE_ROOT / "metadao" / "latest_block.json").read_text(encoding="utf-8"))
+        pair = json.loads((FIXTURE_ROOT / "metadao" / "pair.json").read_text(encoding="utf-8"))
+        events = json.loads((FIXTURE_ROOT / "metadao" / "events.json").read_text(encoding="utf-8"))
 
-        self.assertIsInstance(tickers.get("tickers"), list)
-        self.assertIn("ticker_id", tickers["tickers"][0])
-        self.assertIn("base_currency", tickers["tickers"][0])
-        self.assertIn("last_price", tickers["tickers"][0])
-        self.assertIn("liquidity_in_usd", tickers["tickers"][0])
+        self.assertIsInstance(tickers, list)
+        ticker = tickers[0]
+        self.assertIn("ticker_id", ticker)
+        self.assertIn("base_currency", ticker)
+        self.assertIn("last_price", ticker)
+        self.assertIn("liquidity_in_usd", ticker)
+
+        self.assertGreater(latest["block"]["blockNumber"], 0)
+        self.assertGreater(latest["block"]["blockTimestamp"], 0)
+        self.assertEqual(pair["pair"]["id"], ticker["pool_id"])
+        self.assertEqual(pair["pair"]["asset0Id"], ticker["base_currency"])
+        self.assertEqual(pair["pair"]["asset1Id"], ticker["target_currency"])
+        self.assertEqual(
+            ticker["startDate"],
+            datetime.fromtimestamp(
+                pair["pair"]["createdAtBlockTimestamp"], tz=timezone.utc
+            ).date().isoformat(),
+        )
+        self.assertEqual(pair["pair"]["dexKey"], "futarchyAMM")
+        self.assertLessEqual(pair["pair"]["createdAtBlockNumber"], latest["block"]["blockNumber"])
+
+        rows = events.get("events")
+        self.assertIsInstance(rows, list)
+        self.assertGreaterEqual(len(rows), 3)
+        matching = [row for row in rows if row.get("pairId") == ticker["pool_id"]]
+        self.assertGreaterEqual(len(matching), 2)
+        self.assertTrue(any("asset1In" in row and "asset0Out" in row for row in matching))
+        self.assertTrue(any("asset0In" in row and "asset1Out" in row for row in matching))
+        base58 = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+        for row in matching:
+            self.assertEqual(row.get("eventType"), "swap")
+            self.assertGreaterEqual(len(row.get("txnId", "")), 64)
+            self.assertTrue(set(row["txnId"]) <= base58)
+            self.assertIsInstance(row.get("txnIndex"), int)
+            self.assertIsInstance(row.get("eventIndex"), int)
+            self.assertGreaterEqual(row["block"]["blockNumber"], pair["pair"]["createdAtBlockNumber"])
+            self.assertLessEqual(row["block"]["blockNumber"], latest["block"]["blockNumber"])
 
     def test_seer_fixtures_cover_official_search_market_and_chart_shapes(self) -> None:
         search = json.loads((FIXTURE_ROOT / "seer" / "markets_search.json").read_text(encoding="utf-8"))

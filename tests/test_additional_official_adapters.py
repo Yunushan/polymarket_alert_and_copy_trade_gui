@@ -1089,7 +1089,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
     def test_metadao_adapter_maps_official_tickers_prices_and_paper_orders(self) -> None:
         adapter = MetaDAOAdapter()
         tickers = load_fixture("metadao", "tickers")
-        ticker_id = tickers["tickers"][0]["ticker_id"]
+        ticker_id = tickers[0]["ticker_id"]
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(url, "https://market-api.metadao.fi/api/tickers")
@@ -1119,9 +1119,492 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 
+    def _metadao_history_adapter(
+        self, *, config=None, latest_block=None, pair=None, events=None, tickers=None
+    ):
+        ticker_payload = (
+            load_fixture("metadao", "tickers") if tickers is None else tickers
+        )
+        latest_payload = latest_block or load_fixture("metadao", "latest_block")
+        pair_payload = pair or load_fixture("metadao", "pair")
+        events_payload = events or load_fixture("metadao", "events")
+        adapter = MetaDAOAdapter(config or {})
+        requests = []
+
+        def clone(payload):
+            return json.loads(json.dumps(payload))
+
+        def fake_get_json(url: str, *, params=None, headers=None, max_response_bytes=None):
+            self.assertEqual(headers, {})
+            request_params = dict(params or {})
+            requests.append((url, request_params))
+            if url == "https://market-api.metadao.fi/api/tickers":
+                self.assertFalse(request_params)
+                self.assertIsNone(max_response_bytes)
+                return clone(ticker_payload)
+            if url == "https://market-api.metadao.fi/dexscreener/latest-block":
+                self.assertFalse(request_params)
+                self.assertIsNone(max_response_bytes)
+                return clone(latest_payload)
+            if url == "https://market-api.metadao.fi/dexscreener/pair":
+                self.assertEqual(request_params, {"id": ticker_payload[0]["pool_id"]})
+                self.assertIsNone(max_response_bytes)
+                return clone(pair_payload)
+            if url == "https://market-api.metadao.fi/dexscreener/events":
+                self.assertEqual(set(request_params), {"fromBlock", "toBlock"})
+                expected_cap = int(
+                    (config or {}).get("metadao_history_response_byte_cap", 16 * 1024 * 1024)
+                )
+                self.assertEqual(max_response_bytes, expected_cap)
+                if callable(events_payload):
+                    return clone(events_payload(request_params))
+                return clone(events_payload)
+            raise AssertionError(f"unexpected MetaDAO URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        ticker_id = ticker_payload[0]["ticker_id"]
+        return adapter, f"{ticker_id}:0", requests
+
+    def test_metadao_swap_history_normalizes_pair_sides_ids_order_and_filters(self) -> None:
+        adapter, contract_id, requests = self._metadao_history_adapter()
+        fixture_events = load_fixture("metadao", "events")["events"][:6]
+        expected_events = sorted(
+            fixture_events,
+            key=lambda row: (
+                row["block"]["blockTimestamp"],
+                row["block"]["blockNumber"],
+                row["txnIndex"],
+                row["eventIndex"],
+                row["txnId"],
+            ),
+            reverse=True,
+        )
+
+        trades = adapter.list_trades(contract_id, limit=50)
+
+        self.assertEqual(
+            [trade.trade_id for trade in trades],
+            [f"{row['txnId']}:{row['txnIndex']}:{row['eventIndex']}" for row in expected_events],
+        )
+        self.assertEqual([trade.side for trade in trades], ["BUY", "SELL", "BUY", "BUY", "SELL", "BUY"])
+        self.assertEqual([trade.size for trade in trades], [100.0, 200.0, 100.0, 250.0, 300.0, 500.0])
+        self.assertEqual([trade.price for trade in trades], [0.083, 0.081, 0.085, 0.079, 0.082, 0.08])
+        self.assertTrue(all(trade.contract_id == contract_id for trade in trades))
+        self.assertNotIn(999.0, [trade.price for trade in trades], "events for a different pair must be ignored")
+
+        filtered = adapter.list_trades(
+            contract_id,
+            limit=3,
+            after=1733040100,
+            before=1733043720,
+        )
+        self.assertEqual([trade.timestamp for trade in filtered], [1733043720.0, 1733043720.0, 1733043660.0])
+        self.assertEqual(len(filtered), 3)
+        self.assertTrue(all(1733040100 <= float(trade.timestamp or 0) <= 1733043720 for trade in filtered))
+        self.assertGreaterEqual(
+            sum(url.endswith("/dexscreener/events") for url, _params in requests),
+            2,
+        )
+
+    def test_metadao_swap_history_derives_chronological_auditable_ohlcv(self) -> None:
+        adapter, contract_id, _requests = self._metadao_history_adapter()
+        fixture_events = load_fixture("metadao", "events")["events"]
+        trade_ids = [f"{row['txnId']}:{row['txnIndex']}:{row['eventIndex']}" for row in fixture_events]
+
+        candles = adapter.list_candles(
+            contract_id,
+            resolution="1h",
+            from_timestamp=1733040000,
+            to_timestamp=1733047199,
+        )
+
+        self.assertEqual([candle.timestamp for candle in candles], [1733040000.0, 1733043600.0])
+        self.assertEqual(
+            [(candle.open, candle.high, candle.low, candle.close, candle.volume) for candle in candles],
+            [
+                (0.08, 0.082, 0.079, 0.079, 1050.0),
+                (0.085, 0.085, 0.081, 0.083, 400.0),
+            ],
+        )
+        self.assertTrue(all(candle.raw.get("derived") is True for candle in candles))
+        self.assertTrue(all(candle.raw.get("partial") is False for candle in candles))
+        self.assertTrue(
+            all(candle.raw.get("history_coverage") == "complete_pair_scan" for candle in candles)
+        )
+        self.assertEqual(
+            candles[0].raw.get("trade_ids"),
+            trade_ids[:3],
+        )
+        self.assertEqual(
+            candles[1].raw.get("trade_ids"),
+            trade_ids[3:6],
+        )
+
+        fractional_start = adapter.list_candles(
+            contract_id,
+            resolution="1h",
+            from_timestamp=1733040000.5,
+            to_timestamp=1733047199,
+        )
+        self.assertEqual(
+            [candle.timestamp for candle in fractional_start],
+            [1733043600.0],
+            "a fractional in-bucket start must advance to the next complete bucket",
+        )
+
+    def test_metadao_swap_history_uses_slot_order_when_block_timestamps_are_not_monotonic(self) -> None:
+        rows = load_fixture("metadao", "events")["events"][:2]
+        rows[1]["block"]["blockTimestamp"] = 1733040000
+        adapter, contract_id, _requests = self._metadao_history_adapter(events={"events": rows})
+
+        trades = adapter.list_trades(contract_id)
+        self.assertEqual(
+            [trade.raw["block_number"] for trade in trades],
+            [312000020, 312000010],
+        )
+        candles = adapter.list_candles(
+            contract_id,
+            resolution="1h",
+            from_timestamp=1733040000,
+            to_timestamp=1733043599,
+        )
+        self.assertEqual(len(candles), 1)
+        self.assertEqual((candles[0].open, candles[0].close), (0.08, 0.082))
+
+        latest = {"block": {"blockNumber": 130, "blockTimestamp": 1300}}
+        pair = load_fixture("metadao", "pair")
+        pair["pair"]["createdAtBlockNumber"] = 100
+        pair["pair"]["createdAtBlockTimestamp"] = 1000
+        bounded_rows = load_fixture("metadao", "events")["events"][1:3]
+        bounded_rows[0]["block"] = {"blockNumber": 120, "blockTimestamp": 1200}
+        bounded_rows[1]["block"] = {"blockNumber": 130, "blockTimestamp": 1300}
+        bounded, bounded_contract, _requests = self._metadao_history_adapter(
+            config={"metadao_history_slot_window": 10, "metadao_history_max_windows": 1},
+            latest_block=latest,
+            pair=pair,
+            events={"events": bounded_rows},
+        )
+
+        partial_candles = bounded.list_candles(bounded_contract, resolution="1m")
+
+        self.assertEqual([candle.timestamp for candle in partial_candles], [1260.0])
+        self.assertTrue(partial_candles[0].raw["partial"])
+        self.assertEqual(
+            partial_candles[0].raw["history_coverage"], "bounded_slot_slice"
+        )
+
+    def test_metadao_swap_history_rejects_pair_identity_mismatches(self) -> None:
+        base_pair = load_fixture("metadao", "pair")
+        cases = {
+            "pair id": ("id", "11111111111111111111111111111111"),
+            "base mint": ("asset0Id", "So11111111111111111111111111111111111111112"),
+            "quote mint": ("asset1Id", "So11111111111111111111111111111111111111112"),
+        }
+        for name, (field, value) in cases.items():
+            with self.subTest(name=name):
+                pair = json.loads(json.dumps(base_pair))
+                pair["pair"][field] = value
+                adapter, contract_id, _requests = self._metadao_history_adapter(pair=pair)
+                with self.assertRaises(MarketConfigurationError):
+                    adapter.list_trades(contract_id)
+
+    def test_metadao_swap_history_rejects_ambiguous_ticker_pool_identity(self) -> None:
+        tickers = load_fixture("metadao", "tickers")
+        duplicate = json.loads(json.dumps(tickers[0]))
+        duplicate["pool_id"] = "So11111111111111111111111111111111111111112"
+        adapter, contract_id, _requests = self._metadao_history_adapter(
+            tickers=[tickers[0], duplicate]
+        )
+
+        with self.assertRaisesRegex(MarketConfigurationError, "ambiguous"):
+            adapter.list_trades(contract_id)
+
+    def test_metadao_swap_history_does_not_use_dex_label_as_pair_identity(self) -> None:
+        pair = load_fixture("metadao", "pair")
+        pair["pair"]["dexKey"] = "futarchy"
+        adapter, contract_id, _requests = self._metadao_history_adapter(pair=pair)
+
+        trades = adapter.list_trades(contract_id)
+
+        self.assertEqual(len(trades), 6)
+        self.assertTrue(all(trade.raw["pair"]["dexKey"] == "futarchy" for trade in trades))
+
+    def test_metadao_swap_history_rejects_malformed_ambiguous_and_inconsistent_events(self) -> None:
+        template = load_fixture("metadao", "events")["events"][0]
+        cases = {}
+
+        event = json.loads(json.dumps(template))
+        event["eventType"] = "transfer"
+        cases["wrong event type"] = event
+        event = json.loads(json.dumps(template))
+        event["priceNative"] = True
+        cases["boolean price"] = event
+        event = json.loads(json.dumps(template))
+        event["priceNative"] = "NaN"
+        cases["non-finite price"] = event
+        event = json.loads(json.dumps(template))
+        event["asset1In"] = True
+        cases["boolean amount"] = event
+        event = json.loads(json.dumps(template))
+        event["asset0In"] = 10.0
+        event["asset1Out"] = 0.8
+        cases["ambiguous direction"] = event
+        event = json.loads(json.dumps(template))
+        event["priceNative"] = 0.5
+        cases["price disagrees with amounts"] = event
+        event = json.loads(json.dumps(template))
+        event["txnId"] = ""
+        cases["missing transaction id"] = event
+        event = json.loads(json.dumps(template))
+        event["txnId"] = "2" * 64
+        cases["transaction id does not decode to a Solana signature"] = event
+        event = json.loads(json.dumps(template))
+        event["maker"] = "not-a-solana-address"
+        cases["invalid maker"] = event
+        event = json.loads(json.dumps(template))
+        event["txnIndex"] = True
+        cases["boolean transaction index"] = event
+        event = json.loads(json.dumps(template))
+        event["block"]["blockTimestamp"] = "Infinity"
+        cases["non-finite timestamp"] = event
+        event = json.loads(json.dumps(template))
+        event["asset0Out"] = 0
+        cases["zero size"] = event
+        event = json.loads(json.dumps(template))
+        event["asset1In"] = 10**400
+        cases["overflowing amount"] = event
+        event = json.loads(json.dumps(template))
+        event["block"]["blockTimestamp"] = 0
+        cases["zero block timestamp"] = event
+
+        for name, bad_event in cases.items():
+            with self.subTest(name=name):
+                adapter, contract_id, _requests = self._metadao_history_adapter(events={"events": [bad_event]})
+                with self.assertRaises(MarketConfigurationError):
+                    adapter.list_trades(contract_id)
+
+    def test_metadao_swap_history_rejects_duplicate_trade_identity(self) -> None:
+        event = load_fixture("metadao", "events")["events"][0]
+        conflicting = json.loads(json.dumps(event))
+        conflicting["maker"] = "So11111111111111111111111111111111111111112"
+        adapter, contract_id, _requests = self._metadao_history_adapter(
+            events={"events": [event, conflicting]}
+        )
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(contract_id)
+
+    def test_metadao_swap_history_scans_bounded_disjoint_inclusive_windows(self) -> None:
+        latest = {"block": {"blockNumber": 130, "blockTimestamp": 1300}}
+        pair = load_fixture("metadao", "pair")
+        pair["pair"]["createdAtBlockNumber"] = 100
+        pair["pair"]["createdAtBlockTimestamp"] = 1000
+        templates = load_fixture("metadao", "events")["events"][:2]
+        event_requests = []
+
+        def events_for_range(params):
+            start = int(params["fromBlock"])
+            end = int(params["toBlock"])
+            event_requests.append((start, end))
+            rows = []
+            if start <= 100 <= end:
+                creation = json.loads(json.dumps(templates[0]))
+                creation["block"] = {"blockNumber": 100, "blockTimestamp": 1000}
+                rows.append(creation)
+            if start <= 101 <= end:
+                desired = json.loads(json.dumps(templates[1]))
+                desired["block"] = {"blockNumber": 101, "blockTimestamp": 1010}
+                rows.append(desired)
+            return {"events": rows}
+
+        adapter, contract_id, _requests = self._metadao_history_adapter(
+            config={
+                "metadao_history_slot_window": 10,
+                "metadao_history_max_windows": 3,
+                "metadao_history_event_cap": 100,
+            },
+            latest_block=latest,
+            pair=pair,
+            events=events_for_range,
+        )
+
+        trades = adapter.list_trades(contract_id, after=1001)
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(len(event_requests), 3)
+        for start, end in event_requests:
+            self.assertGreaterEqual(start, 100)
+            self.assertLessEqual(start, end)
+            self.assertLessEqual(end - start, 10)
+        for previous, current in zip(event_requests, event_requests[1:], strict=False):
+            self.assertLess(current[1], previous[0], "inclusive scan windows must not overlap")
+
+    def test_metadao_timestamp_coverage_reaches_creation_across_nonmonotonic_windows(self) -> None:
+        latest = {"block": {"blockNumber": 130, "blockTimestamp": 1300}}
+        pair = load_fixture("metadao", "pair")
+        pair["pair"]["createdAtBlockNumber"] = 100
+        pair["pair"]["createdAtBlockTimestamp"] = 1000
+        templates = load_fixture("metadao", "events")["events"][:4]
+        event_requests = []
+
+        def events_for_range(params):
+            start = int(params["fromBlock"])
+            end = int(params["toBlock"])
+            event_requests.append((start, end))
+            if start == 120:
+                event = json.loads(json.dumps(templates[1]))
+                event["block"] = {"blockNumber": 120, "blockTimestamp": 1190}
+                return {"events": [event]}
+            if start == 109:
+                newer_timestamp = json.loads(json.dumps(templates[2]))
+                newer_timestamp["block"] = {"blockNumber": 119, "blockTimestamp": 1210}
+                equal_boundary = json.loads(json.dumps(templates[3]))
+                equal_boundary["block"] = {"blockNumber": 118, "blockTimestamp": 1200}
+                return {"events": [equal_boundary, newer_timestamp]}
+            if start == 100:
+                creation = json.loads(json.dumps(templates[0]))
+                creation["block"] = {"blockNumber": 100, "blockTimestamp": 1000}
+                return {"events": [creation]}
+            return {"events": []}
+
+        adapter, contract_id, _requests = self._metadao_history_adapter(
+            config={"metadao_history_slot_window": 10, "metadao_history_max_windows": 3},
+            latest_block=latest,
+            pair=pair,
+            events=events_for_range,
+        )
+
+        trades = adapter.list_trades(contract_id, after=1200)
+
+        self.assertEqual([trade.timestamp for trade in trades], [1210.0, 1200.0])
+        self.assertEqual(event_requests, [(120, 130), (109, 119), (100, 108)])
+
+        missing, missing_contract, _requests = self._metadao_history_adapter(
+            config={"metadao_history_slot_window": 10, "metadao_history_max_windows": 3},
+            latest_block=latest,
+            pair=pair,
+            events=lambda _params: {"events": []},
+        )
+        with self.assertRaisesRegex(MarketConfigurationError, "declared first swap"):
+            missing.list_trades(missing_contract, after=1200)
+
+    def test_metadao_swap_history_fails_when_requested_range_is_not_covered(self) -> None:
+        latest = {"block": {"blockNumber": 130, "blockTimestamp": 1300}}
+        pair = load_fixture("metadao", "pair")
+        pair["pair"]["createdAtBlockNumber"] = 100
+        pair["pair"]["createdAtBlockTimestamp"] = 1000
+        template = load_fixture("metadao", "events")["events"][0]
+
+        def events_for_range(params):
+            end = int(params["toBlock"])
+            block_number = end
+            event = json.loads(json.dumps(template))
+            event["block"] = {"blockNumber": block_number, "blockTimestamp": block_number * 10}
+            base58_alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+            event["txnId"] = "1" * 63 + base58_alphabet[block_number % len(base58_alphabet)]
+            return {"events": [event]}
+
+        adapter, contract_id, _requests = self._metadao_history_adapter(
+            config={"metadao_history_slot_window": 10, "metadao_history_max_windows": 2},
+            latest_block=latest,
+            pair=pair,
+            events=events_for_range,
+        )
+
+        with self.assertRaisesRegex(MarketConfigurationError, "(?i)(cover|range|window)"):
+            adapter.list_trades(contract_id, after=1000)
+
+    def test_metadao_swap_history_enforces_event_cap_and_config_bounds(self) -> None:
+        events = load_fixture("metadao", "events")
+        adapter, contract_id, _requests = self._metadao_history_adapter(
+            config={"metadao_history_event_cap": 3},
+            events=events,
+        )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(contract_id)
+
+        invalid_configs = (
+            {"metadao_history_slot_window": 0},
+            {"metadao_history_slot_window": 500001},
+            {"metadao_history_slot_window": True},
+            {"metadao_history_max_windows": 0},
+            {"metadao_history_max_windows": 51},
+            {"metadao_history_max_windows": True},
+            {"metadao_history_event_cap": 0},
+            {"metadao_history_event_cap": 250001},
+            {"metadao_history_event_cap": True},
+            {"metadao_history_max_windows": float("inf")},
+            {"metadao_history_response_byte_cap": 1023},
+            {"metadao_history_response_byte_cap": 67108865},
+            {"metadao_history_response_byte_cap": True},
+        )
+        for config in invalid_configs:
+            with self.subTest(config=config):
+                invalid, invalid_contract, _requests = self._metadao_history_adapter(config=config)
+                with self.assertRaises(MarketConfigurationError):
+                    invalid.list_trades(invalid_contract)
+
+        adapter, contract_id, _requests = self._metadao_history_adapter()
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(contract_id, limit=float("inf"))
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(contract_id, after=10**10000)
+
+    def test_metadao_empty_candle_range_still_validates_contract_config_and_identity(self) -> None:
+        adapter, _contract_id, _requests = self._metadao_history_adapter()
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(
+                "invalid",
+                resolution="1h",
+                from_timestamp=1733040000.5,
+                to_timestamp=1733040001,
+            )
+
+        invalid, invalid_contract, _requests = self._metadao_history_adapter(
+            config={"metadao_history_response_byte_cap": 1}
+        )
+        with self.assertRaises(MarketConfigurationError):
+            invalid.list_candles(
+                invalid_contract,
+                resolution="1h",
+                from_timestamp=1733040000.5,
+                to_timestamp=1733040001,
+            )
+
+        tickers = load_fixture("metadao", "tickers")
+        duplicate = json.loads(json.dumps(tickers[0]))
+        duplicate["pool_id"] = "So11111111111111111111111111111111111111112"
+        ambiguous, ambiguous_contract, _requests = self._metadao_history_adapter(
+            tickers=[tickers[0], duplicate]
+        )
+        with self.assertRaisesRegex(MarketConfigurationError, "ambiguous"):
+            ambiguous.list_candles(
+                ambiguous_contract,
+                resolution="1h",
+                from_timestamp=1733040000.5,
+                to_timestamp=1733040001,
+            )
+
+    def test_metadao_swap_history_rejects_events_outside_requested_slot_window(self) -> None:
+        latest = {"block": {"blockNumber": 130, "blockTimestamp": 1300}}
+        pair = load_fixture("metadao", "pair")
+        pair["pair"]["createdAtBlockNumber"] = 100
+        pair["pair"]["createdAtBlockTimestamp"] = 1000
+        event = load_fixture("metadao", "events")["events"][0]
+        event["block"] = {"blockNumber": 100, "blockTimestamp": 1000}
+        adapter, contract_id, _requests = self._metadao_history_adapter(
+            config={"metadao_history_slot_window": 10, "metadao_history_max_windows": 1},
+            latest_block=latest,
+            pair=pair,
+            events={"events": [event]},
+        )
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(contract_id)
+
     def test_metadao_guarded_live_order_forwards_reviewed_signed_router_transaction(self) -> None:
         tickers = load_fixture("metadao", "tickers")
-        row = tickers["tickers"][0]
+        row = tickers[0]
         ticker_id = row["ticker_id"]
         router = "11111111111111111111111111111111"
         signature = "1" * 64

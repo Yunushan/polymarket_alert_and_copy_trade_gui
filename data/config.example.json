@@ -819,12 +819,16 @@
       "settings": {
         "adapter_status": "implemented",
         "metadao_api_base_url": "https://market-api.metadao.fi",
+        "metadao_history_slot_window": 500000,
+        "metadao_history_max_windows": 3,
+        "metadao_history_event_cap": 50000,
+        "metadao_history_response_byte_cap": 16777216,
         "metadao_solana_rpc_url": "",
         "metadao_router_program_ids": [],
         "metadao_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Official MetaDAO Futarchy DEX /api/tickers discovery, bid/ask/last prices, alerts, and local paper orders are implemented. Guarded live forwarding accepts only an externally signed transaction to an explicitly reviewed Solana router allow-list through metadao_solana_rpc_url; wallet signing, approvals, settlement, depth, and copy trading remain operator-owned or disabled."
+        "notes": "Official MetaDAO Futarchy DEX /api/tickers discovery, bid/ask/last prices, bounded recent public spot-swap history, derived OHLCV candles, alerts, and local paper orders are implemented. History scans are capped per call by metadao_history_slot_window (1..500000), metadao_history_max_windows (1..50; per-call scan/request cap), metadao_history_event_cap (1..250000; total decoded rows per call), and metadao_history_response_byte_cap (1024..67108864; streamed response bytes before JSON decoding). Calls without timestamp bounds intentionally return only the bounded recent slice and may return fewer rows or omit the earliest partial candle bucket; every retained candle from a truncated scan is marked partial with bounded-slot coverage. Timestamp-complete requests must reach pair creation and verify its declared creation swap within the configured scan horizon or fail closed, and arbitrary full-history completeness is not claimed. Guarded live forwarding accepts only an externally signed transaction to an explicitly reviewed Solana router allow-list through metadao_solana_rpc_url; wallet signing, approvals, settlement, depth, and copy trading remain operator-owned or disabled."
       }
     },
     "levr_bet": {

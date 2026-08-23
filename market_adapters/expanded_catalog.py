@@ -67,6 +67,8 @@ METADAO_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -530,8 +532,10 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.metadao.fi/protocol/analytics",
         description=(
             "Official MetaDAO Futarchy DEX API adapter for public DAO ticker discovery, bid/ask/price reads, "
-            "alerts, local paper orders, and guarded externally signed Solana router transactions; orderbook "
-            "depth, wallet signing, approvals, settlement, and copy trading remain operator-owned or unsupported."
+            "bounded recent public spot-swap history, derived OHLCV candles, alerts, local paper orders, and "
+            "guarded externally signed Solana router transactions; omitted time bounds return only a bounded recent "
+            "slice, explicit out-of-window bounds fail closed, and full-history completeness is not claimed. "
+            "Orderbook depth, wallet signing, approvals, settlement, and copy trading remain operator-owned or unsupported."
         ),
         capabilities=METADAO_CAPABILITIES,
     ),
