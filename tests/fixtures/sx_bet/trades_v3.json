@@ -1,0 +1,31 @@
+{
+  "status": "success",
+  "data": {
+    "trades": [
+      {
+        "tradeId": "0xac6bb30bba6ea82d8717219a4fa49d15b58fd638fba479f294b4d402376d14d6",
+        "userAddress": "0xbcc6D643e4159A75ED1dB4e13330230B82F2AEe5",
+        "wallet": "0x4361123dbdc1D812fdf7D27045aF358C9C8AA70A",
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "isBettingOutcomeOne": false,
+        "isMaker": false,
+        "isParlay": false,
+        "totalStake": "1000000",
+        "totalReturn": "2500000",
+        "netTotalReturn": "2488000",
+        "weightedAverageOdds": "40000000000000000000",
+        "ceRefundAmount": "0",
+        "ceRefundFeeAmount": "0",
+        "usedBetCredits": false,
+        "fillCount": 2,
+        "ownOrderIds": ["0xd9b693a1075ab77c0638fe98fcd3144dbb8f91d0f7ee454d442bf25ca7cbcb66"],
+        "status": "LOCKED",
+        "betTime": "2026-07-31T18:47:09.577Z",
+        "gameTime": "2040-01-01T00:00:00.000Z",
+        "createdAt": "2026-07-31T18:47:09.575Z",
+        "updatedAt": "2026-07-31T18:47:12.837Z",
+        "settlement": null
+      }
+    ]
+  }
+}

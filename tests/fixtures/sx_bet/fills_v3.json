@@ -1,0 +1,28 @@
+{
+  "status": "success",
+  "data": {
+    "fills": [
+      {
+        "id": "0xec8eaaa21ef52bf5f2a3fee5f139258a63f65cf2218dfee40362f2fc90e55793:0xd9b693a1075ab77c0638fe98fcd3144dbb8f91d0f7ee454d442bf25ca7cbcb66:0x1111111111111111111111111111111111111111111111111111111111111111",
+        "matchId": "0xec8eaaa21ef52bf5f2a3fee5f139258a63f65cf2218dfee40362f2fc90e55793",
+        "orderId": "0xd9b693a1075ab77c0638fe98fcd3144dbb8f91d0f7ee454d442bf25ca7cbcb66",
+        "tradeId": "0xac6bb30bba6ea82d8717219a4fa49d15b58fd638fba479f294b4d402376d14d6",
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "isParlay": false,
+        "userAddress": "0xbcc6D643e4159A75ED1dB4e13330230B82F2AEe5",
+        "wallet": "0x4361123dbdc1D812fdf7D27045aF358C9C8AA70A",
+        "fillAmount": "333334",
+        "fillOdds": "40000000000000000000",
+        "returnAmount": "833335",
+        "netReturnAmount": "829335",
+        "isBettingOutcomeOne": false,
+        "isMaker": false,
+        "status": "LOCKED",
+        "txHash": "0x64307e2f35d0a81b0f44e9043e99cf01def3b2f079fb68cf2c5a942b88d95e9a",
+        "createdAt": "2026-07-31T18:47:09.586Z",
+        "updatedAt": "2026-07-31T18:47:12.837Z",
+        "settlement": null
+      }
+    ]
+  }
+}

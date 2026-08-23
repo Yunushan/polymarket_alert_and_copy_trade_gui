@@ -231,6 +231,102 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertEqual(ctx.exception.feature, "copy_trading")
         self.assertIn("unsupported", str(ctx.exception))
 
+    def test_v3_account_reads_use_allowlisted_paths_and_api_key(self) -> None:
+        adapter = SxBetAdapter({"sx_bet_api_key": "fixture-key"})
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, dict(params or {}), dict(headers or {})))
+            if url.endswith("/orders-v3"):
+                return {"status": "success", "data": {"orders": [{"id": "0x" + "1" * 64}]}}
+            if url.endswith("/trades-v3"):
+                return {"status": "success", "data": {"trades": []}}
+            if url.endswith("/fills-v3"):
+                return {"status": "success", "data": {"fills": []}}
+            if url.endswith("/positions-v3"):
+                return {"status": "success", "data": {"positions": []}}
+            if url.endswith("/user/balance-v3"):
+                return {"status": "success", "data": {"balances": []}}
+            if url.endswith("/orders-v3/0x" + "2" * 64):
+                return {"status": "success", "data": {"order": {"id": "0x" + "2" * 64}}}
+            if url.endswith("/orders-v3/client/mm-1"):
+                return {"status": "success", "data": {"order": {"clientOrderId": "mm-1"}}}
+            raise AssertionError(f"unexpected SX Bet v3 URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        adapter.account_recovery("balance")
+        adapter.account_recovery("active_orders", market_hash=MARKET_HASH, event_id="L18272456", limit=7, cursor="next")
+        adapter.account_recovery("order_detail", order_id="0x" + "2" * 64)
+        adapter.account_recovery("order_by_client_id", client_order_id="mm-1")
+        adapter.account_recovery("order_history", status="SETTLED", start_date="2026-01-01T00:00:00Z", end_date="2026-01-02T00:00:00Z")
+        adapter.account_recovery("fills", trade_id="0x" + "3" * 64, limit=3)
+        adapter.account_recovery("positions", status="MATCHED,LOCKED", event_id="L18272456")
+
+        self.assertEqual(calls[0][2], {"x-sx-api-key": "fixture-key"})
+        self.assertEqual(calls[1][0], "https://api.sx.bet/orders-v3")
+        self.assertEqual(calls[1][1]["marketHash"], MARKET_HASH)
+        self.assertEqual(calls[1][1]["eventId"], "L18272456")
+        self.assertEqual(calls[1][1]["perPage"], 7)
+        self.assertEqual(calls[4][1]["status"], "SETTLED")
+        self.assertEqual(calls[5][1]["tradeId"], "0x" + "3" * 64)
+        self.assertEqual(calls[6][1]["status"], "MATCHED,LOCKED")
+
+    def test_v3_account_reads_validate_path_and_query_inputs(self) -> None:
+        adapter = SxBetAdapter({"sx_bet_api_key": "fixture-key"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_detail", order_id="../../secret")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_by_client_id", client_order_id="bad/id")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("positions", status="")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_history", start_date="2026-01-02T00:00:00Z", end_date="2026-01-01T00:00:00Z")
+
+    def test_v3_cancellation_is_guarded_and_uses_documented_delete_routes(self) -> None:
+        adapter = SxBetAdapter(
+            {
+                "sx_bet_api_key": "fixture-key",
+                "sx_bet_order_management_enabled": True,
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+            }
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append((method, url, dict(params or {}), json_body, dict(headers or {})))
+            return {"status": "success", "data": {"cancelled": []}}
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        order_a = "0x" + "a" * 64
+        order_b = "0x" + "b" * 64
+        adapter.manage_orders(
+            "cancel_orders",
+            order_ids=[order_a, order_b, order_a],
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        adapter.manage_orders(
+            "cancel_event_orders",
+            event_id="L18272456",
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        adapter.manage_orders(
+            "cancel_all_orders",
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+
+        self.assertEqual(calls[0][0:2], ("DELETE", "https://api.sx.bet/orders-v3"))
+        self.assertEqual(calls[0][3], {"orders": [{"orderId": order_a}, {"orderId": order_b}]})
+        self.assertEqual(calls[0][4]["x-sx-api-key"], "fixture-key")
+        self.assertEqual(calls[1][1], "https://api.sx.bet/orders-v3/event")
+        self.assertEqual(calls[1][2], {"eventId": "L18272456"})
+        self.assertEqual(calls[2][1], "https://api.sx.bet/orders-v3/all")
+
+    def test_v3_cancellation_requires_opt_in_confirmation(self) -> None:
+        adapter = SxBetAdapter({"sx_bet_api_key": "fixture-key", "live_trading_enabled": True, "live_trading_confirmed": True})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_all_orders", confirm_order_management="CANCEL ALL")
+
 
 if __name__ == "__main__":
     unittest.main()

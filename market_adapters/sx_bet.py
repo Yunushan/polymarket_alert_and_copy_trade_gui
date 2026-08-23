@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import secrets
 import time
 from datetime import datetime, timezone
@@ -40,6 +41,32 @@ SX_BET_REFERENCES = (
     "https://docs.sx.bet/api-reference/api-key",
     "https://docs.sx.bet/api-reference/centrifugo-order-book-updates",
     "https://docs.sx.bet/api-reference/eip712-signing",
+    "https://docs.sx.bet/api-reference/get-orders-v3",
+    "https://docs.sx.bet/api-reference/get-order-v3",
+    "https://docs.sx.bet/api-reference/get-order-v3-by-client-id",
+    "https://docs.sx.bet/api-reference/get-trades-v3",
+    "https://docs.sx.bet/api-reference/get-fills-v3",
+    "https://docs.sx.bet/api-reference/get-positions-v3",
+    "https://docs.sx.bet/api-reference/get-user-balance-v3",
+    "https://docs.sx.bet/api-reference/delete-orders-v3",
+    "https://docs.sx.bet/api-reference/delete-orders-v3-event",
+    "https://docs.sx.bet/api-reference/delete-orders-v3-all",
+)
+
+SX_BET_ACCOUNT_OPERATIONS = (
+    "balance",
+    "active_orders",
+    "order_detail",
+    "order_by_client_id",
+    "order_history",
+    "fills",
+    "positions",
+)
+SX_BET_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_event_orders",
+    "cancel_all_orders",
 )
 
 
@@ -47,6 +74,8 @@ class SxBetAdapter(MarketAdapter):
     """SX Bet adapter using documented public REST and Centrifugo WebSocket APIs."""
 
     metadata = get_market_metadata("sx_bet")
+    account_recovery_operations = SX_BET_ACCOUNT_OPERATIONS
+    order_management_operations = SX_BET_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -65,6 +94,25 @@ class SxBetAdapter(MarketAdapter):
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
                 "copy_trading_supported": False,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "account_api_version": "v3",
+                "account_endpoints": {
+                    "balance": "/user/balance-v3",
+                    "active_orders": "/orders-v3",
+                    "order_detail": "/orders-v3/{orderId}",
+                    "order_by_client_id": "/orders-v3/client/{clientOrderId}",
+                    "order_history": "/trades-v3",
+                    "fills": "/fills-v3",
+                    "positions": "/positions-v3",
+                },
+                "order_management_endpoints": {
+                    "cancel_order": "DELETE /orders-v3",
+                    "cancel_orders": "DELETE /orders-v3",
+                    "cancel_event_orders": "DELETE /orders-v3/event",
+                    "cancel_all_orders": "DELETE /orders-v3/all",
+                },
+                "order_management_enabled": self.config_bool("sx_bet_order_management_enabled", False),
             }
         )
         return health
@@ -244,6 +292,265 @@ class SxBetAdapter(MarketAdapter):
             "request": {"orders": [signed_order]},
             "response": response,
         }
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read SX Bet's documented authenticated v3 account surfaces.
+
+        SX Bet v3 account routes are API-key scoped and intentionally use a
+        fixed endpoint set.  User-controlled values are restricted to the
+        documented query/path shapes before they reach the runtime.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            supported = ", ".join(self.account_recovery_operations)
+            raise MarketConfigurationError(f"SX Bet account recovery supports only: {supported}.")
+        headers = self._v3_headers()
+        if normalized == "balance":
+            return self.runtime.get_json(self._url("/user/balance-v3"), headers=headers)
+        if normalized == "active_orders":
+            params = self._v3_page_params(kwargs)
+            self._optional_v3_hash_param(params, "marketHash", kwargs.get("market_hash") or kwargs.get("market_id"))
+            event_id = self._optional_event_id(kwargs.get("event_id"))
+            if event_id:
+                params["eventId"] = event_id
+            return self.runtime.get_json(self._url("/orders-v3"), params=params, headers=headers)
+        if normalized == "order_detail":
+            order_id = self._v3_order_id(kwargs.get("order_id"))
+            return self.runtime.get_json(self._url(f"/orders-v3/{order_id}"), headers=headers)
+        if normalized == "order_by_client_id":
+            client_order_id = self._v3_client_order_id(kwargs.get("client_order_id"))
+            return self.runtime.get_json(self._url(f"/orders-v3/client/{client_order_id}"), headers=headers)
+        if normalized == "order_history":
+            params = self._v3_page_params(kwargs)
+            self._optional_v3_hash_param(params, "marketHash", kwargs.get("market_hash") or kwargs.get("market_id"))
+            status = str(kwargs.get("status") or "").strip().upper()
+            if status:
+                if status not in {"MATCHED", "LOCKED", "SETTLED", "FAILED"}:
+                    raise MarketConfigurationError("SX Bet order_history status must be MATCHED, LOCKED, SETTLED, or FAILED.")
+                params["status"] = status
+            start_date, end_date = self._v3_date_bounds(kwargs.get("start_date"), kwargs.get("end_date"))
+            if start_date:
+                params["startDate"] = start_date
+            if end_date:
+                params["endDate"] = end_date
+            params["sortAsc"] = self._bool_query(kwargs.get("sort_asc"), True)
+            return self.runtime.get_json(self._url("/trades-v3"), params=params, headers=headers)
+        if normalized == "fills":
+            params = self._v3_page_params(kwargs)
+            trade_id = self._optional_v3_hash(kwargs.get("trade_id"), "trade_id")
+            order_id = self._optional_v3_hash(kwargs.get("order_id"), "order_id")
+            if trade_id:
+                params["tradeId"] = trade_id
+            if order_id:
+                params["orderId"] = order_id
+            start_date, end_date = self._v3_date_bounds(kwargs.get("start_date"), kwargs.get("end_date"))
+            if start_date:
+                params["startDate"] = start_date
+            if end_date:
+                params["endDate"] = end_date
+            params["sortAsc"] = self._bool_query(kwargs.get("sort_asc"), True)
+            return self.runtime.get_json(self._url("/fills-v3"), params=params, headers=headers)
+        if normalized == "positions":
+            params = self._v3_page_params(kwargs)
+            status = self._position_status(kwargs.get("status"))
+            params["status"] = status
+            event_id = self._optional_event_id(kwargs.get("event_id"))
+            if event_id:
+                params["eventId"] = event_id
+            params["sortAsc"] = self._bool_query(kwargs.get("sort_asc"), False)
+            return self.runtime.get_json(self._url("/positions-v3"), params=params, headers=headers)
+        raise MarketConfigurationError(f"Unsupported SX Bet account operation: {normalized}.")
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Any:
+        """Run one explicit, guarded SX Bet v3 cancellation operation."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(f"SX Bet order management supports only: {supported}.")
+        self.ensure_capability("live_trading")
+        if not self.config_bool("sx_bet_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "SX Bet order management is disabled by adapter config. "
+                "Set sx_bet_order_management_enabled=true only after reviewing cancellation risk."
+            )
+        self.ensure_live_trading_enabled("SX Bet order management")
+        confirmation = str(kwargs.get("confirm_order_management") or "").strip()
+        if confirmation != "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS":
+            raise MarketConfigurationError(
+                "SX Bet order management requires confirm_order_management="
+                "'I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS'."
+            )
+        headers = self._v3_headers(content_type=normalized in {"cancel_order", "cancel_orders"})
+        if normalized in {"cancel_order", "cancel_orders"}:
+            order_ids = self._v3_order_ids(kwargs.get("order_ids"), kwargs.get("order_id"), kwargs.get("orders"), kwargs.get("instructions"))
+            if not order_ids:
+                raise MarketConfigurationError("SX Bet cancellation requires at least one order id.")
+            if len(order_ids) > 100:
+                raise MarketConfigurationError("SX Bet cancellation accepts at most 100 unique order ids.")
+            response = self.runtime.request_json(
+                "DELETE",
+                self._url("/orders-v3"),
+                json_body={"orders": [{"orderId": value} for value in order_ids]},
+                headers=headers,
+            )
+            return {"operation": normalized, "order_ids": order_ids, "response": response}
+        if normalized == "cancel_event_orders":
+            event_id = self._required_event_id(kwargs.get("event_id"))
+            response = self.runtime.request_json(
+                "DELETE",
+                self._url("/orders-v3/event"),
+                params={"eventId": event_id},
+                headers=self._v3_headers(),
+            )
+            return {"operation": normalized, "event_id": event_id, "response": response}
+        response = self.runtime.request_json(
+            "DELETE",
+            self._url("/orders-v3/all"),
+            headers=self._v3_headers(),
+        )
+        return {"operation": normalized, "response": response}
+
+    def _v3_headers(self, *, content_type: bool = False) -> Dict[str, str]:
+        credential = self.resolve_credential(
+            "sx_bet_api_key",
+            ("SX_BET_API_KEY",),
+            required=True,
+            label="SX_BET_API_KEY",
+        )
+        headers = {"x-sx-api-key": credential.value}
+        if content_type:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    @staticmethod
+    def _v3_page_params(kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+        raw_limit = kwargs.get("per_page", kwargs.get("limit", 50))
+        try:
+            per_page = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("SX Bet account per_page must be an integer between 1 and 100.") from exc
+        if per_page < 1 or per_page > 100:
+            raise MarketConfigurationError("SX Bet account per_page must be between 1 and 100.")
+        cursor = str(kwargs.get("next_key", kwargs.get("cursor", "")) or "").strip()
+        if len(cursor) > 2048 or any(char.isspace() for char in cursor):
+            raise MarketConfigurationError("SX Bet account cursor must be a compact opaque token.")
+        params: Dict[str, Any] = {"perPage": per_page}
+        if cursor:
+            params["nextKey"] = cursor
+        return params
+
+    @staticmethod
+    def _optional_v3_hash(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if not re.fullmatch(r"0x[a-fA-F0-9]{64}", text):
+            raise MarketConfigurationError(f"SX Bet {label} must be a 32-byte 0x-prefixed hash.")
+        return text
+
+    @classmethod
+    def _optional_v3_hash_param(cls, params: Dict[str, Any], key: str, value: Any) -> None:
+        normalized = cls._optional_v3_hash(value, key)
+        if normalized:
+            params[key] = normalized
+
+    @staticmethod
+    def _optional_event_id(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) < 2 or len(text) > 64 or not re.fullmatch(r"[A-Za-z0-9:_-]+", text):
+            raise MarketConfigurationError("SX Bet event_id must be 2-64 safe identifier characters.")
+        return text
+
+    @classmethod
+    def _required_event_id(cls, value: Any) -> str:
+        event_id = cls._optional_event_id(value)
+        if not event_id:
+            raise MarketConfigurationError("SX Bet cancel_event_orders requires event_id.")
+        return event_id
+
+    @staticmethod
+    def _v3_order_id(value: Any) -> str:
+        order_id = str(value or "").strip()
+        if not re.fullmatch(r"0x[a-fA-F0-9]{64}", order_id):
+            raise MarketConfigurationError("SX Bet order_id must be a 32-byte 0x-prefixed hash.")
+        return order_id
+
+    @staticmethod
+    def _v3_client_order_id(value: Any) -> str:
+        client_id = str(value or "").strip()
+        if len(client_id) > 64 or not re.fullmatch(r"[A-Za-z0-9_-]+", client_id):
+            raise MarketConfigurationError("SX Bet client_order_id must match [A-Za-z0-9_-]+ and be at most 64 characters.")
+        return client_id
+
+    @classmethod
+    def _v3_order_ids(cls, order_ids: Any, order_id: Any, orders: Any, instructions: Any) -> List[str]:
+        values: List[Any] = []
+        for candidate in (order_ids, order_id):
+            if candidate not in (None, ""):
+                values.extend(candidate if isinstance(candidate, (list, tuple, set)) else str(candidate).split(","))
+        for candidate in (orders, instructions):
+            if isinstance(candidate, Mapping):
+                values.append(candidate)
+            elif isinstance(candidate, list):
+                values.extend(candidate)
+        normalized: List[str] = []
+        for value in values:
+            if isinstance(value, Mapping):
+                value = value.get("orderId", value.get("order_id"))
+            item = cls._v3_order_id(value)
+            if item not in normalized:
+                normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _bool_query(value: Any, default: bool) -> bool:
+        if value in (None, ""):
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        raise MarketConfigurationError("SX Bet boolean query values must be true or false.")
+
+    @staticmethod
+    def _v3_date_bounds(start: Any, end: Any) -> Tuple[str, str]:
+        start_text = str(start or "").strip()
+        end_text = str(end or "").strip()
+        for label, value in (("start_date", start_text), ("end_date", end_text)):
+            if value:
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise MarketConfigurationError(f"SX Bet {label} must be ISO-8601.") from exc
+                if parsed.tzinfo is None:
+                    raise MarketConfigurationError(f"SX Bet {label} must include a timezone.")
+        if start_text and end_text:
+            start_dt = datetime.fromisoformat(start_text.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end_text.replace("Z", "+00:00"))
+            if end_dt < start_dt:
+                raise MarketConfigurationError("SX Bet end_date must not be earlier than start_date.")
+        return start_text, end_text
+
+    @staticmethod
+    def _position_status(value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if not raw:
+            raise MarketConfigurationError(
+                "SX Bet positions requires status (comma-separated MATCHED, LOCKED, SETTLED, or FAILED)."
+            )
+        statuses = [item.strip().upper() for item in raw.split(",") if item.strip()]
+        allowed = {"MATCHED", "LOCKED", "SETTLED", "FAILED"}
+        if not statuses or any(item not in allowed for item in statuses):
+            raise MarketConfigurationError("SX Bet positions status values must be MATCHED, LOCKED, SETTLED, or FAILED.")
+        unique = list(dict.fromkeys(statuses))
+        return ",".join(unique)
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(

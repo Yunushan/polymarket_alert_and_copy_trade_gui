@@ -3773,6 +3773,48 @@ def market_account_payload(
             }
             if normalized_operation == "audit_logs":
                 kwargs["event_type"] = _query_value(query_params, "event_type") or None
+    elif normalized_market_id == "sx_bet":
+        if normalized_operation == "balance":
+            kwargs = {}
+        elif normalized_operation == "active_orders":
+            kwargs = {
+                "market_hash": _query_value(query_params, "market_hash") or _query_value(query_params, "market_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
+        elif normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "order_by_client_id":
+            kwargs = {"client_order_id": _query_value(query_params, "client_order_id")}
+        elif normalized_operation == "order_history":
+            kwargs = {
+                "market_hash": _query_value(query_params, "market_hash") or _query_value(query_params, "market_id"),
+                "status": _query_value(query_params, "status"),
+                "start_date": _query_value(query_params, "start_date"),
+                "end_date": _query_value(query_params, "end_date"),
+                "sort_asc": _query_bool(query_params, "sort_asc", True),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
+        elif normalized_operation == "fills":
+            kwargs = {
+                "trade_id": _query_value(query_params, "trade_id"),
+                "order_id": _query_value(query_params, "order_id"),
+                "start_date": _query_value(query_params, "start_date"),
+                "end_date": _query_value(query_params, "end_date"),
+                "sort_asc": _query_bool(query_params, "sort_asc", True),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
+        elif normalized_operation == "positions":
+            kwargs = {
+                "status": _query_value(query_params, "status"),
+                "event_id": _query_value(query_params, "event_id"),
+                "sort_asc": _query_bool(query_params, "sort_asc", False),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
     elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": _query_value(query_params, "status") or "",
@@ -3884,7 +3926,7 @@ def market_account_payload(
                 "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
             }
         )
-    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "smarkets", "manifold"} and normalized_operation == "order_history":
+    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "smarkets", "manifold", "sx_bet"} and normalized_operation == "order_history":
         kwargs.update(
             {
                 "status": _query_value(query_params, "status", "filled").lower(),
@@ -3892,7 +3934,7 @@ def market_account_payload(
                 "to_timestamp": _query_float(query_params, "to"),
             }
         )
-    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket"} and normalized_operation == "positions":
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "sx_bet"} and normalized_operation == "positions":
         raw_limit = _query_value(query_params, "limit")
         kwargs.update(
             {

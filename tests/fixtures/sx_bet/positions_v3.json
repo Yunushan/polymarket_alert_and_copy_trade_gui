@@ -1,0 +1,21 @@
+{
+  "status": "success",
+  "data": {
+    "positions": [
+      {
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "market": {"marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111", "status": "ACTIVE"},
+        "totalStake": "300000000",
+        "maxWin": "200000000",
+        "netMaxWin": "198400000",
+        "maxLoss": "-100000000",
+        "isOutcomeOneMaxWin": true,
+        "odds": {"outcomeOne": "40000000000000000000", "outcomeTwo": "50000000000000000000"},
+        "pnl": null,
+        "tradeCount": 2,
+        "betTime": "2026-03-13T21:14:02.118Z",
+        "updatedAt": "2026-03-13T22:03:41.502Z"
+      }
+    ]
+  }
+}

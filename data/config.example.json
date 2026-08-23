@@ -583,6 +583,7 @@
         "sx_bet_ws_url": "wss://realtime.sx.bet/connection/websocket",
         "sx_bet_base_token": "0x6629Ce1Cf35Cc1329ebB4F63202F3f197b3F050B",
         "sx_bet_executor_address": "0x52adf738AAD93c31f798a30b2C74D658e1E9a562",
+        "sx_bet_order_management_enabled": false,
         "credential_env_vars": [
           "SX_BET_API_KEY",
           "SX_BET_PRIVATE_KEY",
@@ -593,7 +594,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Read-only markets, active-order orderbooks, best odds, WebSocket channel metadata, and local paper trading are implemented through official SX Bet APIs. Live signed order posting is guarded by live_trading_enabled and requires wallet credentials plus funded SX account setup."
+        "notes": "Read-only markets, active-order orderbooks, best odds, public trades, API-key account bets/fills/positions/balance, WebSocket channel metadata, and local paper trading are implemented through official SX Bet APIs. Live signed order posting is guarded by live_trading_enabled and requires wallet credentials plus funded SX account setup. v3 cancellations remain separately disabled unless sx_bet_order_management_enabled=true and the shared live confirmation gate is satisfied."
       }
     },
     "thales_market": {

@@ -1397,6 +1397,15 @@ XO_ACCOUNT_OPERATIONS = (
     "settlement_history",
     "audit_logs",
 )
+SX_BET_ACCOUNT_OPERATIONS = (
+    "balance",
+    "active_orders",
+    "order_detail",
+    "order_by_client_id",
+    "order_history",
+    "fills",
+    "positions",
+)
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1417,6 +1426,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + AZURO_ACCOUNT_OPERATIONS
         + MYRIAD_ACCOUNT_OPERATIONS
         + XO_ACCOUNT_OPERATIONS
+        + SX_BET_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1731,6 +1741,48 @@ def run_market_account(args: argparse.Namespace) -> int:
             }
             if operation == "audit_logs":
                 kwargs["event_type"] = str(getattr(args, "event_type", "") or "").strip() or None
+    elif market_id == "sx_bet":
+        if operation == "balance":
+            kwargs = {}
+        elif operation == "active_orders":
+            kwargs = {
+                "market_hash": str(getattr(args, "account_market_hash", "") or "").strip() or None,
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
+        elif operation == "order_detail":
+            kwargs = {"order_id": str(getattr(args, "order_id", "") or "").strip()}
+        elif operation == "order_by_client_id":
+            kwargs = {"client_order_id": str(getattr(args, "client_order_id", "") or "").strip()}
+        elif operation == "order_history":
+            kwargs = {
+                "market_hash": str(getattr(args, "account_market_hash", "") or "").strip() or None,
+                "status": str(getattr(args, "status", "") or "").strip() or None,
+                "start_date": str(getattr(args, "start_date", "") or "").strip() or None,
+                "end_date": str(getattr(args, "end_date", "") or "").strip() or None,
+                "sort_asc": getattr(args, "sort_asc", None),
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
+        elif operation == "fills":
+            kwargs = {
+                "trade_id": str(getattr(args, "trade_id", "") or "").strip() or None,
+                "order_id": str(getattr(args, "order_id", "") or "").strip() or None,
+                "start_date": str(getattr(args, "start_date", "") or "").strip() or None,
+                "end_date": str(getattr(args, "end_date", "") or "").strip() or None,
+                "sort_asc": getattr(args, "sort_asc", None),
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
+        elif operation == "positions":
+            kwargs = {
+                "status": str(getattr(args, "status", "") or "").strip(),
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+                "sort_asc": getattr(args, "sort_asc", None),
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
     elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": str(getattr(args, "status", "") or "").strip(),
@@ -1877,6 +1929,12 @@ XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orde
 IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders", "modify_order")
 MANIFOLD_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order",)
 PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
+SX_BET_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_event_orders",
+    "cancel_all_orders",
+)
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1895,6 +1953,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + IBKR_ORDER_MANAGEMENT_OPERATIONS
         + MANIFOLD_ORDER_MANAGEMENT_OPERATIONS
         + PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS
+        + SX_BET_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -2978,6 +3037,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--trade-id", default=None, help="Optional Polymarket trade id for fill reads.")
     market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
     market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
+    market_account.add_argument("--account-market-hash", default="", help="SX Bet 32-byte market hash filter.")
     market_account.add_argument("--outcome-id", default="", help="XO outcome id for authenticated history filters.")
     market_account.add_argument("--event-type", default="", help="XO audit event type filter.")
     market_account.add_argument("--trading-model", default="all", help="Myriad account model: amm, ob, or all.")
@@ -2992,6 +3052,9 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--topics", default="", help="Myriad market-position comma-separated topics.")
     market_account.add_argument("--market-ids", default="", help="Myriad market-position comma-separated market ids.")
     market_account.add_argument("--event-types", default="", help="Predict.fun comma-separated account activity event types.")
+    market_account.add_argument("--start-date", default="", help="SX Bet v3 account ISO-8601 lower time bound.")
+    market_account.add_argument("--end-date", default="", help="SX Bet v3 account ISO-8601 upper time bound.")
+    market_account.add_argument("--sort-asc", action=argparse.BooleanOptionalAction, default=None, help="SX Bet v3 account sort direction.")
     market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
     market_account.add_argument("--event-type-id", default="", help="Betfair event type id filter.")
     market_account.add_argument("--account-event-id", default="", help="Betfair event id filter.")
@@ -3053,7 +3116,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, IBKR event contracts, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Prophet Exchange, Predict.fun, Probable, Smarkets, or Xmarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, IBKR event contracts, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Prophet Exchange, Predict.fun, Probable, Smarkets, SX Bet, or Xmarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
