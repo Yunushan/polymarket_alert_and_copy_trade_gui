@@ -1774,7 +1774,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             if url.endswith("/activity"):
                 self.assertEqual(params["user"], "0x0000000000000000000000000000000000000001")
                 self.assertEqual(params["type"], ["TRADE"])
-                self.assertEqual(params["market"], ["condition-1"])
+                if "market" in params:
+                    self.assertEqual(params["market"], ["condition-1"])
                 return activity
             if url.endswith("/prices-history"):
                 self.assertEqual(params["market"], "token-yes")
@@ -1816,6 +1817,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             from_timestamp=1780344000,
             to_timestamp=1780347600,
         )
+        activities = history_adapter.list_activity(
+            "0x0000000000000000000000000000000000000001",
+            limit=2,
+        )
 
         self.assertEqual([trade.trade_id for trade in trades], ["0xprobabletrade1"])
         self.assertEqual([trade.side for trade in trades], ["BUY"])
@@ -1824,6 +1829,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([trade.timestamp for trade in trades], [1780344003.0])
         self.assertEqual([candle.close for candle in candles], [0.42, 0.44])
         self.assertEqual([candle.volume for candle in candles], [None, None])
+        self.assertEqual([item["asset"] for item in activities], ["market-1:token-yes", "market-1:token-no"])
+        self.assertEqual([item["side"] for item in activities], ["BUY", "SELL"])
+        self.assertEqual([item["source"] for item in activities], ["probable_public_activity"] * 2)
+        copy_preview = history_adapter.copy_trade_from_activity(activities[0])
+        self.assertTrue(copy_preview.accepted)
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_trades("market-1:token-yes")
@@ -1833,6 +1843,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             history_adapter.list_candles("market-1:token-yes", resolution="5m")
         with self.assertRaises(MarketConfigurationError):
             history_adapter.list_trades("market-1:token-yes", before=10, after=20)
+        with self.assertRaises(MarketConfigurationError):
+            history_adapter.list_activity("not-an-address")
+        with self.assertRaises(MarketConfigurationError):
+            history_adapter.copy_trade_from_activity({"asset": "market-1:token-yes", "side": "BUY", "size": 0})
 
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
@@ -1886,7 +1900,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(calls[0][3]["PROB_SIGNATURE"])
         self.assertEqual(json.loads(calls[0][2])["order"]["tokenId"], "token-yes")
 
-        with self.assertRaises(UnsupportedFeatureError):
+        with self.assertRaises(MarketConfigurationError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})
 
     def test_probable_account_reads_and_guarded_cancellations_use_fixed_signed_paths(self) -> None:

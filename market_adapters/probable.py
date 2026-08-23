@@ -12,7 +12,8 @@ from urllib.parse import urlencode
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
+from .identity import require_activity_identity
 from .types import (
     MarketCandle,
     MarketContract,
@@ -273,6 +274,91 @@ class ProbableAdapter(MarketAdapter):
                 break
         return trades
 
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return normalized trade activity for an explicit Probable wallet.
+
+        The documented public ``/activity`` feed accepts a wallet and returns
+        mixed account events.  Only complete ``TRADE`` records are admitted to
+        the wallet/copy workflow; splits, merges, liquidity, and malformed rows
+        are ignored.  Contract ids use the upstream market id when present and
+        otherwise fall back to the condition id, preserving the token id and
+        source identifiers for a later paper preview.
+        """
+
+        self.ensure_capability("copy_trading")
+        wallet = require_activity_identity(self.market_id, wallet_address)
+        desired = self._bounded_limit(limit, maximum=500, label="Probable activity limit")
+        payload = self._clob_get(
+            "/activity",
+            params={
+                "user": wallet,
+                "limit": desired,
+                "offset": 0,
+                "type": ["TRADE"],
+                "sortBy": "TIMESTAMP",
+                "sortDirection": "DESC",
+            },
+        )
+        rows = self._list_from_payload(payload, "activity", "transactions", "data")
+        activities: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            activity_type = str(row.get("type") or "").strip().upper()
+            if activity_type and activity_type != "TRADE":
+                continue
+            token_id = str(row.get("asset") or row.get("tokenId") or row.get("token_id") or "").strip()
+            condition_id = str(row.get("conditionId") or row.get("condition_id") or "").strip()
+            raw_market = row.get("marketId") or row.get("market_id") or row.get("market") or condition_id or ""
+            if isinstance(raw_market, Mapping):
+                raw_market = raw_market.get("id") or raw_market.get("marketId") or raw_market.get("market_id") or ""
+            market_id = str(raw_market).strip()
+            trade_id = str(
+                row.get("transactionHash")
+                or row.get("transaction_hash")
+                or row.get("tradeId")
+                or row.get("trade_id")
+                or row.get("id")
+                or ""
+            ).strip()
+            side = str(row.get("side") or "").strip().upper()
+            price = self._safe_probability(row.get("price"))
+            size = self._positive_number(row.get("size"))
+            timestamp = self._optional_timestamp(row.get("timestamp"))
+            if not token_id or not market_id or not trade_id or side not in {"BUY", "SELL"}:
+                continue
+            if price is None or size is None or timestamp is None:
+                continue
+            try:
+                market_id = self._safe_identifier(market_id, "market")
+                token_id = self._safe_identifier(token_id, "token")
+            except MarketConfigurationError:
+                continue
+            activities.append(
+                {
+                    "proxyWallet": wallet,
+                    "asset": f"{market_id}:{token_id}",
+                    "contract_id": f"{market_id}:{token_id}",
+                    "marketId": market_id,
+                    "conditionId": condition_id,
+                    "side": side,
+                    "size": size,
+                    "price": price,
+                    "timestamp": timestamp,
+                    "transactionHash": trade_id,
+                    "outcome": row.get("outcome") or "",
+                    "outcomeIndex": row.get("outcomeIndex") if row.get("outcomeIndex") is not None else row.get("outcome_index"),
+                    "slug": row.get("slug") or "",
+                    "title": row.get("title") or "",
+                    "activityType": "TRADE",
+                    "raw": dict(row),
+                    "source": "probable_public_activity",
+                }
+            )
+            if len(activities) >= desired:
+                break
+        return activities
+
     def list_candles(
         self,
         contract_id: str,
@@ -490,10 +576,29 @@ class ProbableAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Probable copy trading is unsupported because the adapter does not mirror account activity.",
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Probable activity has no market/token contract id.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Probable activity side must be BUY or SELL.")
+        size = self._positive_number(activity.get("size"))
+        if size is None:
+            raise MarketConfigurationError("Probable activity size must be positive and numeric.")
+        raw_price = activity.get("price")
+        limit_price = None if raw_price in (None, "") else self._safe_probability(raw_price)
+        if raw_price not in (None, "") and limit_price is None:
+            raise MarketConfigurationError("Probable activity reference price must be between 0 and 1.")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata={"activity": dict(activity), "source": "probable_public_activity"},
+            )
         )
 
     def _get_event(self, event_id: str) -> Mapping[str, Any]:

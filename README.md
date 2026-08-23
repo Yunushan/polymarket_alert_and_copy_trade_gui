@@ -581,7 +581,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes (current/cleared account orders, bounded derived execution candles, funds, account details, statements, currency rates) | Yes | Guarded place/cancel/update/replace, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |
 | Coinbase Prediction Markets (`coinbase_prediction_markets`) | Implemented | Yes | Yes (including public trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
-| Probable (`probable`) | Implemented | Yes | Yes (activity/price history; authenticated open-order reads) | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
+| Probable (`probable`) | Implemented | Yes | Yes (activity/price history; authenticated open-order reads) | Yes | Guarded, off by default | Yes (simulation-first wallet activity) | Required | API credentials required | Jurisdiction varies |
 | Kalshi via Robinhood (`kalshi_via_robinhood`) | Implemented | Yes | Yes (including trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
 | FanDuel Predicts (`fanduel_predicts`) | Implemented | Yes | Yes | Yes | No | No | Required | Account required for trading | Region/KYC limited |
 | Seer (`seer`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
