@@ -1388,6 +1388,15 @@ MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
 PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
 MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
+XO_ACCOUNT_OPERATIONS = (
+    "account",
+    "positions",
+    "orders",
+    "trades",
+    "settlement",
+    "settlement_history",
+    "audit_logs",
+)
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1407,6 +1416,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
         + AZURO_ACCOUNT_OPERATIONS
         + MYRIAD_ACCOUNT_OPERATIONS
+        + XO_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1696,6 +1706,31 @@ def run_market_account(args: argparse.Namespace) -> int:
                         "market_ids": str(getattr(args, "market_ids", "") or "").strip() or None,
                     }
                 )
+    elif market_id == "xo_market":
+        if operation in {"account", "positions", "orders"}:
+            kwargs = {}
+        elif operation in {"settlement", "settlement_history"}:
+            market_id_filter = str(getattr(args, "account_market_id", "") or "").strip()
+            if not market_id_filter and args.contract:
+                market_id_filter = str(args.contract).split(":", 1)[0].strip()
+            kwargs = {"market_id": market_id_filter}
+            if operation == "settlement_history":
+                kwargs.update(
+                    {
+                        "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 1000),
+                        "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                    }
+                )
+        elif operation in {"trades", "audit_logs"}:
+            kwargs = {
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+                "outcome_id": str(getattr(args, "outcome_id", "") or "").strip() or None,
+                "start_time": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
+                "end_time": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
+            }
+            if operation == "audit_logs":
+                kwargs["event_type"] = str(getattr(args, "event_type", "") or "").strip() or None
     elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": str(getattr(args, "status", "") or "").strip(),
@@ -2943,6 +2978,8 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--trade-id", default=None, help="Optional Polymarket trade id for fill reads.")
     market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
     market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
+    market_account.add_argument("--outcome-id", default="", help="XO outcome id for authenticated history filters.")
+    market_account.add_argument("--event-type", default="", help="XO audit event type filter.")
     market_account.add_argument("--trading-model", default="all", help="Myriad account model: amm, ob, or all.")
     market_account.add_argument("--min-shares", default="", help="Myriad minimum position shares.")
     market_account.add_argument("--network-id", default="", help="Myriad account network id.")

@@ -180,6 +180,7 @@ HISTORY_CAPABILITIES = {
     "context_v2": {"trade_history", "candle_history"},
     "predict_fun": {"trade_history", "candle_history"},
     "dflow": {"trade_history"},
+    "xo_market": {"trade_history", "candle_history"},
 }
 
 

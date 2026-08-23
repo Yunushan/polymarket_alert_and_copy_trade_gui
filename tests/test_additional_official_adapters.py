@@ -3186,6 +3186,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         markets = load_fixture("xo_market", "markets")
         market = load_fixture("xo_market", "market")
         orderbook = load_fixture("xo_market", "orderbook")
+        trades = load_fixture("xo_market", "trades")
+        candles = load_fixture("xo_market", "candles")
+        account = load_fixture("xo_market", "account")
+        positions = load_fixture("xo_market", "positions")
+        orders = load_fixture("xo_market", "orders")
+        account_trades = load_fixture("xo_market", "account_trades")
+        settlement = load_fixture("xo_market", "settlement")
+        settlement_history = load_fixture("xo_market", "settlement_history")
+        audit_logs = load_fixture("xo_market", "audit_logs")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers["XO-API-KEY"], "xo-key")
@@ -3196,6 +3205,59 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return market
             if url.endswith("/markets/us-election-2028/outcomes/vance/orderbook"):
                 return orderbook
+            if url.endswith("/markets/us-election-2028/trades"):
+                self.assertIsNone(params)
+                return trades
+            if url.endswith("/markets/us-election-2028/candles"):
+                self.assertEqual(
+                    params,
+                    {
+                        "outcome_id": "vance",
+                        "interval": "1h",
+                        "start_time": "2024-12-01T09:00:00.000Z",
+                        "end_time": "2024-12-01T10:00:00.000Z",
+                        "limit": 1000,
+                    },
+                )
+                return candles
+            if url.endswith("/account"):
+                self.assertIsNone(params)
+                return account
+            if url.endswith("/positions"):
+                self.assertIsNone(params)
+                return positions
+            if url.endswith("/orders"):
+                self.assertIsNone(params)
+                return orders
+            if url.endswith("/trades"):
+                self.assertEqual(
+                    params,
+                    {
+                        "market_id": "us-election-2028",
+                        "outcome_id": "vance",
+                        "start_time": "2024-12-01T09:15:00.000Z",
+                        "end_time": "2024-12-01T09:30:00.000Z",
+                        "limit": 2,
+                    },
+                )
+                return account_trades
+            if url.endswith("/markets/us-election-2028/settlement"):
+                self.assertIsNone(params)
+                return settlement
+            if url.endswith("/markets/us-election-2028/settlement/history"):
+                self.assertEqual(params, {"limit": 5, "cursor": "next-page"})
+                return settlement_history
+            if url.endswith("/audit/logs"):
+                self.assertEqual(
+                    params,
+                    {
+                        "event_type": "order_filled",
+                        "start_time": "2024-12-01T09:15:00.000Z",
+                        "end_time": "2024-12-01T09:30:00.000Z",
+                        "limit": 2,
+                    },
+                )
+                return audit_logs
             raise AssertionError(f"unexpected XO URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -3205,6 +3267,43 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             events = adapter.list_events("election")
             contracts = adapter.list_contracts("us-election-2028")
             price = adapter.get_price("us-election-2028:vance")
+            trade_history = adapter.list_trades(
+                order.contract_id,
+                limit=2,
+                after=1733044500,
+                before=1733045400,
+            )
+            candle_history = adapter.list_candles(
+                order.contract_id,
+                resolution="1h",
+                from_timestamp=1733043600,
+                to_timestamp=1733047200,
+            )
+            account_payload = adapter.account_recovery("account")
+            positions_payload = adapter.account_recovery("positions")
+            orders_payload = adapter.account_recovery("orders")
+            recovered_trades = adapter.account_recovery(
+                "trades",
+                market_id="us-election-2028",
+                outcome_id="vance",
+                start_time=1733044500,
+                end_time=1733045400,
+                limit=2,
+            )
+            settlement_payload = adapter.account_recovery("settlement", market_id="us-election-2028")
+            settlement_history_payload = adapter.account_recovery(
+                "settlement_history",
+                market_id="us-election-2028",
+                limit=5,
+                cursor="next-page",
+            )
+            audit_payload = adapter.account_recovery(
+                "audit_logs",
+                event_type="order_filled",
+                start_time=1733044500,
+                end_time=1733045400,
+                limit=2,
+            )
             paper = adapter.place_paper_order(order)
             with self.assertRaises(MarketConfigurationError):
                 adapter.place_live_order(order)
@@ -3212,6 +3311,23 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(events[0].event_id, "us-election-2028")
         self.assertEqual([contract.contract_id for contract in contracts], ["us-election-2028:vance", "us-election-2028:newsom"])
         self.assertAlmostEqual(price.midpoint or 0.0, 0.35)
+        self.assertEqual([trade.trade_id for trade in trade_history], ["trd_8a7b6c5d"])
+        self.assertEqual(trade_history[0].side, "BUY")
+        self.assertAlmostEqual(trade_history[0].price, 0.35)
+        self.assertAlmostEqual(trade_history[0].size, 14285.71)
+        self.assertAlmostEqual(trade_history[0].timestamp or 0.0, 1733044500.456, places=3)
+        self.assertEqual(len(candle_history), 1)
+        self.assertEqual(candle_history[0].contract_id, order.contract_id)
+        self.assertAlmostEqual(candle_history[0].open, 0.34)
+        self.assertAlmostEqual(candle_history[0].close, 0.35)
+        self.assertAlmostEqual(candle_history[0].volume or 0.0, 125000.0)
+        self.assertEqual(account_payload["id"], "acc_8a9b2c3d")
+        self.assertEqual(positions_payload["positions"][0]["outcome_id"], "vance")
+        self.assertEqual(orders_payload["orders"][0]["status"], "filled")
+        self.assertEqual(recovered_trades["trades"][0]["trade_id"], "trd_8a7b6c5d")
+        self.assertEqual(settlement_payload["status"], "resolved")
+        self.assertEqual(settlement_history_payload["settlements"][0]["status"], "resolved")
+        self.assertEqual(audit_payload["events"][0]["event_type"], "order_filled")
         self.assertEqual(paper.raw["request"]["amount_usd"], 25.0)
 
         live_adapter = XOMarketAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
@@ -3230,6 +3346,39 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(calls[0][1].endswith("/orders"))
         self.assertIn('"market_id":"us-election-2028"', calls[0][2])
         self.assertEqual(calls[0][3]["XO-API-KEY"], "xo-key")
+
+        management = XOMarketAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "xo_order_management_enabled": True,
+            }
+        )
+        management_calls = []
+
+        def fake_cancel_request(method: str, url: str, *, params=None, data=None, headers=None, timeout=None):
+            management_calls.append((method, url, params, data, headers, timeout))
+            return FakeResponse(load_fixture("xo_market", "cancel_response"))
+
+        management.runtime.session.request = fake_cancel_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"XO_API_KEY": "xo-key", "XO_API_SECRET": "xo-secret"}):
+            cancelled = management.manage_orders(
+                "cancel_order",
+                order_id="ord_992837",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+
+        self.assertEqual(cancelled["response"]["status"], "cancelled")
+        self.assertEqual(management_calls[0][0], "DELETE")
+        self.assertTrue(management_calls[0][1].endswith("/orders/ord_992837"))
+        self.assertEqual(management_calls[0][3], "")
+        self.assertEqual(management_calls[0][4]["XO-API-KEY"], "xo-key")
+        with self.assertRaises(MarketConfigurationError):
+            management.manage_orders(
+                "cancel_order",
+                order_id="../outside",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
 
     def test_betfair_adapter_maps_market_catalogue_and_best_offer_books(self) -> None:
         adapter = BetfairExchangeAdapter()

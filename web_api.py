@@ -3747,6 +3747,32 @@ def market_account_payload(
                         "market_ids": _query_value(query_params, "market_ids"),
                     }
                 )
+    elif normalized_market_id == "xo_market":
+        if normalized_operation in {"account", "positions", "orders"}:
+            kwargs = {}
+        elif normalized_operation in {"settlement", "settlement_history"}:
+            raw_contract = _query_value(query_params, "contract_id")
+            market_id_filter = _query_value(query_params, "market_id")
+            if not market_id_filter and raw_contract:
+                market_id_filter = raw_contract.split(":", 1)[0].strip()
+            kwargs = {"market_id": market_id_filter}
+            if normalized_operation == "settlement_history":
+                kwargs.update(
+                    {
+                        "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                        "cursor": _query_value(query_params, "cursor") or None,
+                    }
+                )
+        elif normalized_operation in {"trades", "audit_logs"}:
+            kwargs = {
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "market_id": _query_value(query_params, "market_id") or None,
+                "outcome_id": _query_value(query_params, "outcome_id") or None,
+                "start_time": _query_value(query_params, "start_time") or _query_value(query_params, "from"),
+                "end_time": _query_value(query_params, "end_time") or _query_value(query_params, "to"),
+            }
+            if normalized_operation == "audit_logs":
+                kwargs["event_type"] = _query_value(query_params, "event_type") or None
     elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": _query_value(query_params, "status") or "",

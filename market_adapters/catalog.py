@@ -352,6 +352,8 @@ XO_MARKET_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -685,7 +687,11 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="xo_market",
         display_name="XO Market",
         homepage_url="https://xotrade.co",
-        description="Official XO Markets HMAC REST adapter for authenticated market data, orderbooks, dry-run orders, and guarded live order posting.",
+        description=(
+            "Official XO Markets HMAC REST adapter for authenticated market data, orderbooks, public trades, "
+            "OHLCV candles, authenticated account/settlement/audit recovery, dry-run orders, and guarded live "
+            "order posting/cancellation."
+        ),
         capabilities=XO_MARKET_CAPABILITIES,
     ),
     MarketMetadata(

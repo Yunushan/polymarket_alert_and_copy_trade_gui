@@ -1,0 +1,13 @@
+{
+  "events": [
+    {
+      "event_id": "evt_a1b2c3d4",
+      "sequence": 9827364,
+      "timestamp": "2024-12-01T09:15:00.456Z",
+      "event_type": "order_filled",
+      "entity_type": "order",
+      "entity_id": "ord_992837"
+    }
+  ],
+  "next_cursor": null
+}

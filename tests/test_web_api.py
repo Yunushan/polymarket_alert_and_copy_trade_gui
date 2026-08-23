@@ -1999,6 +1999,70 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
 
+    def test_xo_account_payload_forwards_documented_filters_and_path_ids(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="xo_market",
+            display_name="XO Market",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = (
+            "account",
+            "positions",
+            "orders",
+            "trades",
+            "settlement",
+            "settlement_history",
+            "audit_logs",
+        )  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["xo_market"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "xo_market",
+            "trades",
+            {
+                "market_id": ["us-election-2028"],
+                "outcome_id": ["vance"],
+                "from": ["2024-12-01T09:15:00Z"],
+                "to": ["2024-12-01T09:30:00Z"],
+                "limit": ["12"],
+                "unexpected": ["ignored"],
+            },
+        )
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["market_id"], "us-election-2028")
+        self.assertEqual(payload["parameters"]["outcome_id"], "vance")
+        self.assertEqual(payload["parameters"]["start_time"], "2024-12-01T09:15:00Z")
+        self.assertEqual(payload["parameters"]["end_time"], "2024-12-01T09:30:00Z")
+
+        settlement = market_account_payload(
+            cfg,
+            Registry(),
+            "xo_market",
+            "settlement_history",
+            {"contract_id": ["us-election-2028:vance"], "limit": ["5"], "cursor": ["next"]},
+        )
+        self.assertEqual(
+            settlement["parameters"],
+            {"market_id": "us-election-2028", "limit": 5, "cursor": "next"},
+        )
+        self.assertEqual(calls[0][0], "trades")
+        self.assertEqual(calls[1][0], "settlement_history")
+
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()
         cfg.markets["kalshi"].enabled = True

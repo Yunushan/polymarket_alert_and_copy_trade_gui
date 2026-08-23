@@ -1,0 +1,10 @@
+{
+  "id": "acc_8a9b2c3d",
+  "email": "trader@example.com",
+  "status": "active",
+  "balance": 10000.0,
+  "buying_power": 8500.0,
+  "pending_orders_value": 1500.0,
+  "realized_pnl": 2340.5,
+  "unrealized_pnl": -150.0
+}

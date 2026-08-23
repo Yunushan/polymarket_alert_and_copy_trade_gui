@@ -1,0 +1,11 @@
+{
+  "settlements": [
+    {
+      "market_id": "us-election-2028",
+      "status": "resolved",
+      "final_outcome_id": "vance",
+      "resolved_at": "2028-11-09T04:30:00Z"
+    }
+  ],
+  "next_cursor": null
+}
