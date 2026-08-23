@@ -19,19 +19,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://factmachine.io",
         ],
     },
-    "hypermind": {
-        "reason": (
-            "Verified 2026-08-21: Hypermind describes dashboards, PDF reports, and API feeds as managed "
-            "service deliverables, but does not publish a public API contract, SDK, or self-service data endpoint. "
-            "Program or enterprise access is required before implementation."
-        ),
-        "references": [
-            "https://www.hypermind.com/products-services/crowd",
-            "https://www.hypermind.com/products-services/prescience",
-            "https://predict.hypermind.com",
-        ],
-        "last_reviewed": "2026-08-21",
-    },
     "infer": {
         "reason": (
             "Verified 2026-05-26; re-verified 2026-08-17: INFER-pub now redirects to the RAND Forecasting Initiative "
@@ -175,6 +162,7 @@ def build_default_registry() -> AdapterRegistry:
     from .gemini import GeminiPredictionAdapter
     from .good_judgment_open import GoodJudgmentOpenAdapter
     from .hyperliquid import HyperliquidAdapter
+    from .hypermind import HypermindAdapter
     from .hedgehog import HedgehogMarketsAdapter
     from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKRForecastTraderAdapter
     from .iowa_electronic_markets import IowaElectronicMarketsAdapter
@@ -244,6 +232,7 @@ def build_default_registry() -> AdapterRegistry:
         ManifoldAdapter,
         MetaculusAdapter,
         GoodJudgmentOpenAdapter,
+        HypermindAdapter,
         LimitlessAdapter,
         SxBetAdapter,
         AzuroAdapter,
@@ -301,6 +290,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(ManifoldAdapter, replace=True)
     registry.register_adapter(MetaculusAdapter, replace=True)
     registry.register_adapter(GoodJudgmentOpenAdapter, replace=True)
+    registry.register_adapter(HypermindAdapter, replace=True)
     registry.register_adapter(LimitlessAdapter, replace=True)
     registry.register_adapter(SxBetAdapter, replace=True)
     registry.register_adapter(AzuroAdapter, replace=True)

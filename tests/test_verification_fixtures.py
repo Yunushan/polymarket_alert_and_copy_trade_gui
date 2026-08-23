@@ -426,6 +426,16 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("trade_id", trades["trades"][0])
         self.assertIn("assets_per_option", trades["trades"][0])
 
+    def test_hypermind_fixtures_cover_documented_export_shapes(self) -> None:
+        metadata = json.loads((FIXTURE_ROOT / "hypermind" / "export_metadata.json").read_text(encoding="utf-8"))
+        prices = (FIXTURE_ROOT / "hypermind" / "prices.csv").read_text(encoding="utf-8").splitlines()
+        outcomes = (FIXTURE_ROOT / "hypermind" / "outcomes.txt").read_text(encoding="utf-8").splitlines()
+
+        self.assertTrue(metadata.get("archive_only"))
+        self.assertEqual(metadata.get("columns"), ["timestamp", "ifpid", "outcome", "price", "qty"])
+        self.assertEqual(prices[0], "timestamp,ifpid,outcome,price,qty")
+        self.assertTrue(outcomes)
+
     def test_probable_fixtures_cover_market_and_clob_payload_shapes(self) -> None:
         events = json.loads((FIXTURE_ROOT / "probable" / "events.json").read_text(encoding="utf-8"))
         event = json.loads((FIXTURE_ROOT / "probable" / "event.json").read_text(encoding="utf-8"))

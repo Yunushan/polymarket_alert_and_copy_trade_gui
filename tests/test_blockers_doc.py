@@ -78,6 +78,7 @@ IMPLEMENTED_MARKETS = {
     "lamas_finance",
     "nadex",
     "iowa_electronic_markets",
+    "hypermind",
     "scicast",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)

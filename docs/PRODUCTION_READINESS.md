@@ -41,8 +41,8 @@ check does not receive local test or security points.
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
 The latest local audit on 2026-08-23 is **83/100 (not ready)**. Local
-verification passed all 773 tests (7 intentionally skipped), Ruff, the adapter
-catalog (68 markets, 56 implemented and 12 explicitly blocked), 300 offline
+verification passed all 802 tests (7 intentionally skipped), Ruff, the adapter
+catalog (68 markets, 57 implemented and 11 explicitly blocked), 323 offline
 fixtures, documentation, workflow, secret-hygiene, and packaging checks; branch
 coverage was 76% overall. The BetMGM partner Sports API is covered by a
 fixture-backed read-only/paper adapter; live and copy trading remain explicitly

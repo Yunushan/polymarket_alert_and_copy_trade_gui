@@ -276,10 +276,14 @@
     "hypermind": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "hypermind_prices_url": "https://predict.hypermind.com/hypermind/media/data/All-ifps-all-prices-260714.csv",
+        "hypermind_outcomes_url": "https://predict.hypermind.com/hypermind/media/data/Winning-outcomes-all-260714.txt",
+        "hypermind_allow_custom_data_host": false,
+        "hypermind_max_rows": 1500000,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: API feeds are described as managed-service deliverables that require program access; no public API contract, SDK, or self-service endpoint is published."
+        "notes": "Archive-only support uses Hypermind's official trade-level CSV and winning-outcomes export. Prices are normalized from source percentages, trade direction remains TRADE because the export does not publish BUY/SELL, and orderbooks/live/copy trading remain unsupported."
       }
     },
     "ibkr_forecasttrader": {

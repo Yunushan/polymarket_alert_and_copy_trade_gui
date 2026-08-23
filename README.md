@@ -560,7 +560,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Metaculus (`metaculus`) | Implemented | Yes | Yes (forecast snapshots) | No | No | No | Required | Account/API token required | Not trading/KYC limited |
 | SciCast (`scicast`) | Implemented | Yes | Yes (archive snapshots/trades) | Yes (local dry-run) | No | No | Required | API key required | Not trading/KYC limited |
 | Good Judgment Open (`good_judgment_open`) | Implemented | Yes | Yes (forecast probabilities/history) | Yes (local preview) | Guarded, off by default | No | Required | Account/API token required | Region/account limited |
-| Hypermind (`hypermind`) | Verified blocked | No | No | No | No | No | Required | Program access required | Program access limited |
+| Hypermind (`hypermind`) | Implemented | Yes | Yes (official trade export/history) | Yes (local dry-run) | No | No | Required | Not required | Not trading/KYC limited |
 | Iowa Electronic Markets (`iowa_electronic_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Not trading/KYC limited |
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |

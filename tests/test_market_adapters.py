@@ -22,6 +22,7 @@ from market_adapters import (
     FrenzyFinanceAdapter,
     GeminiPredictionAdapter,
     GoodJudgmentOpenAdapter,
+    HypermindAdapter,
     GnosisPredictionMarketsAdapter,
     HyperliquidAdapter,
     HedgehogMarketsAdapter,
@@ -151,6 +152,7 @@ IMPLEMENTED_MARKETS = {
     "lamas_finance",
     "nadex",
     "iowa_electronic_markets",
+    "hypermind",
     "scicast",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
@@ -177,6 +179,7 @@ HISTORY_CAPABILITIES = {
     "sx_bet": {"trade_history", "candle_history"},
     "gemini_titan": {"trade_history", "candle_history"},
     "iowa_electronic_markets": {"candle_history"},
+    "hypermind": {"trade_history", "candle_history"},
     "space": {"trade_history", "candle_history"},
     "scicast": {"trade_history", "candle_history"},
     "probable": {"trade_history", "candle_history"},
@@ -261,6 +264,7 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("metaculus"), MetaculusAdapter)
         self.assertEqual(registry.get_metadata("good_judgment_open").display_name, "Good Judgment Open")
         self.assertIsInstance(registry.create("good_judgment_open"), GoodJudgmentOpenAdapter)
+        self.assertIsInstance(registry.create("hypermind"), HypermindAdapter)
         self.assertEqual(registry.get_metadata("limitless_exchange").display_name, "Limitless Exchange")
         self.assertIsInstance(registry.create("limitless_exchange"), LimitlessAdapter)
         self.assertEqual(registry.get_metadata("sx_bet").display_name, "SX Bet / SX Network")

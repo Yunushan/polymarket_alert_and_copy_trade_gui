@@ -19,6 +19,7 @@ from .errors import MarketAdapterError, MarketConfigurationError, MarketHTTPErro
 from .gemini import GeminiPredictionAdapter
 from .good_judgment_open import GoodJudgmentOpenAdapter
 from .hyperliquid import HyperliquidAdapter
+from .hypermind import HypermindAdapter
 from .hedgehog import HedgehogMarketsAdapter
 from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKREventContractsAdapter, IBKRForecastTraderAdapter
 from .iowa_electronic_markets import IowaElectronicMarketsAdapter
@@ -96,6 +97,7 @@ __all__ = [
     "FanDuelPredictsAdapter",
     "GeminiPredictionAdapter",
     "GoodJudgmentOpenAdapter",
+    "HypermindAdapter",
     "GnosisPredictionMarketsAdapter",
     "HyperliquidAdapter",
     "HedgehogMarketsAdapter",

@@ -507,6 +507,26 @@ IEM_CAPABILITIES = MarketCapabilities(
     region_limited=False,
 )
 
+HYPERMIND_CAPABILITIES = MarketCapabilities(
+    # Hypermind's official report links a documented historical trade export
+    # and winning-outcomes export.  They are read-only archive data, not a
+    # public orderbook or execution API.
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    trade_history=True,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=False,
+)
+
 FRENZY_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -732,7 +752,11 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="hypermind",
         display_name="Hypermind",
         homepage_url="https://www.hypermind.com",
-        description="Verified blocked: API feeds are described as managed service deliverables, not public docs.",
+        description=(
+            "Archive-only adapter for Hypermind's official trade-level CSV and winning-outcomes export; "
+            "orderbooks, live trading, and copy trading remain unsupported."
+        ),
+        capabilities=HYPERMIND_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="iowa_electronic_markets",
