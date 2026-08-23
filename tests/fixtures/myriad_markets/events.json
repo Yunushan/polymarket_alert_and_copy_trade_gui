@@ -14,8 +14,8 @@
           "state": "open",
           "networkId": 56,
           "outcomes": [
-            {"id": 1, "title": "Yes", "price": "0.61", "shares": "1000"},
-            {"id": 2, "title": "No", "price": "0.39", "shares": "800"}
+            {"id": 1, "title": "Yes", "price": "0.61", "bestBid": 0.60, "bestAsk": 0.62, "shares": "1000"},
+            {"id": 2, "title": "No", "price": "0.39", "bestBid": null, "bestAsk": null, "shares": "800"}
           ]
         }
       ]

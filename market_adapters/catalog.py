@@ -656,7 +656,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         display_name="Myriad Markets",
         homepage_url="https://myriad.markets",
         description=(
-            "Official Myriad Protocol API adapter for public question/market discovery, outcome prices, orderbooks, "
+            "Official Myriad Protocol API adapter for grouped event/market discovery, outcome prices, orderbooks, "
             "public wallet-event activity, simulation-first copy intents, dry-run quote payloads, and guarded signed order submission."
         ),
         capabilities=MYRIAD_CAPABILITIES,

@@ -155,9 +155,9 @@ class MyriadAdapter(MarketAdapter):
             market_id=self.market_id,
             contract_id=self._contract_id(market_id, outcome_id),
             last=price,
-            bid=None,
-            ask=None,
-            midpoint=price,
+            bid=self._safe_probability(outcome.get("bestBid", outcome.get("best_bid"))),
+            ask=self._safe_probability(outcome.get("bestAsk", outcome.get("best_ask"))),
+            midpoint=self._price_midpoint(outcome, price),
             source="myriad_market_outcome",
             raw={"market": dict(market), "outcome": dict(outcome)},
         )
@@ -1608,6 +1608,14 @@ class MyriadAdapter(MarketAdapter):
         if number > 1.0 and number <= 100.0:
             number /= 100.0
         return number if 0.0 <= number <= 1.0 else None
+
+    @staticmethod
+    def _price_midpoint(outcome: Mapping[str, Any], fallback: Optional[float]) -> Optional[float]:
+        bid = MyriadAdapter._safe_probability(outcome.get("bestBid", outcome.get("best_bid")))
+        ask = MyriadAdapter._safe_probability(outcome.get("bestAsk", outcome.get("best_ask")))
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2.0
+        return fallback
 
     @staticmethod
     def _is_positive_number(value: Any) -> bool:
