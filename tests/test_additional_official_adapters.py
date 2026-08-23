@@ -1441,6 +1441,27 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(history[0].size, 5.0)
         self.assertEqual(history[0].timestamp, 1760004000.0)
 
+        candle_adapter = DFlowAdapter({"dflow_api_key": "dflow-key", "dflow_candle_trade_limit": 2})
+        candle_adapter._market_cache = adapter._market_cache
+        candle_adapter.runtime.get_json = fake_history_get_json  # type: ignore[method-assign]
+        candles = candle_adapter.list_candles(
+            order.contract_id,
+            resolution="1h",
+            from_timestamp=1760000000,
+            to_timestamp=1760010000,
+        )
+        self.assertEqual(len(candles), 2)
+        self.assertEqual([candle.timestamp for candle in candles], [1760004000.0, 1760007600.0])
+        self.assertAlmostEqual(candles[0].open, 0.42)
+        self.assertAlmostEqual(candles[0].volume or 0, 5.0)
+        self.assertTrue(candles[0].raw["derived"])
+        self.assertEqual(candles[0].raw["source"], "dflow_public_trade_feed")
+
+        with self.assertRaises(MarketConfigurationError):
+            candle_adapter.list_candles(order.contract_id, resolution="2h")
+        with self.assertRaises(MarketConfigurationError):
+            candle_adapter.list_candles(order.contract_id, from_timestamp=10, to_timestamp=9)
+
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
 

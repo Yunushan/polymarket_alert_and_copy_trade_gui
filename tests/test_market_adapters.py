@@ -179,7 +179,7 @@ HISTORY_CAPABILITIES = {
     "probable": {"trade_history", "candle_history"},
     "context_v2": {"trade_history", "candle_history"},
     "predict_fun": {"trade_history", "candle_history"},
-    "dflow": {"trade_history"},
+    "dflow": {"trade_history", "candle_history"},
     "xo_market": {"trade_history", "candle_history"},
 }
 

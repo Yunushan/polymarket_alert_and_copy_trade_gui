@@ -9,6 +9,7 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
     OrderBookLevel,
@@ -251,6 +252,70 @@ class DFlowAdapter(MarketAdapter):
                 )
             )
         return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from DFlow's documented trade feed."""
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError("DFlow candle history requires to_timestamp to be at or after from_timestamp.")
+
+        trades = self.list_trades(
+            contract_id,
+            limit=self._candle_trade_limit(),
+            before=end_ts,
+            after=start_ts,
+        )
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in trades:
+            if trade.timestamp is None or trade.timestamp < 0:
+                continue
+            if start_ts is not None and trade.timestamp < start_ts:
+                continue
+            if end_ts is not None and trade.timestamp > end_ts:
+                continue
+            bucket_timestamp = int(float(trade.timestamp) // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {"open": trade.price, "high": trade.price, "low": trade.price, "close": trade.price, "volume": 0.0, "trade_ids": []},
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += max(0.0, float(trade.size))
+            bucket["trade_ids"].append(trade.trade_id)
+
+        _market, _mint, _outcome, canonical = self._resolve_contract(contract_id)
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "dflow_public_trade_feed",
+                    "derived": True,
+                    "resolution": str(resolution or "").strip().lower(),
+                    "interval_seconds": interval,
+                    "trade_ids": list(bucket["trade_ids"]),
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -561,6 +626,36 @@ class DFlowAdapter(MarketAdapter):
         if not math.isfinite(parsed) or parsed < 0:
             raise MarketConfigurationError(f"DFlow {label} timestamp must be a finite non-negative number.")
         return int(parsed)
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+            "1w": 604800,
+        }
+        normalized = str(resolution or "").strip().lower()
+        try:
+            return intervals[normalized]
+        except KeyError as exc:
+            raise MarketConfigurationError(
+                f"DFlow candle resolution must be one of: {', '.join(intervals)}."
+            ) from exc
+
+    def _candle_trade_limit(self) -> int:
+        raw_limit = self.config.get("dflow_candle_trade_limit", 1000)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("DFlow candle trade limit must be an integer between 1 and 1000.") from exc
+        if limit < 1 or limit > 1000:
+            raise MarketConfigurationError("DFlow candle trade limit must be between 1 and 1000.")
+        return limit
 
     @classmethod
     def _trade_price(cls, raw: Mapping[str, Any], outcome: str) -> Optional[float]:
