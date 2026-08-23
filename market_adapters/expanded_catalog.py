@@ -495,7 +495,7 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="synstation",
         display_name="SynStation",
         homepage_url="https://synstation.ai",
-        description="Verified blocked: no stable official market-data and order API contract has been validated for SynStation.",
+        description="Verified blocked: SynStation's official whitepaper is conceptual and no stable market-data, deployment, or order API contract has been validated.",
     ),
     MarketMetadata(
         market_id="gnosis_prediction_markets",
@@ -660,9 +660,10 @@ def _blocker(
 
 EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     "synstation": _blocker(
-        "No stable official market-data and order API contract has been validated for SynStation.",
+        "SynStation's official whitepaper describes a conceptual CLMM prediction protocol, but no stable market-data endpoint, deployment inventory, or order contract has been validated.",
         "https://synstation.ai",
-        last_reviewed="2026-08-21",
+        "https://synstation.notion.site/SynStation-Whitepaper-12dd359ec74180789fd2cef45609fa93",
+        last_reviewed="2026-08-23",
     ),
     "levr_bet": _blocker(
         "No stable official API, contract schema, and settlement fixtures have been validated for Levr Bet.",
