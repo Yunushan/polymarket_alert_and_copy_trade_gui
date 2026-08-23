@@ -100,7 +100,10 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "ibkr_submit_live_orders": false,
-        "notes": "Official CME event-contract discovery, conids, top-of-book snapshots, alerts, paper orders, and guarded IBKR Web API orders are implemented. An authorized IBKR session, CME/IBKR data and trading entitlements, and funded verification remain external gates."
+        "ibkr_order_management_enabled": false,
+        "ibkr_manual_indicator": false,
+        "ibkr_external_operator": "",
+        "notes": "Official CME event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/modification, alerts, paper orders, and IBKR Web API orders are implemented. An authorized IBKR session, CME/IBKR data and trading entitlements, and funded verification remain external gates."
       }
     },
     "context_v2": {
@@ -184,7 +187,10 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "ibkr_submit_live_orders": false,
-        "notes": "Official ForecastEx event-contract discovery, conids, top-of-book snapshots, alerts, paper orders, and guarded buy-only IBKR Web API orders are implemented. An authorized IBKR session, ForecastEx permissions, and funded verification remain external gates."
+        "ibkr_order_management_enabled": false,
+        "ibkr_manual_indicator": false,
+        "ibkr_external_operator": "",
+        "notes": "Official ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/modification, alerts, paper orders, and guarded buy-only IBKR Web API orders are implemented. An authorized IBKR session, ForecastEx permissions, and funded verification remain external gates."
       }
     },
     "frenzy_finance": {
@@ -291,7 +297,10 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "ibkr_submit_live_orders": false,
-        "notes": "Official IBKR ForecastTrader/ForecastEx event-contract discovery, conids, top-of-book snapshots, alerts, paper orders, and guarded buy-only IBKR Web API orders are implemented. An authorized IBKR session, account/data entitlements, and funded verification remain external gates."
+        "ibkr_order_management_enabled": false,
+        "ibkr_manual_indicator": false,
+        "ibkr_external_operator": "",
+        "notes": "Official IBKR ForecastTrader/ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/modification, alerts, paper orders, and guarded buy-only IBKR Web API orders are implemented. An authorized IBKR session, account/data entitlements, and funded verification remain external gates."
       }
     },
     "infer": {

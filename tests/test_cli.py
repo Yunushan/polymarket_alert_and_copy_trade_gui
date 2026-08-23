@@ -130,6 +130,94 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
         self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
 
+    def test_ibkr_account_and_order_management_commands_forward_documented_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="ibkr_forecasttrader")
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("orders", "order_status"),
+            account_recovery=account_recovery,
+            order_management_operations=("cancel_order", "cancel_all_orders", "modify_order"),
+            manage_orders=manage_orders,
+        )
+        common_patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "orders",
+                        "--market",
+                        "ibkr_forecasttrader",
+                        "--status",
+                        "filled",
+                        "--historical",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        account_payload = json.loads(stdout.getvalue())
+        self.assertEqual(account_calls, [("orders", {"filters": "filled", "force": True})])
+        self.assertEqual(account_payload["data"]["operation"], "orders")
+
+        instructions = {
+            "conid": 721095497,
+            "orderType": "LMT",
+            "side": "BUY",
+            "tif": "DAY",
+            "quantity": 5,
+            "price": 0.51,
+        }
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "modify_order",
+                        "--market",
+                        "ibkr_forecasttrader",
+                        "--order-id",
+                        "987654",
+                        "--instructions",
+                        json.dumps(instructions),
+                        "--manual-indicator",
+                        "false",
+                        "--external-operator",
+                        "desk-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        order_payload = json.loads(stdout.getvalue())
+        self.assertEqual(order_calls[0][0], "modify_order")
+        self.assertEqual(order_calls[0][1]["order_id"], "987654")
+        self.assertEqual(order_calls[0][1]["instructions"], instructions)
+        self.assertEqual(order_calls[0][1]["manual_indicator"], "false")
+        self.assertEqual(order_calls[0][1]["external_operator"], "desk-1")
+        self.assertEqual(order_payload["data"]["operation"], "modify_order")
+
     def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
         cfg = SimpleNamespace(selected_market_id="myriad_markets")
         calls = []

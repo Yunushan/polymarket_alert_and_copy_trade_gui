@@ -172,6 +172,8 @@ export interface MarketCandlesPayload {
 }
 
 export type MarketAccountOperation =
+  | "orders"
+  | "order_status"
   | "active_orders"
   | "account"
   | "account_activity"

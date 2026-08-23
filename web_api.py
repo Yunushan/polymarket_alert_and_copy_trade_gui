@@ -3684,6 +3684,13 @@ def market_account_payload(
             }
             if normalized_operation == "account_activity":
                 kwargs["event_types"] = _query_value(query_params, "event_types")
+    elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
+        kwargs = {
+            "filters": _query_value(query_params, "status") or "",
+            "force": _query_bool(query_params, "force", False),
+        }
+        if normalized_operation == "order_status":
+            kwargs["order_id"] = _query_value(query_params, "order_id")
     elif normalized_market_id == "opinion_labs":
         if normalized_operation == "order_detail":
             kwargs = {"order_id": _query_value(query_params, "order_id")}
@@ -3915,6 +3922,8 @@ def market_order_management_payload(
         "orders",
         "signed_action",
         "confirm_order_management",
+        "manual_indicator",
+        "external_operator",
     ):
         if key in payload:
             kwargs[key] = payload.get(key)

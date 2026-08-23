@@ -645,6 +645,75 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             market_account_payload(cfg, Registry(), "gemini_titan", "arbitrary", {})
 
+    def test_ibkr_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="ibkr_forecasttrader",
+            display_name="IBKR ForecastTrader",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("orders", "order_status")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_all_orders", "modify_order")  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["ibkr_forecasttrader"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "ibkr_forecasttrader",
+            "orders",
+            {"status": ["filled"], "force": ["true"]},
+        )
+        self.assertEqual(account["data"]["operation"], "orders")
+        self.assertEqual(account_calls, [("orders", {"filters": "filled", "force": True})])
+
+        instructions = {
+            "conid": 721095497,
+            "orderType": "LMT",
+            "side": "BUY",
+            "tif": "DAY",
+            "quantity": 5,
+            "price": 0.51,
+        }
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "ibkr_forecasttrader",
+            "modify_order",
+            {
+                "order_id": "987654",
+                "instructions": instructions,
+                "manual_indicator": "false",
+                "external_operator": "desk-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls[0][0], "modify_order")
+        self.assertEqual(order_calls[0][1]["order_id"], "987654")
+        self.assertEqual(order_calls[0][1]["instructions"], instructions)
+        self.assertEqual(order_calls[0][1]["manual_indicator"], "false")
+        self.assertEqual(order_calls[0][1]["external_operator"], "desk-1")
+        self.assertNotIn("unexpected", order_calls[0][1])
+
     def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

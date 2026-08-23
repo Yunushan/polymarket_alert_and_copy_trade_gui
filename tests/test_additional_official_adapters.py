@@ -67,6 +67,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "history",
                 "trades",
                 "order_response",
+                "orders",
+                "order_status",
+                "cancel_response",
+                "modify_response",
             )
         }
         adapter = IBKRForecastTraderAdapter({"ibkr_session_cookie": "api=test-session"})
@@ -100,6 +104,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             if url.endswith("/iserver/account/trades"):
                 self.assertIsNone(params)
                 return forecast_fixtures["trades"]
+            if url.endswith("/iserver/account/orders"):
+                self.assertEqual(params, {"accountId": "DU123456", "filters": "filled", "force": True})
+                return forecast_fixtures["orders"]
+            if url.endswith("/iserver/account/DU123456/order/status/987654"):
+                self.assertIsNone(params)
+                return forecast_fixtures["order_status"]
             raise AssertionError(f"unexpected IBKR URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -131,6 +141,23 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([trade.size for trade in trades], [5.0])
         self.assertTrue(paper.accepted)
 
+        account_adapter = IBKRForecastTraderAdapter(
+            {
+                "ibkr_session_cookie": "api=test-session",
+                "ibkr_account_id": "DU123456",
+            }
+        )
+        account_adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        recovered_orders = account_adapter.account_recovery("orders", filters="filled", force=True)
+        recovered_status = account_adapter.account_recovery("order_status", order_id="987654")
+        self.assertEqual(recovered_orders["response"]["orders"][0]["orderId"], "987654")
+        self.assertEqual(recovered_status["response"]["order_status"], "Submitted")
+        self.assertEqual(account_adapter.health_check()["account_recovery_operations"], ["orders", "order_status"])
+        self.assertEqual(
+            account_adapter.health_check()["order_management_operations"],
+            ["cancel_order", "cancel_all_orders", "modify_order"],
+        )
+
         calls = []
         live = IBKRForecastTraderAdapter(
             {
@@ -144,14 +171,73 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         def fake_live_request(method: str, url: str, *, params=None, json_body=None, headers=None):
             calls.append((method, url, params, json_body, headers))
+            if method == "GET":
+                return forecast_fixtures["accounts"]
             return forecast_fixtures["order_response"]
 
         live.runtime.request_json = fake_live_request  # type: ignore[method-assign]
         live_result = live.place_live_order(order)
         self.assertTrue(live_result["live"])
-        self.assertEqual(calls[0][0], "POST")
-        self.assertTrue(calls[0][1].endswith("/iserver/account/DU123456/orders"))
-        self.assertEqual(calls[0][3]["orders"][0]["conid"], 721095497)
+        live_call = next(call for call in calls if call[0] == "POST")
+        self.assertTrue(live_call[1].endswith("/iserver/account/DU123456/orders"))
+        self.assertEqual(live_call[3]["orders"][0]["conid"], 721095497)
+
+        management = IBKRForecastTraderAdapter(
+            {
+                "ibkr_session_cookie": "api=test-session",
+                "ibkr_account_id": "DU123456",
+                "ibkr_order_management_enabled": True,
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+            }
+        )
+        management_calls = []
+
+        def fake_management_request(method: str, url: str, *, params=None, json_body=None, headers=None):
+            management_calls.append((method, url, params, json_body, headers))
+            if method == "POST":
+                return forecast_fixtures["modify_response"]
+            return forecast_fixtures["cancel_response"]
+
+        management.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        management.runtime.request_json = fake_management_request  # type: ignore[method-assign]
+        cancelled = management.manage_orders(
+            "cancel_order",
+            order_id="987654",
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        modified = management.manage_orders(
+            "modify_order",
+            order_id="987654",
+            instructions={
+                "conid": 721095497,
+                "orderType": "LMT",
+                "side": "BUY",
+                "tif": "DAY",
+                "quantity": 5,
+                "price": 0.51,
+            },
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        self.assertEqual(cancelled["response"]["msg"], "Request was submitted")
+        self.assertEqual(modified["response"][0]["order_status"], "Submitted")
+        self.assertEqual(management_calls[0][0], "DELETE")
+        self.assertTrue(management_calls[0][1].endswith("/iserver/account/DU123456/order/987654"))
+        self.assertEqual(management_calls[1][0], "POST")
+        self.assertEqual(management_calls[1][3]["price"], 0.51)
+        with self.assertRaises(MarketConfigurationError):
+            management.manage_orders(
+                "cancel_all_orders",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                confirm_global_cancel="wrong",
+            )
+        with self.assertRaises(MarketConfigurationError):
+            management.manage_orders(
+                "modify_order",
+                order_id="../unsafe",
+                instructions={},
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
 
         cme_fixtures = {name: load_fixture("cme_prediction_markets", name) for name in ("search", "info", "accounts", "snapshot")}
         cme = CMEPredictionMarketsAdapter({"ibkr_session_cookie": "api=cme-session", "ibkr_contract_month": "SEP26"})
@@ -191,6 +277,66 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             adapter.list_trades(order.contract_id, limit=501)
         with self.assertRaises(MarketConfigurationError):
             adapter.list_trades(order.contract_id, after=1760012000, before=1760009000)
+
+    def test_ibkr_cme_order_management_requires_and_forwards_compliance_fields(self) -> None:
+        calls = []
+        cme = CMEPredictionMarketsAdapter(
+            {
+                "ibkr_session_cookie": "api=cme-session",
+                "ibkr_account_id": "DU123456",
+                "ibkr_order_management_enabled": True,
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "ibkr_api_base_url": "https://localhost:5000/v1/api",
+            }
+        )
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            self.assertEqual(url, "https://localhost:5000/v1/api/iserver/accounts")
+            self.assertEqual(headers, {"Cookie": "api=cme-session"})
+            return {"accounts": ["DU123456"]}
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append((method, url, params, json_body, headers))
+            return [{"order_status": "Submitted"}]
+
+        cme.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        cme.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        result = cme.manage_orders(
+            "modify_order",
+            order_id="987654",
+            instructions={
+                "conid": 722021819,
+                "orderType": "LMT",
+                "side": "SELL",
+                "tif": "DAY",
+                "quantity": 2,
+                "price": 0.34,
+            },
+            manual_indicator=False,
+            external_operator="desk-1",
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        self.assertEqual(result["response"][0]["order_status"], "Submitted")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/iserver/account/DU123456/order/987654"))
+        self.assertEqual(calls[0][2], {"manualIndicator": False, "extOperator": "desk-1"})
+        self.assertEqual(calls[0][3]["side"], "SELL")
+
+        with self.assertRaises(MarketConfigurationError):
+            cme.manage_orders(
+                "modify_order",
+                order_id="987654",
+                instructions={
+                    "conid": 722021819,
+                    "orderType": "LMT",
+                    "side": "SELL",
+                    "tif": "DAY",
+                    "quantity": 2,
+                    "price": 0.34,
+                },
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
 
     def test_hyperliquid_public_hip4_fills_support_safe_simulation_copy(self) -> None:
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"

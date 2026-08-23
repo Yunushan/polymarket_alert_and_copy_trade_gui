@@ -649,6 +649,10 @@ class VerificationFixtureTests(unittest.TestCase):
         snapshot = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "snapshot.json").read_text(encoding="utf-8"))
         history = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "history.json").read_text(encoding="utf-8"))
         trades = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "trades.json").read_text(encoding="utf-8"))
+        orders = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "orders.json").read_text(encoding="utf-8"))
+        order_status = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "order_status.json").read_text(encoding="utf-8"))
+        cancel_response = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "cancel_response.json").read_text(encoding="utf-8"))
+        modify_response = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "modify_response.json").read_text(encoding="utf-8"))
 
         self.assertEqual(forecast_search[0]["symbol"], "FF")
         self.assertIn(4.875, forecast_strikes["call"])
@@ -662,6 +666,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(trades, list)
         self.assertEqual(trades[0]["execution_id"], "exec-event-buy-1")
         self.assertEqual(trades[0]["conid"], 721095497)
+        self.assertEqual(orders["orders"][0]["orderId"], "987654")
+        self.assertEqual(order_status["order_status"], "Submitted")
+        self.assertEqual(cancel_response["msg"], "Request was submitted")
+        self.assertEqual(modify_response[0]["order_status"], "Submitted")
 
 
 if __name__ == "__main__":

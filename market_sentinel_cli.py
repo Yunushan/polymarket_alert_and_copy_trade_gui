@@ -1383,6 +1383,7 @@ PREDICT_FUN_ACCOUNT_OPERATIONS = (
     "positions",
     "positions_by_address",
 )
+IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1397,6 +1398,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + HYPERLIQUID_ACCOUNT_OPERATIONS
         + POLYMARKET_ACCOUNT_OPERATIONS
         + PREDICT_FUN_ACCOUNT_OPERATIONS
+        + IBKR_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1629,6 +1631,13 @@ def run_market_account(args: argparse.Namespace) -> int:
             }
             if operation == "account_activity":
                 kwargs["event_types"] = str(getattr(args, "event_types", "") or "").strip()
+    elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
+        kwargs = {
+            "filters": str(getattr(args, "status", "") or "").strip(),
+            "force": bool(getattr(args, "historical", False)),
+        }
+        if operation == "order_status":
+            kwargs["order_id"] = str(getattr(args, "order_id", "") or "").strip()
     else:
         if operation in {"active_orders", "order_history"}:
             kwargs.update(
@@ -1726,6 +1735,7 @@ HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
 )
 PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS = ("remove_orders", "remove_orders_by_hash")
 XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
+IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders", "modify_order")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1741,6 +1751,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS
         + PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS
         + XMARKET_ORDER_MANAGEMENT_OPERATIONS
+        + IBKR_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1771,7 +1782,8 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         if not isinstance(parsed, list) and not (
             market_id == "myriad_markets" and operation in {"cancel_order", "batch_modify_orders"}
         ) and not (market_id == "hyperliquid" and isinstance(parsed, dict)):
-            raise ValueError("--instructions must contain a JSON array (or a Myriad signed-object payload).")
+            if not (market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"} and operation == "modify_order" and isinstance(parsed, dict)):
+                raise ValueError("--instructions must contain a JSON array (or a Myriad/Hyperliquid/IBKR JSON object).")
         if operation in {"batch_create_orders", "batch_cancel_orders"} or (market_id == "polymarket" and operation == "cancel_orders"):
             payload["orders"] = parsed
         elif market_id == "myriad_markets" and operation == "batch_modify_orders":
@@ -1786,6 +1798,10 @@ def run_market_order_management(args: argparse.Namespace) -> int:
             if not isinstance(parsed, dict):
                 raise ValueError("Hyperliquid order-management instructions must be a signed JSON object.")
             payload["signed_action"] = parsed
+        elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
+            if not isinstance(parsed, dict):
+                raise ValueError("IBKR modify_order instructions must be a JSON object.")
+            payload["instructions"] = parsed
         else:
             payload["instructions"] = parsed
     _put_optional(payload, "customer_ref", getattr(args, "customer_ref", None))
@@ -1831,6 +1847,8 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         ("exchange_index", "exchange_index"),
         ("confirm_order_management", "confirm_order_management"),
         ("signed_action", "signed_action"),
+        ("manual_indicator", "manual_indicator"),
+        ("external_operator", "external_operator"),
     ):
         _put_optional(payload, key, getattr(args, argument, None))
     data = adapter.manage_orders(operation, **payload)
@@ -2862,7 +2880,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Predict.fun, Probable, Smarkets, or Xmarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, IBKR event contracts, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Predict.fun, Probable, Smarkets, or Xmarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2920,6 +2938,8 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders.add_argument("--reduce-to", default=None, help="Kalshi target remaining count; use exactly one reduction flag.")
     market_orders.add_argument("--subaccount", default=None, help="Kalshi subaccount number (0-63).")
     market_orders.add_argument("--exchange-index", default=None, help="Kalshi exchange shard; only 0 is supported.")
+    market_orders.add_argument("--manual-indicator", default=None, help="IBKR CME manualIndicator value (true/false).")
+    market_orders.add_argument("--external-operator", default=None, help="IBKR CME extOperator identifier.")
     market_orders.add_argument(
         "--confirm-order-management",
         default=None,

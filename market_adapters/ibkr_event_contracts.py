@@ -10,6 +10,7 @@ creates a session on behalf of a user.
 from __future__ import annotations
 
 import math
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -74,6 +75,23 @@ IBKR_CANDLE_RESOLUTIONS = (
     "1m",
 )
 
+IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
+IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders", "modify_order")
+IBKR_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+IBKR_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL IBKR EVENT ORDERS"
+IBKR_ORDER_ID_PATTERN = re.compile(r"[0-9]{1,20}")
+IBKR_MODIFY_FIELDS = {
+    "conid",
+    "orderType",
+    "price",
+    "side",
+    "tif",
+    "quantity",
+    "outsideRth",
+    "manualIndicator",
+    "extOperator",
+}
+
 
 class IBKREventContractsAdapter(MarketAdapter):
     """Shared implementation for IBKR ForecastEx and CME event contracts."""
@@ -83,6 +101,8 @@ class IBKREventContractsAdapter(MarketAdapter):
     security_type = "OPT"
     _forecastx = True
     event_url_base = "https://forecasttrader.interactivebrokers.com/eventtrader/#/markets"
+    account_recovery_operations = IBKR_ACCOUNT_OPERATIONS
+    order_management_operations = IBKR_ORDER_MANAGEMENT_OPERATIONS
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, *, runtime=None) -> None:
         super().__init__(config, runtime=runtime)
@@ -121,6 +141,15 @@ class IBKREventContractsAdapter(MarketAdapter):
                 ],
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "live_submission_enabled": self.config_bool("ibkr_submit_live_orders", False),
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("ibkr_order_management_enabled", False),
+                "authenticated_order_endpoints": [
+                    "GET /iserver/account/orders",
+                    "GET /iserver/account/:accountId/order/status/:orderId",
+                    "POST /iserver/account/:accountId/order/:orderId",
+                    "DELETE /iserver/account/:accountId/order/:orderId",
+                ],
             }
         )
         return health
@@ -432,7 +461,8 @@ class IBKREventContractsAdapter(MarketAdapter):
             raise MarketConfigurationError(f"{self.mode_name} live orders require a limit price.")
         account = self.resolve_credential("ibkr_account_id", ("IBKR_ACCOUNT_ID",), required=True, label="IBKR_ACCOUNT_ID")
         canonical, conid = self._parse_contract_id(order.contract_id)
-        payload = {"orders": [self._order_payload(order, conid=conid)]}
+        self._ensure_accounts()
+        payload = {"orders": [self._order_payload(order, conid=conid, include_manual_fields=True)]}
         response = self._post(f"/iserver/account/{account.value}/orders", payload)
         return {
             "market_id": self.market_id,
@@ -444,6 +474,97 @@ class IBKREventContractsAdapter(MarketAdapter):
             "request": payload,
             "response": response,
             "confirmation_required": self._requires_confirmation(response),
+        }
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read the documented IBKR open-order and order-status surfaces."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            supported = ", ".join(self.account_recovery_operations)
+            raise MarketConfigurationError(f"{self.mode_name} account operation must be one of: {supported}.")
+        account = self.resolve_credential("ibkr_account_id", ("IBKR_ACCOUNT_ID",), required=True, label="IBKR_ACCOUNT_ID")
+        self._ensure_accounts()
+        if normalized == "orders":
+            filters = str(kwargs.get("filters") or "").strip()
+            if filters and not re.fullmatch(r"[A-Za-z0-9_, ]{1,120}", filters):
+                raise MarketConfigurationError("IBKR order filters must contain only documented filter names.")
+            params: Dict[str, Any] = {"accountId": account.value}
+            if filters:
+                params["filters"] = filters
+            if "force" in kwargs and kwargs.get("force") is not None:
+                params["force"] = bool(kwargs.get("force"))
+            response = self._get("/iserver/account/orders", params=params)
+        else:
+            order_id = self._order_id(kwargs.get("order_id"))
+            response = self._get(f"/iserver/account/{account.value}/order/status/{order_id}")
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "account_id": account.redacted,
+            "response": response,
+        }
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run fixed-path, explicitly confirmed IBKR order mutations."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(f"{self.mode_name} order-management operation must be one of: {supported}.")
+        self.ensure_capability("live_trading")
+        if not self.config_bool("ibkr_order_management_enabled", False):
+            raise MarketConfigurationError(
+                f"{self.mode_name} order management is disabled by adapter config. "
+                "Set ibkr_order_management_enabled=true only after reviewing live-order risk."
+            )
+        self.ensure_live_trading_enabled(f"{self.mode_name} order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != IBKR_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "IBKR order management requires exact confirmation text "
+                f"{IBKR_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError(f"{self.mode_name} order-management requests are synchronous.")
+
+        account = self.resolve_credential("ibkr_account_id", ("IBKR_ACCOUNT_ID",), required=True, label="IBKR_ACCOUNT_ID")
+        self._ensure_accounts()
+        order_id = "-1" if normalized == "cancel_all_orders" else self._order_id(kwargs.get("order_id"))
+        if normalized == "cancel_all_orders":
+            if str(kwargs.get("confirm_global_cancel") or "").strip() != IBKR_GLOBAL_CANCEL_CONFIRMATION:
+                raise MarketConfigurationError(
+                    "IBKR global cancellation requires exact confirmation "
+                    f"{IBKR_GLOBAL_CANCEL_CONFIRMATION}."
+                )
+
+        params = self._manual_order_params(kwargs)
+        path = f"/iserver/account/{account.value}/order/{order_id}"
+        if normalized == "modify_order":
+            request = self._modify_order_payload(kwargs.get("instructions"), kwargs)
+            response = self.runtime.request_json("POST", self._url(path), params=params, json_body=request, headers=self._auth_headers())
+        else:
+            request = None
+            response = self.runtime.request_json("DELETE", self._url(path), params=params, headers=self._auth_headers())
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "account_id": account.redacted,
+            "order_id": order_id,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "manual_indicator": params.get("manualIndicator"),
+                "external_operator_supplied": "extOperator" in params,
+            },
+            "request": request,
+            "response": response,
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
@@ -458,6 +579,11 @@ class IBKREventContractsAdapter(MarketAdapter):
 
     def _post(self, path: str, payload: Mapping[str, Any]) -> Any:
         return self.runtime.request_json("POST", self._url(path), json_body=payload, headers=self._auth_headers())
+
+    def _ensure_accounts(self) -> None:
+        if not self._accounts_ready:
+            self._get("/iserver/accounts")
+            self._accounts_ready = True
 
     def _auth_headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {}
@@ -480,8 +606,7 @@ class IBKREventContractsAdapter(MarketAdapter):
 
     def _snapshot(self, conid: int) -> Mapping[str, Any]:
         if not self._accounts_ready and self.config_bool("ibkr_accounts_preflight", True):
-            self._get("/iserver/accounts")
-            self._accounts_ready = True
+            self._ensure_accounts()
         params = {"conids": str(conid), "fields": "31,84,85,86,88,7059"}
         payload = self._get("/iserver/marketdata/snapshot", params=params)
         snapshot = self._first_record(payload)
@@ -545,7 +670,13 @@ class IBKREventContractsAdapter(MarketAdapter):
             raw=dict(record),
         )
 
-    def _order_payload(self, order: PaperOrderRequest, *, conid: int) -> Dict[str, Any]:
+    def _order_payload(
+        self,
+        order: PaperOrderRequest,
+        *,
+        conid: int,
+        include_manual_fields: bool = False,
+    ) -> Dict[str, Any]:
         if order.limit_price is None:
             raise MarketConfigurationError(f"{self.mode_name} orders require a limit price.")
         payload: Dict[str, Any] = {
@@ -558,7 +689,100 @@ class IBKREventContractsAdapter(MarketAdapter):
         }
         if order.metadata.get("outside_rth") is not None:
             payload["outsideRth"] = bool(order.metadata["outside_rth"])
+        if include_manual_fields:
+            payload.update(self._manual_order_params(order.metadata))
         return payload
+
+    def _manual_order_params(self, values: Mapping[str, Any]) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        manual = values.get("manual_indicator")
+        if manual is None:
+            manual = values.get("manualIndicator")
+        operator = values.get("external_operator")
+        if operator in (None, ""):
+            operator = values.get("extOperator")
+        if self.venue == "CME":
+            if manual is None:
+                manual = self.config.get("ibkr_manual_indicator")
+            if operator in (None, ""):
+                operator = self.config.get("ibkr_external_operator")
+            if manual is None:
+                raise MarketConfigurationError(
+                    "CME event-contract order mutations require explicit ibkr_manual_indicator (true/false)."
+                )
+            if operator in (None, ""):
+                raise MarketConfigurationError(
+                    "CME event-contract order mutations require ibkr_external_operator."
+                )
+        if manual is not None:
+            if isinstance(manual, str):
+                normalized = manual.strip().lower()
+                if normalized not in {"true", "false", "1", "0"}:
+                    raise MarketConfigurationError("IBKR manual_indicator must be true or false.")
+                manual = normalized in {"true", "1"}
+            elif not isinstance(manual, bool):
+                raise MarketConfigurationError("IBKR manual_indicator must be true or false.")
+            params["manualIndicator"] = manual
+        if operator not in (None, ""):
+            normalized_operator = str(operator).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.@:+-]{1,80}", normalized_operator):
+                raise MarketConfigurationError("IBKR external_operator contains unsupported characters.")
+            params["extOperator"] = normalized_operator
+        return params
+
+    @classmethod
+    def _order_id(cls, value: Any) -> str:
+        normalized = str(value or "").strip()
+        if not IBKR_ORDER_ID_PATTERN.fullmatch(normalized):
+            raise MarketConfigurationError("IBKR order id must be a positive numeric identifier.")
+        return normalized
+
+    def _modify_order_payload(self, value: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise MarketConfigurationError("IBKR modify_order instructions must be one JSON order object.")
+        unknown = sorted(str(key) for key in value if str(key) not in IBKR_MODIFY_FIELDS)
+        if unknown:
+            raise MarketConfigurationError("IBKR modify_order contains unsupported fields: " + ", ".join(unknown))
+        required = {"conid", "orderType", "side", "tif", "quantity", "price"}
+        missing = sorted(key for key in required if key not in value)
+        if missing:
+            raise MarketConfigurationError("IBKR modify_order is missing required fields: " + ", ".join(missing))
+        try:
+            conid = int(str(value["conid"]).strip())
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("IBKR modify_order conid must be numeric.") from exc
+        if conid <= 0:
+            raise MarketConfigurationError("IBKR modify_order conid must be positive.")
+        order_type = str(value["orderType"] or "").strip().upper()
+        if order_type != "LMT":
+            raise MarketConfigurationError("IBKR event-contract modify_order supports only LMT orders.")
+        side = str(value["side"] or "").strip().upper()
+        allowed_sides = {"BUY"} if self._forecastx else {"BUY", "SELL"}
+        if side not in allowed_sides:
+            raise MarketConfigurationError(
+                f"{self.mode_name} modify_order side must be one of: {', '.join(sorted(allowed_sides))}."
+            )
+        tif = str(value["tif"] or "").strip().upper()
+        if tif not in {"DAY", "GTC"}:
+            raise MarketConfigurationError("IBKR event-contract modify_order tif must be DAY or GTC.")
+        quantity = self._finite_positive(value["quantity"], "quantity")
+        if not float(quantity).is_integer():
+            raise MarketConfigurationError("IBKR event-contract quantity must be a whole number.")
+        price = self._finite_positive(value.get("price"), "price")
+        if price > 1.0:
+            raise MarketConfigurationError("IBKR event-contract modify_order price must be between 0 and 1.")
+        request: Dict[str, Any] = {
+            "conid": conid,
+            "orderType": order_type,
+            "side": side,
+            "tif": tif,
+            "quantity": quantity,
+            "price": price,
+        }
+        if "outsideRth" in value:
+            request["outsideRth"] = bool(value["outsideRth"])
+        request.update(self._manual_order_params({**value, **context}))
+        return request
 
     def _validate_order(self, order: PaperOrderRequest) -> None:
         self.ensure_order_market(order)
