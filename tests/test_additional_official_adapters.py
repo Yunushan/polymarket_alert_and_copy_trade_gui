@@ -1595,9 +1595,21 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             after=1780344000,
             before=1780344050,
         )
+        candles = live_adapter.list_candles(
+            "101:202:303",
+            resolution="1h",
+            from_timestamp=1780344000,
+            to_timestamp=1780344050,
+        )
         self.assertEqual([trade.trade_id for trade in trades], ["mb-303-1"])
         self.assertEqual(trades[0].side, "BUY")
         self.assertAlmostEqual(trades[0].price, 0.4)
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].timestamp, 1780344000.0)
+        self.assertAlmostEqual(candles[0].open, 0.4)
+        self.assertAlmostEqual(candles[0].volume or 0, 4.0)
+        self.assertTrue(candles[0].raw["derived"])
+        self.assertEqual(candles[0].raw["source"], "matchbook_authenticated_matched_bets")
 
         settled = live_adapter.account_recovery(
             "settled_bets",
@@ -1634,6 +1646,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             live_adapter.list_trades("101:202:303", limit=1001)
         with self.assertRaises(MarketConfigurationError):
             live_adapter.list_trades("101:202:303", before=10, after=20)
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.list_candles("101:202:303", resolution="2h")
 
         with self.assertRaises(UnsupportedFeatureError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})

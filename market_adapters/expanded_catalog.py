@@ -183,6 +183,7 @@ MATCHBOOK_CAPABILITIES = MarketCapabilities(
     price_reading=True,
     orderbook_reading=True,
     trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
