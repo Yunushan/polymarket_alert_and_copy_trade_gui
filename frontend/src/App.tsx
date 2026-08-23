@@ -1064,6 +1064,7 @@ export default function App() {
             token_ids: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
             trade_id: form.account_trade_id.trim() || undefined,
             cursor: form.account_cursor.trim() || undefined,
+            next: form.account_cursor.trim() || undefined,
             limit: form.account_limit.trim() || (marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : marketId === "matchbook" && form.account_operation === "current_offers" ? 20 : 50),
             market_hash: form.account_market_hash.trim() || undefined,
             client_order_id: form.account_client_order_id.trim() || undefined,
