@@ -1080,7 +1080,8 @@ export default function App() {
     }
     const form = marketReadForm;
     const operation = form.position_operation;
-    if (!form.position_market_id.trim()) {
+    const requiresMarketId = !["neg_risk_split", "neg_risk_merge"].includes(operation);
+    if (requiresMarketId && !form.position_market_id.trim()) {
       setError("Enter a Myriad on-chain market id.");
       return;
     }
@@ -1096,13 +1097,16 @@ export default function App() {
     setMarketReadMessage("");
     setError(null);
     try {
-      const payload = await requestMarketPositionIntent(marketId, operation, {
-        market_id: form.position_market_id.trim(),
+      const requestPayload: Record<string, unknown> = {
         amount: form.position_amount.trim() || undefined,
         network_id: form.position_network_id.trim() || undefined,
         event_id: form.position_event_id.trim() || undefined,
         outcome_index: form.position_outcome_index.trim() || undefined
-      });
+      };
+      if (requiresMarketId) {
+        requestPayload.market_id = form.position_market_id.trim();
+      }
+      const payload = await requestMarketPositionIntent(marketId, operation, requestPayload);
       setMarketRead((current) => ({ ...current, position_intent: payload }));
       setMarketReadMessage("Unsigned transaction calldata loaded for external review/signing.");
     } catch (exc) {
@@ -3251,11 +3255,11 @@ function MarketsView({
                   </select>
                 </label>
                 <label>
-                  <span>Market id</span>
+                  <span>Market id (non-NegRisk)</span>
                   <input
                     value={marketReadForm.position_market_id}
                     onChange={(event) => onMarketReadFormChange({ position_market_id: event.target.value })}
-                    placeholder="On-chain id"
+                    placeholder="Required except NegRisk"
                   />
                 </label>
                 <label>

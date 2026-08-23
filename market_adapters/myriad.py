@@ -442,16 +442,17 @@ class MyriadAdapter(MarketAdapter):
         """
 
         normalized = self._position_operation(operation)
-        market_id = self._position_id(kwargs.get("market_id", kwargs.get("marketId")))
         network_id = kwargs.get("network_id", kwargs.get("networkId", self.config.get("myriad_network_id")))
-        request_body: Dict[str, Any] = {"market_id": market_id}
+        request_body: Dict[str, Any] = {}
         if network_id not in (None, ""):
             request_body["network_id"] = self._position_id(network_id, label="network_id")
 
         if normalized in {"split", "merge"}:
+            request_body["market_id"] = self._position_id(kwargs.get("market_id", kwargs.get("marketId")))
             request_body["amount"] = self._uint_string(kwargs.get("amount"), "amount")
             request_path = f"/positions/{normalized}"
         elif normalized in {"redeem", "redeem_voided"}:
+            request_body["market_id"] = self._position_id(kwargs.get("market_id", kwargs.get("marketId")))
             request_path = "/positions/redeem-voided" if normalized == "redeem_voided" else "/positions/redeem"
         else:
             event_id = self._bytes32(kwargs.get("event_id", kwargs.get("eventId")), "event_id")

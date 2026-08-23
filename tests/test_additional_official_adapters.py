@@ -2661,19 +2661,19 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         neg = adapter.position_intent(
             "neg-risk-split",
-            market_id=501,
             event_id="0x" + "ab" * 32,
             outcome_index=2,
             amount="7",
         )
         self.assertEqual(neg["endpoint"], "/positions/neg-risk/split")
         self.assertEqual(neg["request"]["outcome_index"], 2)
+        self.assertNotIn("market_id", neg["request"])
         self.assertEqual(len(calls), 2)
 
         with self.assertRaises(MarketConfigurationError):
             adapter.position_intent("split", market_id=501, amount="0")
         with self.assertRaises(MarketConfigurationError):
-            adapter.position_intent("neg_risk_merge", market_id=501, event_id="0x" + "ab" * 32)
+            adapter.position_intent("neg_risk_merge", event_id="0x" + "ab" * 32)
         with self.assertRaises(MarketConfigurationError):
             adapter.position_intent("neg_risk_merge", market_id=501, event_id="0x00", outcome_index=0)
 

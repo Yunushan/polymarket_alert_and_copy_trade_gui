@@ -674,7 +674,6 @@ class WebApiTests(unittest.TestCase):
             "myriad_markets",
             {
                 "operation": "neg_risk_split",
-                "market_id": "501",
                 "amount": "1000",
                 "network_id": "56",
                 "event_id": "0x" + "ab" * 32,
@@ -684,7 +683,6 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(payload["operation"], "neg_risk_split")
         self.assertEqual(calls, [("neg_risk_split", {
-            "market_id": "501",
             "amount": "1000",
             "network_id": "56",
             "event_id": "0x" + "ab" * 32,

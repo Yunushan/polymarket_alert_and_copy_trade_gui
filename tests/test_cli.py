@@ -597,14 +597,13 @@ class MarketSentinelCliTests(unittest.TestCase):
                 market_sentinel_cli.main(
                     [
                         "markets", "position-intent", "neg_risk_split", "--market", "myriad_markets",
-                        "--market-id", "501", "--amount", "1000", "--network-id", "56",
+                        "--amount", "1000", "--network-id", "56",
                         "--event-id", "0x" + "ab" * 32, "--outcome-index", "2", "--compact",
                     ]
                 ),
                 0,
             )
         self.assertEqual(calls, [("neg_risk_split", {
-            "market_id": "501",
             "amount": "1000",
             "network_id": "56",
             "event_id": "0x" + "ab" * 32,
