@@ -72,6 +72,15 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("import type { FormEvent, ReactNode } from \"react\";", source)
         self.assertIn("{ children: ReactNode; tone?: \"good\" | \"warn\" | \"neutral\" }", source)
 
+    def test_react_sx_bet_order_management_is_wired_through_settings_and_form(self) -> None:
+        source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+        self.assertIn("sx_bet_order_management_enabled", source)
+        self.assertIn('selectedMarket.market_id === "sx_bet"', source)
+        self.assertIn("cancel_event_orders", source)
+        self.assertIn("SX Bet v3 uses fixed DELETE /orders-v3", source)
+        self.assertIn("I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS", source)
+
     def test_react_analytics_source_exposes_direct_mdd_lookup_and_cached_detail(self) -> None:
         app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
         api_source = (ROOT / "frontend" / "src" / "api.ts").read_text(encoding="utf-8")

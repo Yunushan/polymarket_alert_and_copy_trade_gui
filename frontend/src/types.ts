@@ -226,6 +226,7 @@ export interface MarketPositionIntentPayload {
 export type MarketOrderManagementOperation =
   | "cancel_orders"
   | "cancel_all_orders"
+  | "cancel_event_orders"
   | "cancel_market_orders"
   | "update_orders"
   | "replace_orders"

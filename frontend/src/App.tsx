@@ -902,6 +902,10 @@ export default function App() {
       patch.settings = {
         prophet_exchange_order_management_enabled: form.get("prophet_exchange_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "sx_bet") {
+      patch.settings = {
+        sx_bet_order_management_enabled: form.get("sx_bet_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -1143,6 +1147,7 @@ export default function App() {
     const isIbkr = ["ibkr_forecasttrader", "forecastex", "cme_prediction_markets"].includes(marketId);
     const isManifold = marketId === "manifold";
     const isProphet = marketId === "prophet_exchange";
+    const isSxBet = marketId === "sx_bet";
     let instructions: unknown = [];
     const needsInstructions =
       isHyperliquid ||
@@ -1150,7 +1155,8 @@ export default function App() {
       isXmarket ||
       (isIbkr && operation === "modify_order") ||
       (isProphet && operation === "cancel_orders") ||
-      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet) ||
+      (isSxBet && operation === "cancel_orders") ||
+      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet) ||
       (operation === "cancel_orders" && !isSmarkets && !isProbable && !isProphet) ||
       (isProbable && operation === "cancel_orders") ||
       operation === "batch_cancel_orders" ||
@@ -1338,6 +1344,22 @@ export default function App() {
       setError("Prophet Exchange order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
       return;
     }
+    if (isSxBet && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("An SX Bet order id is required for cancel_order.");
+      return;
+    }
+    if (isSxBet && operation === "cancel_orders" && (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("SX Bet cancel_orders requires a non-empty JSON array of order ids or order objects.");
+      return;
+    }
+    if (isSxBet && operation === "cancel_event_orders" && !marketReadForm.order_management_event_ids.trim()) {
+      setError("An SX Bet event id is required for cancel_event_orders.");
+      return;
+    }
+    if (isSxBet && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("SX Bet order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
     if (isIbkr && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
       setError("An IBKR order id is required for cancel_order.");
       return;
@@ -1354,7 +1376,7 @@ export default function App() {
       setError("IBKR order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
       return;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isHyperliquid && !isXmarket && !isIbkr && !isProphet && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isHyperliquid && !isXmarket && !isIbkr && !isProphet && !isSxBet && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
       setError("A Betfair exchange market id is required for update and replace operations.");
       return;
     }
@@ -1370,9 +1392,9 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : isXmarket ? "Xmarket" : isIbkr ? "IBKR event-contract" : isManifold ? "Manifold" : isProphet ? "Prophet Exchange" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : isXmarket ? "Xmarket" : isIbkr ? "IBKR event-contract" : isManifold ? "Manifold" : isProphet ? "Prophet Exchange" : isSxBet ? "SX Bet" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
@@ -1468,6 +1490,15 @@ export default function App() {
             orders: operation === "cancel_orders" ? instructions : undefined,
             confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
           }
+      : isSxBet
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            order_ids: operation === "cancel_orders" ? instructions : undefined,
+            orders: operation === "cancel_orders" ? instructions : undefined,
+            instructions: operation === "cancel_orders" ? instructions : undefined,
+            event_id: marketReadForm.order_management_event_ids.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
       : isIbkr
         ? {
             order_id: marketReadForm.order_management_order_id.trim() || undefined,
@@ -1498,7 +1529,7 @@ export default function App() {
           customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
           confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
         };
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && marketReadForm.order_management_market_version.trim()) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -1506,7 +1537,7 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && marketReadForm.order_management_async) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && marketReadForm.order_management_async) {
       payload.async_request = true;
     }
     if (isKalshi) {
@@ -2763,6 +2794,15 @@ function MarketsView({
                 />
                 <span>Enable Prophet Exchange order management</span>
               </label>
+            ) : selectedMarket.market_id === "sx_bet" ? (
+              <label className="check-row">
+                <input
+                  name="sx_bet_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable SX Bet order management</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -3337,9 +3377,11 @@ function MarketsView({
                                 ? "IBKR event-contract cancellation and modification are disabled by default and require an authorized session, account entitlements, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : selectedMarket.market_id === "manifold"
                                 ? "Manifold limit-bet cancellation is disabled by default and requires MANIFOLD_API_KEY, the shared live-safety gates, a separate opt-in, and exact operator confirmation. Only an unfilled limit bet can be cancelled."
-                              : selectedMarket.market_id === "prophet_exchange"
-                                ? "ProphetX cancellation is disabled by default and requires approved Trading API credentials, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
-                              : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
+                               : selectedMarket.market_id === "prophet_exchange"
+                                 ? "ProphetX cancellation is disabled by default and requires approved Trading API credentials, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                               : selectedMarket.market_id === "sx_bet"
+                                 ? "SX Bet cancellations are disabled by default and require an API key, sx_bet_order_management_enabled, the shared live-safety gates, and exact operator confirmation."
+                               : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
                   </p>
                 </div>
                 <StatusPill tone={selectedMarket.health.order_management_enabled ? "warn" : "neutral"}>
@@ -3978,6 +4020,48 @@ function MarketsView({
                       </label>
                     ) : null}
                     <p className="form-help">ProphetX cancellation uses fixed POST /mm/cancel_order or /mm/cancel_multiple_orders paths. Each entry must include the exact external_id returned with the original submission.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "sx_bet" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="0x… 32-byte SX Bet order hash"
+                      />
+                    </label>
+                    {marketReadForm.order_management_operation === "cancel_event_orders" ? (
+                      <label>
+                        <span>Event id</span>
+                        <input
+                          value={marketReadForm.order_management_event_ids}
+                          onChange={(event) => onMarketReadFormChange({ order_management_event_ids: event.target.value })}
+                          placeholder="SX event id"
+                        />
+                      </label>
+                    ) : null}
+                    {marketReadForm.order_management_operation === "cancel_orders" ? (
+                      <label className="wide-field">
+                        <span>Order ids JSON</span>
+                        <textarea
+                          value={marketReadForm.order_management_instructions}
+                          onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                          rows={5}
+                          spellCheck={false}
+                          placeholder='["0x…", "0x…"]'
+                        />
+                      </label>
+                    ) : null}
+                    <p className="form-help">SX Bet v3 uses fixed DELETE /orders-v3, /orders-v3/event, and /orders-v3/all routes; no caller-supplied endpoint is accepted.</p>
                     <label className="wide-field">
                       <span>Operator confirmation</span>
                       <input
