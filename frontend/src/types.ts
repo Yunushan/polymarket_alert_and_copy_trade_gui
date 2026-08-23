@@ -223,7 +223,8 @@ export type MarketOrderManagementOperation =
   | "batch_modify_orders"
   | "schedule_cancel"
   | "remove_orders"
-  | "remove_orders_by_hash";
+  | "remove_orders_by_hash"
+  | "batch_create_orders";
 
 export interface MarketOrderManagementPayload {
   market_id: string;

@@ -1852,6 +1852,62 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][3]["outcomeId"], "outcome-yes")
         self.assertEqual(calls[0][4]["x-api-key"], "xmarket-key")
 
+        batch_adapter = XMarketAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "xmarket_order_management_enabled": True,
+            }
+        )
+        batch_calls = []
+
+        def fake_batch_request(method: str, url: str, *, params=None, json=None, headers=None, timeout=None):
+            batch_calls.append((method, url, params, json, headers, timeout))
+            if url.endswith("/openapi/v1/order/batch"):
+                return FakeResponse(load_fixture("xmarket", "batch_order_response"))
+            if url.endswith("/openapi/v1/order/cancel-batch"):
+                return FakeResponse(load_fixture("xmarket", "batch_cancel_response"))
+            raise AssertionError(f"unexpected Xmarket mutation URL: {url}")
+
+        batch_adapter.runtime.session.request = fake_batch_request  # type: ignore[method-assign]
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        with patch.dict("os.environ", {"XMARKET_API_KEY": "xmarket-key"}):
+            created = batch_adapter.manage_orders(
+                "batch_create_orders",
+                orders=[
+                    {"outcomeId": "outcome-yes", "side": "buy", "type": "limit", "price": 0.44, "quantity": 10},
+                    {"outcome_id": "outcome-no", "side": "sell", "type": "market", "quantity": 5},
+                ],
+                confirm_order_management=confirmation,
+            )
+            cancelled = batch_adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=["xorder-2", "xorder-3"],
+                confirm_order_management=confirmation,
+            )
+
+        self.assertEqual(created["response"]["orders"][0]["id"], "xorder-2")
+        self.assertEqual(created["request"]["orders"][1], {"outcomeId": "outcome-no", "side": "sell", "type": "market", "quantity": 5.0})
+        self.assertEqual(cancelled["response"]["cancelled"], ["xorder-2", "xorder-3"])
+        self.assertEqual([call[0] for call in batch_calls], ["POST", "POST"])
+        self.assertTrue(batch_calls[0][1].endswith("/openapi/v1/order/batch"))
+        self.assertTrue(batch_calls[1][1].endswith("/openapi/v1/order/cancel-batch"))
+        self.assertEqual(batch_calls[1][3], {"orderIds": ["xorder-2", "xorder-3"]})
+        self.assertEqual(batch_adapter.health_check()["order_management_operations"], ["batch_create_orders", "batch_cancel_orders"])
+
+        with self.assertRaises(MarketConfigurationError):
+            batch_adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=["../outside"],
+                confirm_order_management=confirmation,
+            )
+        with self.assertRaises(MarketConfigurationError):
+            batch_adapter.manage_orders(
+                "batch_create_orders",
+                orders=[{"outcomeId": "outcome-yes", "side": "buy", "type": "limit", "quantity": 1}],
+                confirm_order_management=confirmation,
+            )
+
     def test_gemini_prediction_adapter_maps_events_contracts_orderbook_and_paper_orders(self) -> None:
         adapter = GeminiPredictionAdapter()
         events = load_fixture("gemini", "events")

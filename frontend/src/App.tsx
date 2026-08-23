@@ -839,6 +839,10 @@ export default function App() {
       patch.settings = {
         predict_fun_order_management_enabled: form.get("predict_fun_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "xmarket") {
+      patch.settings = {
+        xmarket_order_management_enabled: form.get("xmarket_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -1018,11 +1022,13 @@ export default function App() {
     const isProbable = marketId === "probable";
     const isHyperliquid = marketId === "hyperliquid";
     const isPredictFun = marketId === "predict_fun";
+    const isXmarket = marketId === "xmarket";
     let instructions: unknown = [];
     const needsInstructions =
       isHyperliquid ||
       isPredictFun ||
-      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isPredictFun) ||
+      isXmarket ||
+      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isPredictFun && !isXmarket) ||
       (operation === "cancel_orders" && !isSmarkets && !isProbable) ||
       (isProbable && operation === "cancel_orders") ||
       operation === "batch_cancel_orders" ||
@@ -1180,7 +1186,15 @@ export default function App() {
       setError("Predict.fun removal requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
       return;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isHyperliquid && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
+    if (isXmarket && !(instructions as unknown[]).length) {
+      setError("Xmarket batch order operations require a non-empty JSON array.");
+      return;
+    }
+    if (isXmarket && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Xmarket order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isHyperliquid && !isXmarket && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
       setError("A Betfair exchange market id is required for update and replace operations.");
       return;
     }
@@ -1196,9 +1210,9 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isPredictFun && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isPredictFun && !isXmarket && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : isXmarket ? "Xmarket" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
@@ -1277,6 +1291,11 @@ export default function App() {
             orders: instructions,
             confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
           }
+      : isXmarket
+        ? {
+            orders: instructions,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
       : isMatchbook
         ? {
             order_id: marketReadForm.order_management_order_id.trim() || undefined,
@@ -1300,7 +1319,7 @@ export default function App() {
           customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
           confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
         };
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && marketReadForm.order_management_market_version.trim()) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -1308,7 +1327,7 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && marketReadForm.order_management_async) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && marketReadForm.order_management_async) {
       payload.async_request = true;
     }
     if (isKalshi) {
@@ -2526,6 +2545,15 @@ function MarketsView({
                 />
                 <span>Enable Predict.fun relay removal</span>
               </label>
+            ) : selectedMarket.market_id === "xmarket" ? (
+              <label className="check-row">
+                <input
+                  name="xmarket_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Xmarket batch order management</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -2908,6 +2936,8 @@ function MarketsView({
                                 ? "Predict.fun relay removal is disabled by default and requires the shared live-safety gates, a separate opt-in, JWT credentials, and exact operator confirmation; it does not invalidate orders on-chain."
                               : selectedMarket.market_id === "hyperliquid"
                                 ? "Hyperliquid signed cancellation, modification, and scheduled-cancel actions are disabled by default and require an externally signed exchange envelope, shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "xmarket"
+                                ? "Xmarket batch creation and cancellation are disabled by default and require the API key, shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
                   </p>
                 </div>
@@ -3425,6 +3455,30 @@ function MarketsView({
                       />
                     </label>
                     <p className="form-help">Predict.fun removal is relay-only; it does not invalidate orders on-chain.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "xmarket" ? (
+                  <>
+                    <label className="wide-field">
+                      <span>{marketReadForm.order_management_operation === "batch_create_orders" ? "Orders JSON (batch_create_orders)" : "Order ids JSON (batch_cancel_orders)"}</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={5}
+                        spellCheck={false}
+                        placeholder={marketReadForm.order_management_operation === "batch_create_orders"
+                          ? '[{"outcomeId":"outcome-uuid","side":"buy","type":"limit","price":0.65,"quantity":100}]'
+                          : '["order-id-1", "order-id-2"]'}
+                      />
+                    </label>
+                    <p className="form-help">Xmarket batch mutations use fixed authenticated API endpoints; live order management remains opt-in and synchronous.</p>
                     <label className="wide-field">
                       <span>Operator confirmation</span>
                       <input

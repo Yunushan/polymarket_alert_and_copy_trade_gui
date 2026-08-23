@@ -727,9 +727,10 @@
         "live_trading_enabled": false,
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
+        "xmarket_order_management_enabled": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.6,
-        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key order submission, and authenticated positions/order reads are implemented through the official Xmarket API. Live trading stays disabled by default."
+        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key order submission, authenticated positions/order reads, and fixed batch create/cancel mutations are implemented through the official Xmarket API. Live trading and order management stay disabled by default; the latter additionally requires xmarket_order_management_enabled and the shared safety gates."
       }
     },
     "trueo": {

@@ -1725,6 +1725,7 @@ HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
     "schedule_cancel",
 )
 PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS = ("remove_orders", "remove_orders_by_hash")
+XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1739,6 +1740,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + PROBABLE_ORDER_MANAGEMENT_OPERATIONS
         + HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS
         + PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS
+        + XMARKET_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1770,7 +1772,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
             market_id == "myriad_markets" and operation in {"cancel_order", "batch_modify_orders"}
         ) and not (market_id == "hyperliquid" and isinstance(parsed, dict)):
             raise ValueError("--instructions must contain a JSON array (or a Myriad signed-object payload).")
-        if operation == "batch_cancel_orders" or (market_id == "polymarket" and operation == "cancel_orders"):
+        if operation in {"batch_create_orders", "batch_cancel_orders"} or (market_id == "polymarket" and operation == "cancel_orders"):
             payload["orders"] = parsed
         elif market_id == "myriad_markets" and operation == "batch_modify_orders":
             if not isinstance(parsed, dict):
@@ -2860,7 +2862,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Predict.fun, Probable, or Smarkets).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Predict.fun, Probable, Smarkets, or Xmarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")

@@ -31,6 +31,9 @@ XMARKET_REFERENCES = (
 XMARKET_ACCOUNT_OPERATIONS = ("positions", "user_orders", "market_orders")
 XMARKET_ACCOUNT_STATUSES = ("all", "open", "partially_filled", "filled", "cancelled", "expired")
 XMARKET_POSITION_STATUSES = ("open", "closed", "settled")
+XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
+XMARKET_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+XMARKET_ORDER_MANAGEMENT_MAX_BATCH = 100
 
 
 class XMarketAdapter(MarketAdapter):
@@ -38,6 +41,7 @@ class XMarketAdapter(MarketAdapter):
 
     metadata = get_market_metadata("xmarket")
     account_recovery_operations = XMARKET_ACCOUNT_OPERATIONS
+    order_management_operations = XMARKET_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -53,6 +57,12 @@ class XMarketAdapter(MarketAdapter):
                     "GET /order/market/:marketId",
                 ],
                 "references": list(XMARKET_REFERENCES),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("xmarket_order_management_enabled", False),
+                "authenticated_order_management_endpoints": [
+                    "POST /order/batch",
+                    "POST /order/cancel-batch",
+                ],
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": ([{"name": credential.name, "source": credential.source}] if credential else []),
             }
@@ -205,6 +215,61 @@ class XMarketAdapter(MarketAdapter):
         )
         return self._get_authenticated(f"/order/market/{market_id}", params=params)
 
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run a guarded Xmarket batch order mutation.
+
+        Xmarket documents fixed authenticated ``POST /order/batch`` and
+        ``POST /order/cancel-batch`` endpoints.  Only those two operations are
+        exposed here; callers cannot provide an arbitrary path or method.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(f"Xmarket order-management operation must be one of: {supported}.")
+        self.ensure_capability("live_trading")
+        if not self.config_bool("xmarket_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Xmarket order management is disabled by adapter config. "
+                "Set xmarket_order_management_enabled=true only after reviewing live-order risk."
+            )
+        self.ensure_live_trading_enabled("Xmarket order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != XMARKET_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Xmarket order management requires exact confirmation text "
+                f"{XMARKET_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Xmarket order-management requests are synchronous.")
+
+        if normalized == "batch_create_orders":
+            orders = self._batch_order_payloads(kwargs.get("orders", kwargs.get("instructions")))
+            request: Dict[str, Any] = {"orders": orders}
+            path = "/order/batch"
+        else:
+            order_ids = self._batch_order_ids(kwargs.get("order_ids", kwargs.get("orders", kwargs.get("instructions"))))
+            request = {"orderIds": order_ids}
+            path = "/order/cancel-batch"
+        response = self._post(path, request)
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(XMARKET_REFERENCES),
+            },
+            "request": request,
+            "response": response,
+        }
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
@@ -305,6 +370,89 @@ class XMarketAdapter(MarketAdapter):
             raise MarketConfigurationError("Xmarket order quantity must be positive and finite.")
         if order.limit_price is not None:
             self._price(order.limit_price)
+
+    @classmethod
+    def _batch_order_ids(cls, value: Any) -> List[str]:
+        if not isinstance(value, (list, tuple)) or not value:
+            raise MarketConfigurationError("Xmarket batch cancellation requires a non-empty order id list.")
+        if len(value) > XMARKET_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Xmarket batch cancellation accepts at most {XMARKET_ORDER_MANAGEMENT_MAX_BATCH} order ids."
+            )
+        order_ids = [cls._order_management_id(item) for item in value]
+        if len(set(order_ids)) != len(order_ids):
+            raise MarketConfigurationError("Xmarket batch cancellation order ids must be unique.")
+        return order_ids
+
+    @classmethod
+    def _order_management_id(cls, value: Any) -> str:
+        normalized = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,199}", normalized):
+            raise MarketConfigurationError("Xmarket order id must be a short path-safe identifier.")
+        return normalized
+
+    def _batch_order_payloads(self, value: Any) -> List[Dict[str, Any]]:
+        if not isinstance(value, (list, tuple)) or not value:
+            raise MarketConfigurationError("Xmarket batch creation requires a non-empty order list.")
+        if len(value) > XMARKET_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Xmarket batch creation accepts at most {XMARKET_ORDER_MANAGEMENT_MAX_BATCH} orders."
+            )
+        payloads: List[Dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise MarketConfigurationError("Xmarket batch orders must be JSON objects.")
+            allowed = {"outcomeId", "outcome_id", "side", "type", "price", "quantity"}
+            unknown = sorted(str(key) for key in item.keys() if str(key) not in allowed)
+            if unknown:
+                raise MarketConfigurationError(
+                    "Xmarket batch order contains unsupported fields: " + ", ".join(unknown)
+                )
+            outcome_id = self._safe_path_segment(
+                item.get("outcomeId") or item.get("outcome_id"), "Xmarket outcome id"
+            )
+            side = str(item.get("side") or "").strip().lower()
+            if side not in {"buy", "sell"}:
+                raise MarketConfigurationError("Xmarket batch order side must be buy or sell.")
+            order_type = str(item.get("type") or "limit").strip().lower()
+            if order_type not in {"limit", "market"}:
+                raise MarketConfigurationError("Xmarket batch order type must be limit or market.")
+            try:
+                quantity = float(item.get("quantity"))
+            except (TypeError, ValueError) as exc:
+                raise MarketConfigurationError("Xmarket batch order quantity must be numeric.") from exc
+            if not math.isfinite(quantity) or quantity <= 0:
+                raise MarketConfigurationError("Xmarket batch order quantity must be positive and finite.")
+            max_size = self._positive_config_float("live_trading_max_size")
+            max_notional = self._positive_config_float("live_trading_max_notional")
+            if max_size is not None and quantity > max_size:
+                raise MarketConfigurationError(
+                    f"Xmarket batch order size {quantity:g} exceeds configured max {max_size:g}."
+                )
+            payload: Dict[str, Any] = {
+                "outcomeId": outcome_id,
+                "side": side,
+                "type": order_type,
+                "quantity": quantity,
+            }
+            if order_type == "limit":
+                if item.get("price") is None:
+                    raise MarketConfigurationError("Xmarket limit batch orders require a price.")
+                payload["price"] = self._price(item.get("price"))
+                if max_notional is not None and quantity * payload["price"] > max_notional:
+                    raise MarketConfigurationError(
+                        "Xmarket batch order notional "
+                        f"{quantity * payload['price']:g} exceeds configured max {max_notional:g}."
+                    )
+            else:
+                if item.get("price") is not None:
+                    raise MarketConfigurationError("Xmarket market batch orders must not include a price.")
+                if max_notional is not None and quantity > max_notional:
+                    raise MarketConfigurationError(
+                        f"Xmarket batch order notional {quantity:g} exceeds configured max {max_notional:g}."
+                    )
+            payloads.append(payload)
+        return payloads
 
     @staticmethod
     def _items(payload: Any) -> List[Mapping[str, Any]]:

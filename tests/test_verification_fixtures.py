@@ -259,6 +259,12 @@ class VerificationFixtureTests(unittest.TestCase):
             (FIXTURE_ROOT / "gemini" / "batch_cancel_orders_response.json").read_text(encoding="utf-8")
         )
         predict_order = json.loads((FIXTURE_ROOT / "predict_fun" / "order_response.json").read_text(encoding="utf-8"))
+        xmarket_batch_order = json.loads(
+            (FIXTURE_ROOT / "xmarket" / "batch_order_response.json").read_text(encoding="utf-8")
+        )
+        xmarket_batch_cancel = json.loads(
+            (FIXTURE_ROOT / "xmarket" / "batch_cancel_response.json").read_text(encoding="utf-8")
+        )
         betfair_order = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "place_order_response.json").read_text(encoding="utf-8")
         )
@@ -319,6 +325,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(gemini_cancel.get("result"), "ok")
         self.assertIsInstance(gemini_batch_cancel.get("results"), list)
         self.assertEqual(predict_order.get("success"), True)
+        self.assertIsInstance(xmarket_batch_order.get("orders"), list)
+        self.assertIn("id", xmarket_batch_order["orders"][0])
+        self.assertIsInstance(xmarket_batch_cancel.get("cancelled"), list)
+        self.assertEqual(xmarket_batch_cancel.get("status"), "cancelled")
         self.assertEqual(betfair_order.get("status"), "SUCCESS")
         for response in (betfair_cancel, betfair_update, betfair_replace):
             self.assertEqual(response.get("result", {}).get("status"), "SUCCESS")
