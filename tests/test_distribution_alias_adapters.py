@@ -60,6 +60,7 @@ class RobinhoodDistributionAliasTests(unittest.TestCase):
                 self.assertTrue(adapter.capabilities.candle_history)
                 self.assertFalse(adapter.capabilities.live_trading)
                 self.assertFalse(adapter.capabilities.copy_trading)
+                self.assertEqual(health["order_management_operations"], [])
 
                 events = adapter.list_events("fed")
                 contracts = adapter.list_contracts("KXFED-26MAY")

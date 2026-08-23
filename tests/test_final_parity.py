@@ -80,6 +80,10 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("cancel_event_orders", source)
         self.assertIn("SX Bet v3 uses fixed DELETE /orders-v3", source)
         self.assertIn("I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS", source)
+        self.assertIn("account_market_hash", source)
+        self.assertIn("account_client_order_id", source)
+        self.assertIn("account_start_date", source)
+        self.assertIn("account_sort_asc", source)
 
     def test_react_analytics_source_exposes_direct_mdd_lookup_and_cached_detail(self) -> None:
         app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")

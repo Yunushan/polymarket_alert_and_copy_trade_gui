@@ -29,6 +29,7 @@ class _RobinhoodKalshiDistributionAlias(KalshiAdapter):
     # The alias is intentionally read-only.  Inheriting Kalshi's private
     # portfolio methods must not make Robinhood account paths appear supported.
     account_recovery_operations = ()
+    order_management_operations = ()
 
     @property
     def api_base_url(self) -> str:

@@ -27,6 +27,9 @@ class BlinqAdapter(PolymarketAdapter):
     """Read-only Blinq alias over the documented Polymarket data APIs."""
 
     metadata = get_market_metadata("blinq")
+    # Polymarket's inherited mutation methods must not leak into this
+    # read-only distribution alias or the UI/API capability surface.
+    order_management_operations = ()
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()

@@ -179,6 +179,7 @@ export type MarketAccountOperation =
   | "account_activity"
   | "order_history"
   | "order_detail"
+  | "order_by_client_id"
   | "fills"
   | "positions"
   | "settlements"

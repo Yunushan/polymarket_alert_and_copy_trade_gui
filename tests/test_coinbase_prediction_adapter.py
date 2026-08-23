@@ -60,6 +60,7 @@ class CoinbasePredictionMarketsAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertFalse(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertEqual(health["order_management_operations"], [])
         self.assertIn("external-api.kalshi.com", health["api_base_url"])
 
     def test_public_kalshi_venue_mapping_supports_events_contracts_prices_and_orderbooks(self) -> None:

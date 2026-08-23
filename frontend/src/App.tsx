@@ -169,12 +169,18 @@ interface MarketReadForm {
   account_order_id: string;
   account_trade_id: string;
   account_cursor: string;
+  account_limit: string;
   account_offset: string;
   account_wallet: string;
   account_event_types: string;
   account_is_resolved: string;
   account_dex: string;
   account_market_id: string;
+  account_market_hash: string;
+  account_client_order_id: string;
+  account_start_date: string;
+  account_end_date: string;
+  account_sort_asc: boolean;
   account_chain_id: string;
   account_status: string;
   account_event_type_id: string;
@@ -454,12 +460,18 @@ function emptyMarketReadForm(): MarketReadForm {
     account_order_id: "",
     account_trade_id: "",
     account_cursor: "",
+    account_limit: "",
     account_offset: "",
     account_wallet: "",
     account_event_types: "",
     account_is_resolved: "",
     account_dex: "",
     account_market_id: "",
+    account_market_hash: "",
+    account_client_order_id: "",
+    account_start_date: "",
+    account_end_date: "",
+    account_sort_asc: true,
     account_chain_id: "",
     account_status: "",
     account_event_type_id: "",
@@ -1020,6 +1032,12 @@ export default function App() {
             token_ids: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
             trade_id: form.account_trade_id.trim() || undefined,
             cursor: form.account_cursor.trim() || undefined,
+            limit: form.account_limit.trim() || (marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : marketId === "matchbook" && form.account_operation === "current_offers" ? 20 : 50),
+            market_hash: form.account_market_hash.trim() || undefined,
+            client_order_id: form.account_client_order_id.trim() || undefined,
+            start_date: form.account_start_date.trim() || undefined,
+            end_date: form.account_end_date.trim() || undefined,
+            sort_asc: form.account_sort_asc,
             offset: form.account_offset.trim() || undefined,
             dex: form.account_dex.trim() || undefined,
             market_id: form.account_market_id.trim() || undefined,
@@ -1062,7 +1080,6 @@ export default function App() {
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
-            limit: marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : marketId === "matchbook" && form.account_operation === "current_offers" ? 20 : 50,
             ...(marketId === "opinion_labs" ? { page: 1 } : {})
           });
           setMarketRead((current) => ({ ...current, account: payload }));
@@ -2887,6 +2904,14 @@ function MarketsView({
               />
             </label>
             <label>
+              <span>Account page size</span>
+              <input
+                value={marketReadForm.account_limit}
+                onChange={(event) => onMarketReadFormChange({ account_limit: event.target.value })}
+                placeholder="Optional, default 50"
+              />
+            </label>
+            <label>
               <span>Account offset</span>
               <input
                 value={marketReadForm.account_offset}
@@ -2918,6 +2943,50 @@ function MarketsView({
                 placeholder="Opinion / Betfair / Xmarket market id"
               />
             </label>
+            {selectedMarket.market_id === "sx_bet" ? (
+              <>
+                <label>
+                  <span>SX Bet market hash</span>
+                  <input
+                    value={marketReadForm.account_market_hash}
+                    onChange={(event) => onMarketReadFormChange({ account_market_hash: event.target.value })}
+                    placeholder="0x + 64 hex chars"
+                  />
+                </label>
+                <label>
+                  <span>SX Bet client order id</span>
+                  <input
+                    value={marketReadForm.account_client_order_id}
+                    onChange={(event) => onMarketReadFormChange({ account_client_order_id: event.target.value })}
+                    placeholder="For order_by_client_id"
+                  />
+                </label>
+                <label>
+                  <span>SX Bet start date</span>
+                  <input
+                    value={marketReadForm.account_start_date}
+                    onChange={(event) => onMarketReadFormChange({ account_start_date: event.target.value })}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </label>
+                <label>
+                  <span>SX Bet end date</span>
+                  <input
+                    value={marketReadForm.account_end_date}
+                    onChange={(event) => onMarketReadFormChange({ account_end_date: event.target.value })}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_sort_asc}
+                    onChange={(event) => onMarketReadFormChange({ account_sort_asc: event.target.checked })}
+                  />
+                  <span>Sort SX Bet account reads ascending</span>
+                </label>
+              </>
+            ) : null}
             <label>
               <span>Opinion chain id</span>
               <input

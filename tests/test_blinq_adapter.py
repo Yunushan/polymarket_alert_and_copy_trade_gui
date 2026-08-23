@@ -25,6 +25,7 @@ class BlinqAdapterTests(unittest.TestCase):
         self.assertFalse(health["blinq_wallet_api_supported"])
         self.assertFalse(health["live_trading_supported"])
         self.assertFalse(health["copy_trading_supported"])
+        self.assertEqual(health["order_management_operations"], [])
         self.assertTrue(health["trade_history_requires_l2_auth"])
 
     def test_lists_polymarket_contracts_for_blinq_market(self) -> None:
