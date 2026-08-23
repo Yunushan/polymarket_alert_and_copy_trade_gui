@@ -43,7 +43,13 @@ PROPHET_EXCHANGE_REFERENCES = (
     "https://partner-docs.prophetx.co/swagger/mm/index.html",
 )
 
-PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
+PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = (
+    "balance",
+    "transactions",
+    "order_history",
+    "order_detail",
+    "trades",
+)
 PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
 PROPHET_EXCHANGE_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 PROPHET_EXCHANGE_TRANSACTION_LIMIT_MAX = 500
@@ -122,6 +128,9 @@ class ProphetExchangeAdapter(MarketAdapter):
                 "authenticated_account_endpoints": [
                     "GET /v4/mm/get_balance",
                     "GET /v4/mm/get_transactions",
+                    "GET /v4/mm/get_order_history",
+                    "GET /v4/mm/get_order/{id}",
+                    "GET /v4/mm/get_trades",
                 ],
                 "order_management_operations": list(self.order_management_operations),
                 "order_management_enabled": self.config_bool(
@@ -411,11 +420,68 @@ class ProphetExchangeAdapter(MarketAdapter):
         if normalized == "balance":
             return self._get("/v4/mm/get_balance", trading=True)
 
-        params: Dict[str, Any] = {}
-        raw_cursor = kwargs.get("cursor", kwargs.get("next"))
-        if raw_cursor not in (None, ""):
-            params["next"] = self._non_negative_integer(raw_cursor, "transaction cursor")
+        if normalized == "order_detail":
+            order_id = self._safe_reference(kwargs.get("order_id"), "order")
+            return self._get(f"/v4/mm/get_order/{order_id}", trading=True)
+
+        params = self._account_history_params(kwargs, normalized)
+        if normalized == "order_history":
+            params["limit"] = self._bounded_trade_limit(kwargs.get("limit", 100))
+            for key, label, allowed in (
+                ("matching_status", "matching status", {"unmatched", "fully_matched", "partially_matched"}),
+                (
+                    "status",
+                    "order status",
+                    {
+                        "void",
+                        "closed",
+                        "canceled",
+                        "manually_settled",
+                        "inactive",
+                        "wiped",
+                        "open",
+                        "invalid",
+                        "settled",
+                    },
+                ),
+            ):
+                value = kwargs.get(key)
+                if value not in (None, ""):
+                    params[key] = self._allowlisted_choice(value, label, allowed)
+            for key, label in (("market_id", "market"), ("event_id", "event")):
+                value = kwargs.get(key)
+                if value not in (None, ""):
+                    params[key] = self._required_id(value, label)
+            return self._get("/v4/mm/get_order_history", params=params, trading=True)
+        if normalized == "trades":
+            params["limit"] = self._bounded_trade_limit(kwargs.get("limit", 100))
+            return self._get("/v4/mm/get_trades", params=params, trading=True)
+
         params["limit"] = self._bounded_transaction_limit(kwargs.get("limit", 10))
+        for key, label in (("market_id", "market"), ("event_id", "event"), ("trade_id", "trade")):
+            value = kwargs.get(key)
+            if value not in (None, ""):
+                params[key] = self._safe_reference(value, label)
+        transaction_types = {
+            "TRADE",
+            "DEPOSIT",
+            "REFUND",
+            "PAY",
+            "WITHDRAW",
+            "COMMISSION",
+            "ADJUSTMENT_REDUCE",
+            "ADJUSTMENT_INCREASE",
+            "VOID",
+            "REJECT_WITHDRAW",
+            "APPROVE_WITHDRAW",
+            "CANCEL",
+            "PUSH",
+        }
+        value = kwargs.get("transaction_type")
+        if value not in (None, ""):
+            params["transaction_type"] = self._allowlisted_choice(
+                value, "transaction type", transaction_types
+            )
         return self._get("/v4/mm/get_transactions", params=params, trading=True)
 
     def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
@@ -678,6 +744,47 @@ class ProphetExchangeAdapter(MarketAdapter):
                 f"Prophet Exchange trade limit must be between 1 and {PROPHET_EXCHANGE_TRADE_LIMIT_MAX}."
             )
         return limit
+
+    @classmethod
+    def _account_history_params(cls, kwargs: Mapping[str, Any], operation: str) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        raw_cursor = kwargs.get("cursor") or kwargs.get("next_cursor") or kwargs.get("next")
+        if raw_cursor not in (None, ""):
+            params["next_cursor"] = cls._safe_cursor(raw_cursor)
+        after = kwargs.get("after", kwargs.get("from_timestamp", kwargs.get("from")))
+        before = kwargs.get("before", kwargs.get("to_timestamp", kwargs.get("to")))
+        after_ts = cls._history_timestamp(after, "from") if after not in (None, "") else None
+        before_ts = cls._history_timestamp(before, "to") if before not in (None, "") else None
+        if after_ts is not None and before_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError(
+                f"Prophet Exchange {operation} history requires to/before to be at or after from/after."
+            )
+        if after_ts is not None:
+            params["from"] = int(after_ts)
+        if before_ts is not None:
+            params["to"] = int(before_ts)
+        return params
+
+    @staticmethod
+    def _safe_cursor(value: Any) -> str:
+        cursor = str(value or "").strip()
+        if (
+            not cursor
+            or len(cursor) > 512
+            or any(ord(char) < 0x20 for char in cursor)
+            or re.fullmatch(r"-\d+", cursor)
+        ):
+            raise MarketConfigurationError("Prophet Exchange account cursor must be a bounded printable token.")
+        return cursor
+
+    @staticmethod
+    def _allowlisted_choice(value: Any, label: str, allowed: set[str]) -> str:
+        normalized = str(value or "").strip()
+        if normalized not in allowed:
+            raise MarketConfigurationError(
+                f"Prophet Exchange {label} must be one of: {', '.join(sorted(allowed))}."
+            )
+        return normalized
 
     @staticmethod
     def _timestamp_seconds(value: Any) -> Optional[float]:

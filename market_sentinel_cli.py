@@ -1395,7 +1395,13 @@ PREDICT_FUN_ACCOUNT_OPERATIONS = (
 )
 IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
 MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
-PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
+PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = (
+    "balance",
+    "transactions",
+    "order_history",
+    "order_detail",
+    "trades",
+)
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
 MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
 XO_ACCOUNT_OPERATIONS = (
@@ -1684,6 +1690,26 @@ def run_market_account(args: argparse.Namespace) -> int:
     elif market_id == "prophet_exchange":
         if operation == "balance":
             kwargs = {}
+        elif operation == "order_detail":
+            kwargs = {"order_id": str(getattr(args, "order_id", "") or "").strip()}
+        elif operation == "order_history":
+            kwargs = {
+                "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 100),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+                "matching_status": str(getattr(args, "matching_status", "") or "").strip() or None,
+                "status": str(getattr(args, "status", "") or "").strip() or None,
+                "from": getattr(args, "from_timestamp", None),
+                "to": getattr(args, "to_timestamp", None),
+            }
+        elif operation == "trades":
+            kwargs = {
+                "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 100),
+                "from": getattr(args, "from_timestamp", None),
+                "to": getattr(args, "to_timestamp", None),
+            }
         else:
             kwargs = {
                 "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
@@ -3096,6 +3122,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--sort-dir", default="EARLIEST_TO_LATEST", help="Betfair current-order sort direction.")
     market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")
     market_account.add_argument("--status", default="", help="Documented account order status (venue-specific).")
+    market_account.add_argument("--matching-status", default="", help="Prophet Exchange matching status filter.")
     market_account.add_argument("--limit", default=None, help="Optional page size (operation-specific).")
     market_account.add_argument("--offset", default="0", help="Optional page offset.")
     market_account.add_argument("--cursor", default="", help="Cursor returned by a previous account read.")

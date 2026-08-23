@@ -3772,6 +3772,26 @@ def market_account_payload(
     elif normalized_market_id == "prophet_exchange":
         if normalized_operation == "balance":
             kwargs = {}
+        elif normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "order_history":
+            kwargs = {
+                "cursor": _query_value(query_params, "cursor") or _query_value(query_params, "next_cursor"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 100),
+                "market_id": _query_value(query_params, "market_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "matching_status": _query_value(query_params, "matching_status"),
+                "status": _query_value(query_params, "status"),
+                "from": _query_value(query_params, "from"),
+                "to": _query_value(query_params, "to"),
+            }
+        elif normalized_operation == "trades":
+            kwargs = {
+                "cursor": _query_value(query_params, "cursor") or _query_value(query_params, "next_cursor"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 100),
+                "from": _query_value(query_params, "from"),
+                "to": _query_value(query_params, "to"),
+            }
         else:
             raw_cursor = _query_value(query_params, "cursor") or _query_value(query_params, "next")
             kwargs = {

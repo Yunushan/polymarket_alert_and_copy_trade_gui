@@ -57,7 +57,10 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
-        self.assertEqual(health["account_recovery_operations"], ["balance", "transactions"])
+        self.assertEqual(
+            health["account_recovery_operations"],
+            ["balance", "transactions", "order_history", "order_detail", "trades"],
+        )
         self.assertEqual(health["order_management_operations"], ["cancel_order", "cancel_orders"])
         self.assertEqual(health["order_management_endpoints"], ["POST /mm/cancel_order", "POST /mm/cancel_multiple_orders"])
 
@@ -218,6 +221,12 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
                 return load_fixture("balance")
             if url.endswith("/v4/mm/get_transactions"):
                 return load_fixture("transactions")
+            if url.endswith("/v4/mm/get_order_history"):
+                return {"data": {"next_cursor": "", "orders": []}}
+            if url.endswith("/v4/mm/get_order/order-filled-1"):
+                return load_fixture("order_filled")
+            if url.endswith("/v4/mm/get_trades"):
+                return load_fixture("trades")
             raise AssertionError(f"unexpected ProphetX account URL: {url}")
 
         mutation_calls = []
@@ -238,7 +247,39 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
         self.assertEqual(balance["data"]["balance"], 1000.0)
         self.assertEqual(transactions["next"], 42)
         self.assertEqual(read_calls[0][1], {})
-        self.assertEqual(read_calls[1][1], {"next": 41, "limit": 25})
+        self.assertEqual(read_calls[1][1], {"next_cursor": "41", "limit": 25})
+
+        order_history = adapter.account_recovery(
+            "order_history",
+            cursor="next-1",
+            limit=10,
+            market_id="555",
+            event_id="101",
+            matching_status="fully_matched",
+            status="settled",
+            after=1786370400,
+            before=1786370401,
+        )
+        order_detail = adapter.account_recovery("order_detail", order_id="order-filled-1")
+        account_trades = adapter.account_recovery("trades", cursor="next-2", limit=20)
+        self.assertEqual(order_history["data"]["orders"], [])
+        self.assertEqual(order_detail["data"]["order_id"], "order-filled-1")
+        self.assertEqual(account_trades["data"]["trades"][0]["id"], 7001)
+        self.assertEqual(
+            read_calls[2][1],
+            {
+                "next_cursor": "next-1",
+                "from": 1786370400,
+                "to": 1786370401,
+                "limit": 10,
+                "matching_status": "fully_matched",
+                "status": "settled",
+                "market_id": "555",
+                "event_id": "101",
+            },
+        )
+        self.assertEqual(read_calls[3][0].split("/v4/mm/")[-1], "get_order/order-filled-1")
+        self.assertEqual(read_calls[4][1], {"next_cursor": "next-2", "limit": 20})
 
         single = adapter.manage_orders(
             "cancel_order",
