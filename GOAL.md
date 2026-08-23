@@ -112,15 +112,21 @@ This project is not 100% feature-complete across every listed market. The comple
 Current catalog snapshot:
 
 - Total markets: 68
-- Implemented or partially implemented adapters: 56
-- Verified-blocked/stub adapters: 12
-- Market/event discovery supported: 56 yes, 12 no
-- Alerts supported: 55 yes, 13 no
-- Read-only price data supported: 54 yes, 14 no
-- Orderbook reading supported: 26 yes, 42 no
-- Paper trading supported: 53 yes, 15 no
-- Live trading supported: 36 guarded/off by default, 32 no
-- Copy trading supported: 8 yes, 60 no (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, Predict.fun authenticated account activity, Probable public wallet activity, and Azuro single-selection bettor activity; all simulation-first and guarded)
+- Implemented adapters: 57
+- Verified-blocked adapters: 11
+- Market/event discovery supported: 57 yes, 11 blocked
+- Alerts supported: 56 yes, 1 unsupported, 11 blocked
+- Read-only price data supported: 55 yes, 2 unsupported, 11 blocked
+- Orderbook reading supported: 26 yes, 31 unsupported, 11 blocked
+- Trade history supported: 26 yes, 31 unsupported, 11 blocked
+- Candle history supported: 29 yes, 28 unsupported, 11 blocked
+- Paper trading supported: 54 yes, 3 unsupported, 11 blocked
+- Live trading supported: 36 guarded/off by default, 21 unsupported, 11 blocked
+- Copy trading supported: 8 guarded/off by default, 49 unsupported, 11 blocked (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, Predict.fun authenticated account activity, Probable public wallet activity, and Azuro single-selection bettor activity; all simulation-first and guarded)
+
+These totals are generated from the canonical support matrix (`market_adapters.support_matrix`)
+and intentionally distinguish supported, guarded, unsupported, and verified-blocked
+states.  They should be refreshed whenever the catalog or an adapter capability changes.
 
 Important status rules:
 
