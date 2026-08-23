@@ -426,7 +426,10 @@ IBKR_EVENT_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The documented authenticated account-trades feed has execution
+    # identity, event conid, B/S direction, price, and filled size for local
+    # simulation-first copy previews; no live order is submitted.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -637,7 +640,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://www.interactivebrokers.com",
         description=(
             "Official IBKR Client Portal Web API event-contract adapter for ForecastTrader/ForecastEx "
-            "discovery, conids, top-of-book prices, alerts, paper orders, and guarded live orders."
+            "discovery, conids, top-of-book prices, execution copy previews, alerts, paper orders, and guarded live orders."
         ),
         capabilities=IBKR_EVENT_CAPABILITIES,
     ),
@@ -647,7 +650,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://www.forecastex.com",
         description=(
             "Official ForecastEx event-contract adapter routed through the IBKR Client Portal Web API "
-            "for discovery, conids, top-of-book prices, alerts, paper orders, and guarded live orders."
+            "for discovery, conids, top-of-book prices, execution copy previews, alerts, paper orders, and guarded live orders."
         ),
         capabilities=IBKR_EVENT_CAPABILITIES,
     ),
@@ -657,7 +660,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://www.cmegroup.com",
         description=(
             "Official CME event-contract adapter routed through the IBKR Client Portal Web API for "
-            "product discovery, event conids, top-of-book prices, alerts, paper orders, and guarded orders."
+            "product discovery, event conids, top-of-book prices, execution copy previews, alerts, paper orders, and guarded orders."
         ),
         capabilities=IBKR_EVENT_CAPABILITIES,
     ),

@@ -126,6 +126,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         )
         trades = adapter.list_trades(order.contract_id, limit=2, after=1760010000, before=1760012000)
         paper = adapter.place_paper_order(order)
+        copy_preview = adapter.copy_trade_from_activity(forecast_fixtures["trades"][0])
 
         self.assertEqual(events[0].event_id, "IBKR:FF")
         self.assertEqual({contract.outcome for contract in contracts}, {"YES", "NO"})
@@ -140,6 +141,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([trade.price for trade in trades], [0.48])
         self.assertEqual([trade.size for trade in trades], [5.0])
         self.assertTrue(paper.accepted)
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, order.contract_id)
+        self.assertEqual(copy_preview.average_price, 0.48)
+        self.assertEqual(copy_preview.raw["source"], "ibkr_authenticated_account_trades")
+        self.assertEqual(copy_preview.raw["execution_id"], "exec-event-buy-1")
 
         account_adapter = IBKRForecastTraderAdapter(
             {
@@ -266,8 +272,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         forecastex = ForecastExAdapter({"ibkr_session_cookie": "api=forecastx-session"})
         self.assertIsInstance(forecastex, IBKREventContractsAdapter)
         self.assertEqual(forecastex.metadata.market_id, "forecastex")
-        with self.assertRaises(UnsupportedFeatureError):
+        with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({"side": "BUY"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**forecast_fixtures["trades"][0], "size": 0})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**forecast_fixtures["trades"][0], "price": 1.2})
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_candles(order.contract_id, resolution="5sec")

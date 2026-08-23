@@ -159,6 +159,12 @@ average matched odds, matched size, and bet identity. Both adapters retain raw
 activity and fail closed on incomplete or inconsistent records without calling
 live mutation endpoints.
 
+IBKR ForecastTrader, ForecastEx, and CME event contracts now provide the same
+parity from the documented authenticated `/iserver/account/trades` feed. The
+shared adapter validates execution id, event conid, B/S direction, probability
+price, and whole filled size, preserves the execution payload, and routes only
+to a local paper preview; no IBKR order endpoint is called by copy preview.
+
 ## Open External Evidence Gates
 
 These are deliberately not replaced with simulated success:

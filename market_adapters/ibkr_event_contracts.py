@@ -17,7 +17,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError
 from .types import (
     MarketCapabilities,
     MarketCandle,
@@ -50,7 +50,10 @@ IBKR_EVENT_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The documented account-trades feed contains complete execution
+    # identity, event conid, side, price, size, and timestamp fields.  Copy
+    # previews remain simulation-first and never submit a live order.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -446,6 +449,7 @@ class IBKREventContractsAdapter(MarketAdapter):
             contract_id=canonical,
             accepted=True,
             message=f"DRY RUN: would submit {self.mode_name} {order.side.upper()} order for {order.size:g} contracts",
+            average_price=order.limit_price,
             raw={"request": request, "venue": self.venue},
         )
 
@@ -568,11 +572,66 @@ class IBKREventContractsAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "IBKR event-contract activity mirroring is not implemented; account activity is not treated as a copy signal.",
+        """Build a local copy preview from an authenticated IBKR execution.
+
+        IBKR's documented ``/iserver/account/trades`` feed provides the
+        execution id, event-contract conid, B/S side, execution price, and
+        filled size.  The preview validates those fields and routes only to
+        the local paper-order path; it never calls an order endpoint.
+        """
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        raw_conid = activity.get("conid") or activity.get("conidEx")
+        if contract_id:
+            canonical, conid = self._parse_contract_id(contract_id)
+            if raw_conid not in (None, ""):
+                try:
+                    supplied = int(str(raw_conid).split(";")[0])
+                except (TypeError, ValueError) as exc:
+                    raise MarketConfigurationError("IBKR activity conid must be numeric.") from exc
+                if supplied != conid:
+                    raise MarketConfigurationError("IBKR activity conid does not match contract_id.")
+        else:
+            if raw_conid in (None, ""):
+                raise MarketConfigurationError("IBKR activity requires contract_id or conid.")
+            canonical = self._contract_id(raw_conid)
+            conid = int(canonical.split(":", 1)[1])
+
+        side = self._trade_side(activity.get("side"))
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("IBKR activity side must be B/S or BUY/SELL.")
+        price = self._finite_positive(activity.get("price"), "IBKR activity price")
+        if price > 1.0:
+            raise MarketConfigurationError("IBKR event-contract activity price must be between 0 and 1.")
+        size = self._finite_positive(activity.get("size") or activity.get("quantity"), "IBKR activity size")
+        if not float(size).is_integer():
+            raise MarketConfigurationError("IBKR event-contract activity size must be a whole number.")
+        trade_id = str(
+            activity.get("execution_id")
+            or activity.get("executionId")
+            or activity.get("trade_id")
+            or activity.get("tradeId")
+            or activity.get("id")
+            or ""
+        ).strip()
+        if not trade_id:
+            raise MarketConfigurationError("IBKR activity requires a documented execution id.")
+
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=canonical,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={"activity": dict(activity), "source": "ibkr_authenticated_account_trades", "conid": conid},
+            )
         )
+        preview.raw["source"] = "ibkr_authenticated_account_trades"
+        preview.raw["activity"] = dict(activity)
+        preview.raw["execution_id"] = trade_id
+        return preview
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params, headers=self._auth_headers())
