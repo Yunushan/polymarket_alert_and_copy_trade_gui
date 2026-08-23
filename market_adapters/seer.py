@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
-from .types import MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import MarketCandle, MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
 
 
 DEFAULT_SEER_API_BASE_URL = "https://app.seer.pm"
@@ -17,6 +17,9 @@ SEER_REFERENCES = (
     "https://seer-3.gitbook.io/seer-documentation/developers/interact-with-seer/trading",
     "https://seer-3.gitbook.io/seer-documentation/developers/intro",
     "https://seer-3.gitbook.io/seer-documentation/developers/contracts",
+    "https://github.com/seer-pm/demo/blob/main/web/netlify/functions/market-chart.mts",
+    "https://github.com/seer-pm/demo/blob/main/web/src/hooks/chart/utils.ts",
+    "https://github.com/seer-pm/demo/blob/main/packages/seer-pm-sdk/src/market-pools.ts",
 )
 SEER_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
@@ -24,14 +27,15 @@ SEER_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 class SeerAdapter(MarketAdapter):
     """Official Seer serverless API adapter for market data and paper orders.
 
-    Seer documents a public ``markets-search`` and ``get-market`` API which
-    joins its subgraph data with cached market metadata.  It exposes outcome
-    odds and token addresses, but it does not expose a CLOB orderbook or a
-    signed-order submission endpoint; trading is performed through a
-    third-party DEX using Seer outcome tokens.  The adapter therefore accepts
-    only an operator-reviewed, externally signed EVM transaction targeted at
-    an explicit DEX allow-list.  It never signs, approves collateral, or
-    settles positions itself.
+    Seer documents public ``markets-search``, ``get-market``, and
+    ``market-chart`` APIs which join its subgraph data with cached market
+    metadata.  It exposes outcome odds, token addresses, and DEX-pool chart
+    points, but it does not expose a CLOB orderbook or a signed-order
+    submission endpoint; trading is performed through a third-party DEX using
+    Seer outcome tokens.  The adapter therefore accepts only an
+    operator-reviewed, externally signed EVM transaction targeted at an
+    explicit DEX allow-list.  It never signs, approves collateral, or settles
+    positions itself.
     """
 
     metadata = get_market_metadata("seer")
@@ -48,6 +52,8 @@ class SeerAdapter(MarketAdapter):
                 "api_base_url": self.api_base_url,
                 "references": list(SEER_REFERENCES),
                 "public_api": True,
+                "candle_history_source": "market-chart",
+                "candle_history_resolutions": ["raw", "price", "1h"],
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "signed_transaction_submission_enabled": self.config_bool(
@@ -167,6 +173,126 @@ class SeerAdapter(MarketAdapter):
             "Seer's official API exposes market odds and charts, not a CLOB orderbook.",
         )
 
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Seer's official DEX-pool chart points as flat candles.
+
+        The Seer consumer selects the reciprocal price field according to the
+        sorted outcome/collateral token pair: an outcome in ``token0`` uses
+        ``token1Price`` and an outcome in ``token1`` uses ``token0Price``.
+        The endpoint combines hourly pool snapshots with swap-time points, so
+        this adapter preserves the irregular upstream timestamps and does not
+        claim locally resampled OHLCV or volume.
+        """
+
+        self.ensure_capability("candle_history")
+        requested_resolution = str(resolution or "1h").strip().lower()
+        if requested_resolution not in {"raw", "price", "1h"}:
+            raise MarketConfigurationError(
+                "Seer chart history accepts resolution 'raw', 'price', or '1h'; "
+                "the official mixed hourly/swap points are not resampled."
+            )
+        lower = self._history_timestamp_bound(from_timestamp, "from_timestamp")
+        upper = self._history_timestamp_bound(to_timestamp, "to_timestamp")
+        if lower is not None and upper is not None and lower > upper:
+            raise MarketConfigurationError("Seer chart history requires from_timestamp <= to_timestamp.")
+
+        chain_id, market_id, outcome_index = self._split_contract_id(contract_id)
+        market = self._market_cache.get(self._event_id(chain_id, market_id))
+        if not market:
+            market = dict(self._get_market(chain_id, market_id))
+        if str(market.get("type") or "").strip().casefold() != "generic":
+            raise MarketConfigurationError(
+                "Seer candle history currently supports only Generic markets; "
+                "Futarchy pool-price semantics are different and remain fail-closed."
+            )
+
+        wrapped_tokens = market.get("wrappedTokens")
+        if not isinstance(wrapped_tokens, list) or outcome_index >= len(wrapped_tokens):
+            raise MarketConfigurationError(f"Seer market {market_id!r} did not return the requested outcome token.")
+        outcome_token = self._address(wrapped_tokens[outcome_index], label="outcome token")
+        collateral_token = self._address(market.get("collateralToken"), label="collateral token")
+        if outcome_token.casefold() == collateral_token.casefold():
+            raise MarketConfigurationError("Seer outcome and collateral tokens must be different addresses.")
+        expected_token0, expected_token1 = sorted(
+            (outcome_token, collateral_token),
+            key=str.casefold,
+        )
+
+        payload = self._get(
+            "/market-chart",
+            params={"marketId": market_id, "chainId": int(chain_id)},
+        )
+        if not isinstance(payload, list):
+            raise MarketConfigurationError("Seer market-chart must return one dataset per outcome.")
+        if outcome_index >= len(payload):
+            raise MarketConfigurationError(
+                f"Seer market-chart omitted the dataset for outcome index {outcome_index}."
+            )
+        points = payload[outcome_index]
+        if not isinstance(points, list):
+            raise MarketConfigurationError("Seer market-chart outcome dataset must be a list.")
+
+        canonical = self._contract_id(chain_id, market_id, outcome_index)
+        candles: List[MarketCandle] = []
+        for point in points:
+            if not isinstance(point, Mapping):
+                raise MarketConfigurationError("Seer market-chart points must be JSON objects.")
+            timestamp = self._chart_timestamp(point.get("periodStartUnix"))
+            pool = point.get("pool")
+            if not isinstance(pool, Mapping):
+                raise MarketConfigurationError("Seer market-chart point omitted its pool token pair.")
+            pool_token0 = self._pool_token_address(pool.get("token0"), label="pool token0")
+            pool_token1 = self._pool_token_address(pool.get("token1"), label="pool token1")
+            if (
+                pool_token0.casefold() != expected_token0.casefold()
+                or pool_token1.casefold() != expected_token1.casefold()
+            ):
+                raise MarketConfigurationError(
+                    "Seer market-chart pool tokens do not match the requested outcome/collateral pair."
+                )
+
+            token0_price, token1_price = self._chart_prices(point)
+            if outcome_token.casefold() == pool_token0.casefold():
+                price = token1_price
+                price_field = "token1Price"
+            else:
+                price = token0_price
+                price_field = "token0Price"
+            if price is None or not 0 <= price <= 1:
+                continue
+            if lower is not None and timestamp < lower:
+                continue
+            if upper is not None and timestamp > upper:
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=timestamp,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    volume=None,
+                    raw={
+                        "source": "seer_market_chart",
+                        "flat_point": True,
+                        "price_field": price_field,
+                        "resolution_requested": requested_resolution,
+                        "point": dict(point),
+                    },
+                )
+            )
+        candles.sort(key=lambda candle: candle.timestamp)
+        return candles
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         chain_id, market_id, outcome_index = self._validate_order(order)
@@ -274,6 +400,9 @@ class SeerAdapter(MarketAdapter):
 
     def _post(self, path: str, body: Mapping[str, Any]) -> Any:
         return self.runtime.request_json("POST", self._url(path), json_body=dict(body), headers={})
+
+    def _get(self, path: str, *, params: Mapping[str, Any]) -> Any:
+        return self.runtime.request_json("GET", self._url(path), params=dict(params), headers={})
 
     def _get_market(self, chain_id: str, market_id: str) -> Mapping[str, Any]:
         payload = self._post("/get-market", {"chainId": int(chain_id), "id": market_id})
@@ -387,8 +516,62 @@ class SeerAdapter(MarketAdapter):
             return None
         return number if math.isfinite(number) and 0 < number < 1 else None
 
+    @staticmethod
+    def _history_timestamp_bound(value: Any, label: str) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Seer {label} must be a non-negative finite Unix timestamp.")
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Seer {label} must be a non-negative finite Unix timestamp.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"Seer {label} must be a non-negative finite Unix timestamp.")
+        return timestamp
+
+    @staticmethod
+    def _chart_timestamp(value: Any) -> float:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Seer market-chart timestamp must be finite and non-negative.")
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Seer market-chart timestamp must be finite and non-negative.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError("Seer market-chart timestamp must be finite and non-negative.")
+        return timestamp
+
+    @staticmethod
+    def _chart_number(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Seer market-chart prices must be finite non-negative numbers.")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
+    @classmethod
+    def _chart_prices(cls, point: Mapping[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+        token0_price = cls._chart_number(point.get("token0Price"))
+        token1_price = cls._chart_number(point.get("token1Price"))
+        if token0_price == 0 and token1_price == 0:
+            # Seer's UI can derive from sqrtPrice only because it owns the
+            # token metadata needed for decimal adjustment.  The normalized
+            # adapter contract does not, so it must not fabricate that value.
+            return None, None
+        return token0_price, token1_price
+
+    @classmethod
+    def _pool_token_address(cls, value: Any, *, label: str) -> str:
+        token = value.get("id") if isinstance(value, Mapping) else value
+        return cls._address(token, label=label)
+
     def _url(self, path: str) -> str:
-        allowed = {"/markets-search", "/get-market", "/markets-charts"}
+        allowed = {"/markets-search", "/get-market", "/market-chart"}
         if path not in allowed:
             raise MarketConfigurationError("Seer request path is not an approved official endpoint.")
         return f"{self.api_base_url}/.netlify/functions{path}"

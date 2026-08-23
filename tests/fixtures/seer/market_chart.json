@@ -1,0 +1,111 @@
+[
+  [
+    {
+      "token0Price": "1.6949152542",
+      "token1Price": "0.59",
+      "periodStartUnix": 1733180400,
+      "sqrtPrice": "60874255443241520000000000000",
+      "liquidity": "1000000000000000000",
+      "pool": {
+        "id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token0": {
+          "id": "0x2222222222222222222222222222222222222222",
+          "name": "Wrapped Yes"
+        },
+        "token1": {
+          "id": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "name": "Collateral"
+        }
+      }
+    },
+    {
+      "token0Price": "1.6393442623",
+      "token1Price": "0.61",
+      "periodStartUnix": 1733184000,
+      "sqrtPrice": "61896107305695830000000000000",
+      "liquidity": "1100000000000000000",
+      "pool": {
+        "id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token0": {
+          "id": "0x2222222222222222222222222222222222222222",
+          "name": "Wrapped Yes"
+        },
+        "token1": {
+          "id": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "name": "Collateral"
+        }
+      }
+    },
+    {
+      "token0Price": "1.6",
+      "token1Price": "0.625",
+      "periodStartUnix": 1733187600,
+      "sqrtPrice": "62665706865775010000000000000",
+      "pool": {
+        "id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token0": {
+          "id": "0x2222222222222222222222222222222222222222",
+          "name": "Wrapped Yes"
+        },
+        "token1": {
+          "id": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "name": "Collateral"
+        }
+      }
+    },
+    {
+      "token0Price": "0",
+      "token1Price": "0",
+      "periodStartUnix": 1733191200,
+      "sqrtPrice": "999999999999999999999999999999999999999999999999999999999999999999999",
+      "pool": {
+        "id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token0": {
+          "id": "0x2222222222222222222222222222222222222222",
+          "name": "Wrapped Yes"
+        },
+        "token1": {
+          "id": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "name": "Collateral"
+        }
+      }
+    }
+  ],
+  [
+    {
+      "token0Price": "0.41",
+      "token1Price": "2.4390243902",
+      "periodStartUnix": 1733184000,
+      "sqrtPrice": "123771534560421000000000000000",
+      "liquidity": "900000000000000000",
+      "pool": {
+        "id": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "token0": {
+          "id": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "name": "Collateral"
+        },
+        "token1": {
+          "id": "0x3333333333333333333333333333333333333333",
+          "name": "Wrapped No"
+        }
+      }
+    },
+    {
+      "token0Price": "0.375",
+      "token1Price": "2.6666666667",
+      "periodStartUnix": 1733187600,
+      "sqrtPrice": "129378161426590000000000000000",
+      "pool": {
+        "id": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "token0": {
+          "id": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "name": "Collateral"
+        },
+        "token1": {
+          "id": "0x3333333333333333333333333333333333333333",
+          "name": "Wrapped No"
+        }
+      }
+    }
+  ]
+]

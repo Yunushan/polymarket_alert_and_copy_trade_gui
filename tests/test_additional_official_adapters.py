@@ -549,6 +549,95 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 
+    def test_seer_market_chart_maps_asymmetric_pool_orientation_without_fabricated_sqrt_prices(self) -> None:
+        adapter = SeerAdapter()
+        market = load_fixture("seer", "market")
+        chart = load_fixture("seer", "market_chart")
+        market_id = "0x1111111111111111111111111111111111111111"
+        chart_requests = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(headers, {})
+            if url.endswith("/.netlify/functions/get-market"):
+                self.assertEqual(method, "POST")
+                self.assertIsNone(params)
+                self.assertEqual(json_body, {"chainId": 100, "id": market_id})
+                return market
+            if url.endswith("/.netlify/functions/market-chart"):
+                self.assertEqual(method, "GET")
+                self.assertIsNone(json_body)
+                self.assertEqual(params, {"marketId": market_id, "chainId": 100})
+                chart_requests.append(dict(params))
+                return chart
+            raise AssertionError(f"unexpected Seer URL: {url}")
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        yes = adapter.list_candles(
+            f"100:{market_id}:0",
+            resolution="raw",
+            from_timestamp=1733184000,
+            to_timestamp=1733187600,
+        )
+        no = adapter.list_candles(f"100:{market_id}:1", resolution="price")
+        all_yes = adapter.list_candles(f"100:{market_id}:0")
+
+        self.assertTrue(adapter.capabilities.candle_history)
+        self.assertEqual([candle.timestamp for candle in yes], [1733184000.0, 1733187600.0])
+        self.assertEqual([candle.close for candle in yes], [0.61, 0.625])
+        self.assertEqual([candle.raw["price_field"] for candle in yes], ["token1Price", "token1Price"])
+        self.assertEqual([candle.close for candle in no], [0.41, 0.375])
+        self.assertEqual([candle.raw["price_field"] for candle in no], ["token0Price", "token0Price"])
+        self.assertEqual(len(all_yes), 3)
+        self.assertTrue(all(candle.volume is None for candle in yes + no))
+        self.assertEqual(len(chart_requests), 3)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(f"100:{market_id}:0", resolution="1d")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(
+                f"100:{market_id}:0",
+                from_timestamp=1733187600,
+                to_timestamp=1733184000,
+            )
+
+    def test_seer_market_chart_fails_closed_on_unproven_pool_pair_or_missing_dataset(self) -> None:
+        market = load_fixture("seer", "market")
+        chart = load_fixture("seer", "market_chart")
+        market_id = "0x1111111111111111111111111111111111111111"
+        bad_pair_chart = json.loads(json.dumps(chart))
+        bad_pair_chart[0][0]["pool"]["token1"]["id"] = "0x5555555555555555555555555555555555555555"
+
+        def configured_adapter(payload):
+            adapter = SeerAdapter()
+
+            def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+                if url.endswith("/.netlify/functions/get-market"):
+                    return market
+                if url.endswith("/.netlify/functions/market-chart"):
+                    return payload
+                raise AssertionError(f"unexpected Seer URL: {url}")
+
+            adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+            return adapter
+
+        with self.assertRaisesRegex(MarketConfigurationError, "pool tokens do not match"):
+            configured_adapter(bad_pair_chart).list_candles(f"100:{market_id}:0")
+        with self.assertRaisesRegex(MarketConfigurationError, "omitted the dataset"):
+            configured_adapter([chart[0]]).list_candles(f"100:{market_id}:1")
+
+        boolean_timestamp_chart = json.loads(json.dumps(chart))
+        boolean_timestamp_chart[0][0]["periodStartUnix"] = True
+        with self.assertRaisesRegex(MarketConfigurationError, "timestamp"):
+            configured_adapter(boolean_timestamp_chart).list_candles(f"100:{market_id}:0")
+
+        boolean_price_chart = json.loads(json.dumps(chart))
+        boolean_price_chart[0][0]["token1Price"] = True
+        with self.assertRaisesRegex(MarketConfigurationError, "prices"):
+            configured_adapter(boolean_price_chart).list_candles(f"100:{market_id}:0")
+
+        with self.assertRaisesRegex(MarketConfigurationError, "from_timestamp"):
+            configured_adapter(chart).list_candles(f"100:{market_id}:0", from_timestamp=True)
+
     def test_seer_guarded_live_order_forwards_reviewed_signed_dex_transaction(self) -> None:
         market_id = "0x1111111111111111111111111111111111111111"
         dex_address = "0x2222222222222222222222222222222222222222"

@@ -538,6 +538,15 @@ Nadex is represented by a fixture-backed read-only alias over the official Crypt
 
 Blinq is represented by a fixture-backed read-only alias over the official Polymarket data surface because Blinq's product page explicitly says it trades Polymarket markets. The alias includes public Polymarket price-history points and authenticated read-only CLOB trade history; the trade feed requires explicit readonly/L2 headers. Blinq leverage, deposits, private account actions, live wallet execution, and copy trading remain unsupported until Blinq publishes a separate documented automation contract.
 
+Seer's official chain-qualified `market-chart` route now supplies fixture-backed
+Generic-market candle history. The adapter follows Seer's own chart consumer:
+an outcome sorted as pool `token0` uses `token1Price`, while an outcome sorted
+as pool `token1` uses `token0Price`. It validates the pool against the market's
+outcome/collateral pair, preserves the mixed hourly and swap timestamps as flat
+OHLC points, leaves volume unset, and performs no local resampling or
+decimal-unsafe `sqrtPrice` reconstruction. Futarchy chart semantics remain
+fail-closed.
+
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, dry-run default | Yes | Live trading only | Trading may be region/KYC limited |
@@ -587,7 +596,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Probable (`probable`) | Implemented | Yes | Yes (activity/price history; authenticated open-order reads) | Yes | Guarded, off by default | Yes (simulation-first wallet activity) | Required | API credentials required | Jurisdiction varies |
 | Kalshi via Robinhood (`kalshi_via_robinhood`) | Implemented | Yes | Yes (including trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
 | FanDuel Predicts (`fanduel_predicts`) | Implemented | Yes | Yes | Yes | No | No | Required | Account required for trading | Region/KYC limited |
-| Seer (`seer`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
+| Seer (`seer`) | Implemented | Yes | Yes (official Generic-market DEX-pool chart points) | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | DFlow (`dflow`) | Implemented | Yes | Yes (public trades plus bounded derived trade-feed candles) | Yes | Guarded, off by default | No | Required | Wallet required for trading | Region limited |
 | Space (`space`) | Implemented | Yes | Yes (including public trades/candles) | Yes | No | No | Required | No API key; wallet/settlement required only for future live chain flow | Jurisdiction varies |
 | Xmarket (`xmarket`) | Implemented | Yes (positions/orders) | Yes | Yes | Guarded, off by default (single and batch create; batch cancel) | No | Required | API credentials required | Jurisdiction varies |

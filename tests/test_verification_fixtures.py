@@ -633,9 +633,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("last_price", tickers["tickers"][0])
         self.assertIn("liquidity_in_usd", tickers["tickers"][0])
 
-    def test_seer_fixtures_cover_official_search_and_market_shapes(self) -> None:
+    def test_seer_fixtures_cover_official_search_market_and_chart_shapes(self) -> None:
         search = json.loads((FIXTURE_ROOT / "seer" / "markets_search.json").read_text(encoding="utf-8"))
         market = json.loads((FIXTURE_ROOT / "seer" / "market.json").read_text(encoding="utf-8"))
+        chart = json.loads((FIXTURE_ROOT / "seer" / "market_chart.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(search.get("markets"), list)
         self.assertEqual(search["markets"][0].get("chainId"), 100)
@@ -643,6 +644,14 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(search["markets"][0].get("odds"), list)
         self.assertEqual(market.get("outcomes"), ["Yes", "No"])
         self.assertEqual(len(market.get("wrappedTokens", [])), 2)
+        self.assertTrue(market.get("collateralToken", "").startswith("0x"))
+        self.assertEqual(len(chart), 2)
+        self.assertEqual(chart[0][0]["pool"]["token0"]["id"], market["wrappedTokens"][0])
+        self.assertEqual(chart[1][0]["pool"]["token1"]["id"], market["wrappedTokens"][1])
+        self.assertLess(float(chart[0][0]["token1Price"]), 1)
+        self.assertGreater(float(chart[0][0]["token0Price"]), 1)
+        self.assertLess(float(chart[1][0]["token0Price"]), 1)
+        self.assertGreater(float(chart[1][0]["token1Price"]), 1)
 
     def test_hyperliquid_fixtures_cover_hip4_metadata_book_activity_and_exchange_shapes(self) -> None:
         metadata = json.loads((FIXTURE_ROOT / "hyperliquid" / "outcome_meta.json").read_text(encoding="utf-8"))
