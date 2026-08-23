@@ -57,7 +57,7 @@ class KalshiAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.orderbook_reading)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("external-api.kalshi.com", health["api_base_url"])
 
     def test_list_events_groups_markets_by_event_and_filters_query(self) -> None:
@@ -202,13 +202,24 @@ class KalshiAdapterTests(unittest.TestCase):
         settlements = adapter.account_recovery("settlements", event_ticker="KXFED-26MAY")
         balance = adapter.account_recovery("balance", subaccount=0)
         queue = adapter.account_recovery("queue_positions", ticker="KXFED-26MAY-TARGET-425")
+        copy_preview = adapter.copy_trade_from_activity(fills["fills"][0])
 
         self.assertEqual(active["orders"][0]["order_id"], "order-kalshi-1")
         self.assertEqual(fills["fills"][0]["fill_id"], "fill-kalshi-1")
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, "KXFED-26MAY-TARGET-425:YES")
+        self.assertEqual(copy_preview.raw["source"], "kalshi_authenticated_portfolio_fills")
+        self.assertEqual(copy_preview.raw["ticker"], "KXFED-26MAY-TARGET-425")
+        self.assertAlmostEqual(copy_preview.average_price or 0.0, 0.42)
         self.assertEqual(positions["market_positions"][0]["position_fp"], "2.00")
         self.assertEqual(settlements["settlements"][0]["market_result"], "yes")
         self.assertEqual(balance["balance"], 123.45)
         self.assertEqual(queue["queue_positions"][0]["queue_position_fp"], "4.00")
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fills["fills"][0], "book_side": "unknown"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fills["fills"][0], "count_fp": "0"})
         self.assertEqual(calls[0][1], "/portfolio/orders")
         self.assertEqual(calls[0][2]["status"], "resting")
         self.assertEqual(calls[1][1], "/historical/fills")

@@ -33,7 +33,10 @@ KALSHI_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated portfolio fills contain outcome, bid/ask direction,
+    # price, size, and fill identity for local simulation-first previews.
+    # Copy previews never submit a live order automatically.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -384,7 +387,9 @@ BETFAIR_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated current orders expose matched side, average odds, stake,
+    # and bet identity for local simulation-first previews.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -579,7 +584,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="kalshi",
         display_name="Kalshi",
         homepage_url="https://kalshi.com",
-        description="Official Kalshi REST market-data adapter with dry-run orders and guarded live-order support.",
+        description=(
+            "Official Kalshi REST adapter with authenticated fill copy previews, market data, dry-run orders, "
+            "and guarded live-order support."
+        ),
         capabilities=KALSHI_CAPABILITIES,
     ),
     MarketMetadata(
@@ -908,7 +916,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="betfair_exchange",
         display_name="Betfair Exchange",
         homepage_url="https://www.betfair.com/exchange",
-        description="Official Betfair Exchange API adapter for authenticated market discovery, best-offer orderbooks, matched-order history, prices, dry-run orders, and guarded placeOrders support.",
+        description=(
+            "Official Betfair Exchange API adapter for authenticated market discovery, best-offer orderbooks, "
+            "matched-order copy previews, prices, dry-run orders, and guarded placeOrders support."
+        ),
         capabilities=BETFAIR_CAPABILITIES,
     ),
     MarketMetadata(market_id="probo", display_name="Probo", homepage_url="https://probo.in"),

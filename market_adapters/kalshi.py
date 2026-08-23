@@ -35,6 +35,10 @@ KALSHI_ORDER_MANAGEMENT_REFERENCES = (
     "https://docs.kalshi.com/api-reference/orders/amend-order-v2",
     "https://docs.kalshi.com/api-reference/orders/decrease-order-v2",
 )
+KALSHI_ACCOUNT_REFERENCES = (
+    "https://docs.kalshi.com/api-reference/portfolio/get-fills",
+    "https://docs.kalshi.com/getting_started/order_direction",
+)
 
 
 class KalshiAdapter(MarketAdapter):
@@ -77,6 +81,7 @@ class KalshiAdapter(MarketAdapter):
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "account_recovery_endpoints": list(KALSHI_ACCOUNT_REFERENCES),
                 "order_management_operations": list(self.order_management_operations),
                 "order_management_enabled": self.config_bool("kalshi_order_management_enabled", False),
                 "order_management_endpoints": list(KALSHI_ORDER_MANAGEMENT_REFERENCES),
@@ -527,7 +532,7 @@ class KalshiAdapter(MarketAdapter):
                 + (f" at limit {order.limit_price:.4f}" if order.limit_price is not None else "")
             ),
             filled_size=0.0,
-            average_price=None,
+            average_price=order.limit_price,
             raw={"request": dict(order.metadata), "ticker": ticker, "outcome": outcome},
         )
 
@@ -555,6 +560,85 @@ class KalshiAdapter(MarketAdapter):
             "request": payload,
             "response": response,
         }
+
+    def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
+        """Build a local copy preview from an authenticated Kalshi fill.
+
+        Kalshi's documented portfolio fills expose the ticker, outcome side,
+        bid/ask book side, fixed-point price, count, and fill identity.  The
+        adapter maps bid/ask to BUY/SELL for the selected YES/NO contract and
+        only creates a local paper preview; it never submits a live order.
+        """
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        ticker = str(activity.get("ticker") or activity.get("market_id") or activity.get("marketId") or "").strip()
+        outcome = str(
+            activity.get("outcome_side")
+            or activity.get("outcome")
+            or activity.get("position")
+            or ""
+        ).strip().lower()
+        if contract_id:
+            parsed_ticker, parsed_outcome = self._split_contract_id(contract_id)
+            if ticker and parsed_ticker != ticker.upper():
+                raise MarketConfigurationError("Kalshi activity ticker does not match contract_id.")
+            if outcome and parsed_outcome != outcome:
+                raise MarketConfigurationError("Kalshi activity outcome does not match contract_id.")
+            ticker, outcome = parsed_ticker, parsed_outcome
+        else:
+            if not ticker or outcome not in {"yes", "no"}:
+                raise MarketConfigurationError("Kalshi activity requires contract_id or ticker plus outcome_side.")
+            ticker = ticker.upper()
+            contract_id = self._contract_id(ticker, outcome)
+
+        raw_book_side = str(activity.get("book_side") or activity.get("bookSide") or "").strip().lower()
+        if raw_book_side in {"bid", "buy"}:
+            side = "BUY"
+        elif raw_book_side in {"ask", "sell"}:
+            side = "SELL"
+        else:
+            side_value = str(activity.get("trade_side") or activity.get("direction") or activity.get("action") or "").strip().upper()
+            if side_value in {"BUY", "SELL"}:
+                side = side_value
+            else:
+                raise MarketConfigurationError("Kalshi activity requires documented bid/ask direction.")
+
+        price = self._trade_price(activity, outcome)
+        if price is None or price <= 0.0 or price >= 1.0:
+            raise MarketConfigurationError("Kalshi activity price must be between 0 and 1.")
+        size = self._positive_number(
+            activity.get("count_fp")
+            or activity.get("fill_count_fp")
+            or activity.get("count")
+            or activity.get("quantity")
+            or activity.get("size")
+        )
+        if size is None:
+            raise MarketConfigurationError("Kalshi activity count must be positive and finite.")
+        trade_id = str(
+            activity.get("fill_id")
+            or activity.get("fillId")
+            or activity.get("trade_id")
+            or activity.get("tradeId")
+            or activity.get("id")
+            or ""
+        ).strip()
+        if not trade_id:
+            raise MarketConfigurationError("Kalshi activity requires a documented fill id.")
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={"activity": dict(activity), "source": "kalshi_authenticated_portfolio_fills"},
+            )
+        )
+        preview.raw["source"] = "kalshi_authenticated_portfolio_fills"
+        preview.raw["activity"] = dict(activity)
+        return preview
 
     def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Run a guarded Kalshi V2 order-management mutation.

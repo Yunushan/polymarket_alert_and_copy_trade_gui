@@ -151,6 +151,14 @@ preserves its optional delegated-profile boundary. Both paths require a
 documented trade identity, validate contract/side/price/size fields, retain the
 raw activity in the preview, and never submit live offers/orders.
 
+Kalshi and Betfair now provide the same simulation-first parity from complete
+authenticated execution records. Kalshi portfolio fills supply outcome side,
+bid/ask direction, fixed-point price, count, and fill identity; Betfair
+`listCurrentOrders` supplies market/selection identity, BACK/LAY direction,
+average matched odds, matched size, and bet identity. Both adapters retain raw
+activity and fail closed on incomplete or inconsistent records without calling
+live mutation endpoints.
+
 ## Open External Evidence Gates
 
 These are deliberately not replaced with simulated success:

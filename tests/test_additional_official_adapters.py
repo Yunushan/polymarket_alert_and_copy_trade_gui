@@ -3594,6 +3594,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([trade.price for trade in trades], [0.5])
         self.assertEqual([trade.size for trade in trades], [4.0])
         self.assertEqual([trade.timestamp for trade in trades], [1780344003.0])
+        copy_preview = adapter.copy_trade_from_activity(current_orders["currentOrders"][0])
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, "1.234:101")
+        self.assertEqual(copy_preview.raw["source"], "betfair_authenticated_current_orders")
+        self.assertAlmostEqual(copy_preview.average_price or 0.0, 0.5)
         self.assertEqual(len(candles), 1)
         self.assertEqual(candles[0].timestamp, 1780344000.0)
         self.assertAlmostEqual(candles[0].open, 0.5)
@@ -3608,6 +3613,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(statement["accountStatement"][0]["refId"], "bet-1")
         self.assertEqual(rates[0]["currencyCode"], "EUR")
         self.assertTrue(paper.accepted)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**current_orders["currentOrders"][0], "side": "UNKNOWN"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**current_orders["currentOrders"][0], "sizeMatched": 0})
 
         with patch.dict(
             "os.environ",

@@ -122,7 +122,7 @@ Current catalog snapshot:
 - Candle history supported: 29 yes, 28 unsupported, 11 blocked
 - Paper trading supported: 54 yes, 3 unsupported, 11 blocked
 - Live trading supported: 36 guarded/off by default, 21 unsupported, 11 blocked
-- Copy trading supported: 11 guarded/off by default, 46 unsupported, 11 blocked (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, Predict.fun authenticated account activity, Probable public wallet activity, Azuro single-selection bettor activity, XO authenticated account trades, Matchbook authenticated matched bets, and Limitless authenticated portfolio history; all simulation-first and guarded)
+- Copy trading supported: 13 guarded/off by default, 44 unsupported, 11 blocked (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, Predict.fun authenticated account activity, Probable public wallet activity, Azuro single-selection bettor activity, XO authenticated account trades, Matchbook authenticated matched bets, Limitless authenticated portfolio history, Kalshi authenticated portfolio fills, and Betfair authenticated matched orders; all simulation-first and guarded)
 
 These totals are generated from the canonical support matrix (`market_adapters.support_matrix`)
 and intentionally distinguish supported, guarded, unsupported, and verified-blocked
@@ -325,6 +325,7 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 178 Support Snapshot Runtime Parity: scope complete for this pass; the canonical support matrix now publishes one aggregate implementation/operation summary through the Python/API support surfaces, and `verify.py` fails when the human `GOAL.md` capability totals drift from that matrix. Focused API/verifier tests and the full local verification suite cover the synchronization contract; unsupported and externally gated capabilities remain explicit.
 - Article 179 XO Account-Trade Copy Preview Parity: scope complete for this pass; XO's documented authenticated `/trades` feed now powers a validated simulation-first copy preview with canonical market/outcome identifiers, BUY/SELL and probability/quantity bounds, required trade identity, fixture coverage, and explicit non-live semantics. XO live posting and cancellation remain separately guarded and disabled by default.
 - Article 180 Matchbook and Limitless Copy Preview Parity: scope complete for this pass; Matchbook's documented authenticated aggregated matched-bets feed and Limitless's HMAC `/portfolio/history` feed now power validated simulation-first copy previews with canonical contract resolution, side/price/size/trade-identity bounds, fixture coverage, delegated-profile support where documented, and explicit non-live semantics. Live offer/order submission remains separately guarded and disabled by default.
+- Article 181 Kalshi and Betfair Copy Preview Parity: scope complete for this pass; Kalshi's authenticated portfolio fills and Betfair's documented `listCurrentOrders` matched summaries now power validated simulation-first copy previews with canonical outcome/selection resolution, bid/ask or BACK/LAY direction, price/size bounds, fill/bet identity, fixture coverage, and explicit non-live semantics. Live order placement remains separately guarded and disabled by default.
 
 ## Active continuation goals
 

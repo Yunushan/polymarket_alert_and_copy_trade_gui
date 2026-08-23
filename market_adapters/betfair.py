@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -26,6 +26,7 @@ BETFAIR_REFERENCES = (
     "https://developer.betfair.com/",
     "https://support.developer.betfair.com/hc/en-us/categories/360000245252-Exchange-API",
     "https://support.developer.betfair.com/hc/en-us/articles/115003864651-How-do-I-get-started",
+    "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687504/listCurrentOrders",
     "https://support.developer.betfair.com/hc/en-us/articles/360016170431-How-do-I-place-bets-on-handicap-markets",
     "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687679/listClearedOrders+-+Roll-up+Fields+Available",
     "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687725/Accounts+API",
@@ -697,6 +698,7 @@ class BetfairExchangeAdapter(MarketAdapter):
                 f"for {order.size:.4f} stake"
                 + (f" at implied probability {order.limit_price:.3f}" if order.limit_price is not None else "")
             ),
+            average_price=order.limit_price,
             raw={"market_id": market_id, "selection_id": selection_id},
         )
 
@@ -725,11 +727,79 @@ class BetfairExchangeAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Betfair copy trading is unsupported because this adapter does not mirror account activity.",
+        """Build a local copy preview from a matched Betfair order.
+
+        Betfair's documented ``listCurrentOrders`` response includes the bet
+        id, market/selection identity, BACK/LAY direction, average matched
+        decimal odds, and matched size.  The preview converts those fields to
+        the shared BUY/SELL probability model and never calls ``placeOrders``.
+        """
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        market_id = str(activity.get("market_id") or activity.get("marketId") or "").strip()
+        selection_id = str(activity.get("selection_id") or activity.get("selectionId") or "").strip()
+        if contract_id:
+            parsed_market, parsed_selection = self._split_contract_id(contract_id)
+            if market_id and parsed_market != market_id:
+                raise MarketConfigurationError("Betfair activity market_id does not match contract_id.")
+            if selection_id and parsed_selection != selection_id:
+                raise MarketConfigurationError("Betfair activity selection_id does not match contract_id.")
+            market_id, selection_id = parsed_market, parsed_selection
+        elif market_id and selection_id:
+            contract_id = self._contract_id(market_id, selection_id)
+        else:
+            raise MarketConfigurationError("Betfair activity requires contract_id or market_id plus selection_id.")
+
+        side = self._trade_side(
+            activity.get("side") or activity.get("bet_side") or activity.get("betSide")
         )
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Betfair activity side must be BACK/LAY or BUY/SELL.")
+        size = self._positive_number(
+            activity.get("sizeMatched")
+            if activity.get("sizeMatched") not in (None, "")
+            else activity.get("matched_size")
+            if activity.get("matched_size") not in (None, "")
+            else activity.get("size")
+        )
+        if size is None:
+            raise MarketConfigurationError("Betfair activity matched size must be positive and finite.")
+        raw_probability = activity.get("probability")
+        if raw_probability in (None, ""):
+            decimal_odds = activity.get("averagePriceMatched")
+            if decimal_odds in (None, ""):
+                decimal_odds = activity.get("average_price_matched")
+            if decimal_odds in (None, ""):
+                decimal_odds = activity.get("odds")
+            raw_probability = self._probability_from_decimal_odds(decimal_odds)
+        else:
+            raw_probability = self._safe_probability(raw_probability)
+        if raw_probability is None or raw_probability <= 0.0:
+            raise MarketConfigurationError("Betfair activity price/odds must map to a probability in (0, 1].")
+        trade_id = str(
+            activity.get("betId")
+            or activity.get("bet_id")
+            or activity.get("trade_id")
+            or activity.get("tradeId")
+            or activity.get("id")
+            or ""
+        ).strip()
+        if not trade_id:
+            raise MarketConfigurationError("Betfair activity requires a documented bet id.")
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=raw_probability,
+                metadata={"activity": dict(activity), "source": "betfair_authenticated_current_orders"},
+            )
+        )
+        preview.raw["source"] = "betfair_authenticated_current_orders"
+        preview.raw["activity"] = dict(activity)
+        return preview
 
     def _get_market_catalogue(self, market_id: str) -> Mapping[str, Any]:
         clean = str(market_id or "").strip()
