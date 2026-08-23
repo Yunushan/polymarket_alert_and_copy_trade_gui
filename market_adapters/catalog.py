@@ -485,6 +485,8 @@ SMARKETS_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -926,8 +928,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://smarkets.com",
         description=(
             "Official Smarkets v3 REST adapter for event/market/contract discovery, quote orderbooks, "
-            "paper orders, authenticated order/account reads, and guarded session-authenticated order "
-            "submission/cancellation."
+            "authenticated executed-order history with bounded derived candles, paper orders, authenticated "
+            "order/account reads, and guarded session-authenticated order submission/cancellation."
         ),
         capabilities=SMARKETS_CAPABILITIES,
     ),

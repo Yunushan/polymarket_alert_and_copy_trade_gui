@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -9,12 +10,14 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
     MarketContract,
+    MarketCandle,
     MarketEvent,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 
 
@@ -193,6 +196,151 @@ class SmarketsAdapter(MarketAdapter):
             params["states"] = states
         return self._get("/orders/", params=params)
 
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Normalize executed Smarkets orders into account trade records.
+
+        Smarkets' authenticated ``GET /orders/`` feed is an order/execution
+        feed rather than a public trade tape.  Only rows with a positive
+        executed quantity, an executed price, and an execution timestamp are
+        returned.  Unmatched/resting orders are deliberately excluded.
+        """
+
+        self.ensure_capability("trade_history")
+        market_id, contract_ref = self._split_contract_id(contract_id)
+        desired = self._account_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Smarkets trade history requires before to be at or after after.")
+
+        payload = self.list_orders(status="filled,partial", limit=desired)
+        rows = self._rows(payload, "orders", "data")
+        trades: List[MarketTrade] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            row_market = str(self._value(raw, "market_id", "marketId", "market") or "").strip()
+            row_contract = str(self._value(raw, "contract_id", "contractId", "contract") or "").strip()
+            if row_market and row_market != market_id:
+                continue
+            if row_contract and row_contract != contract_ref:
+                continue
+            side = self._trade_side(self._value(raw, "side", "order_side"))
+            size = self._executed_quantity(raw)
+            price = self._probability(
+                self._value(raw, "average_executed_price", "averageExecutedPrice", "executed_price", "price")
+            )
+            timestamp = self._timestamp_seconds(
+                self._value(
+                    raw,
+                    "executed_at",
+                    "executedAt",
+                    "last_executed_at",
+                    "lastExecutedAt",
+                    "updated_at",
+                    "updatedAt",
+                    "created_at",
+                    "createdAt",
+                )
+            )
+            trade_id = self._id(raw, "order_id", "trade_id", "tradeId")
+            if not trade_id or side is None or size is None or price is None or timestamp is None:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(market_id, contract_ref),
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(raw),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from authenticated executed orders."""
+
+        self.ensure_capability("candle_history")
+        market_id, contract_ref = self._split_contract_id(contract_id)
+        interval = self._candle_interval(resolution)
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError("Smarkets candle history requires to_timestamp to be at or after from_timestamp.")
+
+        trades = self.list_trades(
+            contract_id,
+            limit=self._account_limit(self.config.get("smarkets_candle_trade_limit", 1000)),
+            before=end_ts,
+            after=start_ts,
+        )
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in trades:
+            if trade.timestamp is None:
+                continue
+            bucket_timestamp = int(float(trade.timestamp) // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {
+                    "open": trade.price,
+                    "high": trade.price,
+                    "low": trade.price,
+                    "close": trade.price,
+                    "volume": 0.0,
+                    "trade_ids": [],
+                },
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += trade.size
+            bucket["trade_ids"].append(trade.trade_id)
+
+        canonical = self._contract_id(market_id, contract_ref)
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "smarkets_authenticated_executed_orders",
+                    "derived": True,
+                    "resolution": str(resolution or "").strip().lower(),
+                    "interval_seconds": interval,
+                    "trade_ids": list(bucket["trade_ids"]),
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
+
     def get_account(self) -> Any:
         """Read the authenticated Smarkets account summary."""
 
@@ -326,6 +474,89 @@ class SmarketsAdapter(MarketAdapter):
             label="SMARKETS_SESSION_TOKEN",
         )
         return {"Authorization": f"Session-Token {credential.value}"} if credential else {}
+
+    @classmethod
+    def _trade_side(cls, value: Any) -> Optional[str]:
+        normalized = str(value or "").strip().upper()
+        if normalized in {"BUY", "BACK"}:
+            return "BUY"
+        if normalized in {"SELL", "LAY"}:
+            return "SELL"
+        return None
+
+    def _executed_quantity(self, raw: Mapping[str, Any]) -> Optional[float]:
+        value = self._value(
+            raw,
+            "total_executed_quantity",
+            "totalExecutedQuantity",
+            "executed_quantity",
+            "executedQuantity",
+            "matched_quantity",
+            "matchedQuantity",
+        )
+        if value in (None, ""):
+            return None
+        try:
+            quantity = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(quantity) or quantity <= 0:
+            return None
+        return quantity / self._positive_scale("smarkets_quantity_scale", 10_000.0)
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(number):
+                return None
+            return number / 1000.0 if number > 100_000_000_000 else number
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            number = None
+        if number is not None and math.isfinite(number):
+            return number / 1000.0 if number > 100_000_000_000 else number
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        timestamp = SmarketsAdapter._timestamp_seconds(value)
+        if timestamp is None or timestamp < 0 or not math.isfinite(timestamp):
+            raise MarketConfigurationError(f"Smarkets {label} timestamp must be a valid non-negative epoch or ISO time.")
+        return timestamp
+
+    @staticmethod
+    def _candle_interval(resolution: Any) -> int:
+        normalized = str(resolution or "").strip().lower()
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14_400,
+            "1d": 86_400,
+            "1w": 604_800,
+        }
+        if normalized not in intervals:
+            allowed = ", ".join(intervals)
+            raise MarketConfigurationError(f"Smarkets candle resolution must be one of: {allowed}.")
+        return intervals[normalized]
 
     def _validate_order(self, order: PaperOrderRequest) -> Tuple[str, str]:
         self.ensure_order_market(order)

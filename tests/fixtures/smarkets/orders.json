@@ -7,6 +7,18 @@
       "status": "created",
       "price": "4400",
       "quantity": "50000"
+    },
+    {
+      "id": "order-filled-1",
+      "market_id": "market-1",
+      "contract_id": "contract-yes",
+      "status": "filled",
+      "side": "buy",
+      "price": "4600",
+      "quantity": "50000",
+      "total_executed_quantity": "25000",
+      "average_executed_price": "4500",
+      "executed_at": "2026-08-22T07:01:00Z"
     }
   ],
   "pagination": {
