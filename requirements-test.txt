@@ -1,4 +1,4 @@
 -r requirements-live.txt
 pytest>=8.0
 coverage[toml]>=7.6
-ruff==0.16.2
+ruff==0.16.3

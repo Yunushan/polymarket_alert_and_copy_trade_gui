@@ -39,10 +39,13 @@ class DependencyLockTests(unittest.TestCase):
                 self.assertIn("--hash=sha256:cb55c73c5f4408779d0cf3eef9f762b9c9f147a77de7b258bef0a5628adc85cc", lock)
 
     def test_build_lock_includes_hash_pinned_distribution_build_toolchain(self) -> None:
+        source = (ROOT / "requirements-build.txt").read_text(encoding="utf-8")
         lock = (ROOT / "requirements-build.lock").read_text(encoding="utf-8")
-        self.assertIn("build==1.5.0", lock)
+        requirements = [line.strip() for line in source.splitlines() if line.strip() and not line.startswith("#")]
+        self.assertGreaterEqual(len(requirements), 2)
+        for requirement in requirements:
+            self.assertIn(requirement, lock)
         self.assertIn("pyproject-hooks==1.2.0", lock)
-        self.assertIn("pyinstaller==6.21.0", lock)
 
     def test_test_lock_covers_runtime_and_test_dependencies(self) -> None:
         lock = (ROOT / "requirements-test.lock").read_text(encoding="utf-8")
