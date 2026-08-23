@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from market_adapters import AzuroAdapter, PaperOrderRequest
-from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "azuro"
@@ -61,6 +61,49 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertFalse(adapter.capabilities.copy_trading)
         self.assertIn("api.onchainfeed.org", health["api_base_url"])
         self.assertIn("streams.onchainfeed.org", health["websocket_url"])
+        self.assertEqual(health["account_recovery_operations"], ["bet_history"])
+        self.assertIn("thegraph.onchainfeed.org", health["graph_api_url"])
+
+    def test_account_recovery_reads_documented_v3_and_live_bet_history(self) -> None:
+        adapter = AzuroAdapter({"azuro_graph_api_url": "https://graph.fixture.test/query"})
+        response = load_fixture("bet_history")
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append((method, url, json_body, headers))
+            return response
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        wallet = "0x0000000000000000000000000000000000000001"
+        result = adapter.account_recovery("bet_history", wallet=wallet, limit=25, offset=4)
+
+        self.assertEqual(result["source"], "azuro_client_subgraph")
+        self.assertEqual(result["bettor"], wallet)
+        self.assertEqual(result["limit"], 25)
+        self.assertEqual(result["offset"], 4)
+        self.assertEqual(result["v3_bets"][0]["betId"], "7")
+        self.assertEqual(result["live_bets"][0]["betId"], "8")
+        self.assertEqual(calls[0][0:2], ("POST", "https://graph.fixture.test/query"))
+        self.assertEqual(calls[0][2]["variables"], {"bettor": wallet, "first": 25, "skip": 4})
+        self.assertEqual(calls[0][3]["Content-Type"], "application/json")
+
+    def test_account_recovery_rejects_invalid_wallet_bounds_and_graphql_errors(self) -> None:
+        adapter = AzuroAdapter()
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("bet_history", wallet="not-a-wallet")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery(
+                "bet_history",
+                wallet="0x0000000000000000000000000000000000000001",
+                limit=1001,
+            )
+
+        adapter.runtime.request_json = lambda *args, **kwargs: {"errors": [{"message": "query rejected"}]}  # type: ignore[method-assign]
+        with self.assertRaises(MarketHTTPError):
+            adapter.account_recovery(
+                "bet_history",
+                wallet="0x0000000000000000000000000000000000000001",
+            )
 
     def test_list_events_uses_games_by_filters_and_search_games(self) -> None:
         adapter = self.make_adapter()

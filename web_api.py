@@ -3709,6 +3709,12 @@ def market_account_payload(
                 "cursor": raw_cursor or None,
                 "limit": _clamp_int(_query_value(query_params, "limit", "10"), 10, 1, 500),
             }
+    elif normalized_market_id == "azuro":
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+            "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 1_000_000),
+        }
     elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": _query_value(query_params, "status") or "",

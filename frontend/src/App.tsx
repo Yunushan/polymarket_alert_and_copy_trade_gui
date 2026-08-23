@@ -166,6 +166,7 @@ interface MarketReadForm {
   account_order_id: string;
   account_trade_id: string;
   account_cursor: string;
+  account_offset: string;
   account_wallet: string;
   account_event_types: string;
   account_is_resolved: string;
@@ -430,6 +431,7 @@ function emptyMarketReadForm(): MarketReadForm {
     account_order_id: "",
     account_trade_id: "",
     account_cursor: "",
+    account_offset: "",
     account_wallet: "",
     account_event_types: "",
     account_is_resolved: "",
@@ -971,6 +973,7 @@ export default function App() {
             token_ids: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
             trade_id: form.account_trade_id.trim() || undefined,
             cursor: form.account_cursor.trim() || undefined,
+            offset: form.account_offset.trim() || undefined,
             dex: form.account_dex.trim() || undefined,
             market_id: form.account_market_id.trim() || undefined,
             chain_id: form.account_chain_id.trim() || undefined,
@@ -2738,6 +2741,14 @@ function MarketsView({
                 value={marketReadForm.account_cursor}
                 onChange={(event) => onMarketReadFormChange({ account_cursor: event.target.value })}
                 placeholder="Next page cursor"
+              />
+            </label>
+            <label>
+              <span>Account offset</span>
+              <input
+                value={marketReadForm.account_offset}
+                onChange={(event) => onMarketReadFormChange({ account_offset: event.target.value })}
+                placeholder="Optional numeric offset"
               />
             </label>
             <label>

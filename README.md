@@ -567,7 +567,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Omen (`omen`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Subgraph endpoint required | Jurisdiction varies |
 | Zeitgeist (`zeitgeist`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Zeitgeist SDK / Markets (`zeitgeist_sdk_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
-| Azuro (`azuro`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live signed orders only | Jurisdiction varies |
+| Azuro (`azuro`) | Implemented | Yes (bettor bet history) | Yes | Yes | Guarded, off by default | No | Required | Live signed orders only | Jurisdiction varies |
 | SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes (public trades) | Guarded, off by default | No | Required | Live/WebSocket only | Jurisdiction varies |
 | Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded place/cancel/batch/market-cancel, off by default | No | Required | Account/API token required | Jurisdiction varies |
 | Predict.fun (`predict_fun`) | Implemented | Yes (public matches/timeseries) | Yes (account/orders/activity/positions) | Yes | Guarded place/relay-remove, off by default | No | Required | API key; JWT for private reads/removal | Jurisdiction varies |

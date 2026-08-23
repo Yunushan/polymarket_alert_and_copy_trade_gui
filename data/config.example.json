@@ -34,6 +34,7 @@
         "adapter_status": "implemented",
         "azuro_api_base_url": "https://api.onchainfeed.org/api/v1/public",
         "azuro_ws_url": "wss://streams.onchainfeed.org/v1/streams/feed",
+        "azuro_graph_api_url": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-polygon-v3",
         "azuro_environment": "PolygonUSDT",
         "azuro_chain_id": 137,
         "credential_env_vars": [
@@ -45,7 +46,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Read-only games, conditions, odds, WebSocket subscriptions, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting only accepts pre-signed wallet order payloads and stays disabled by default."
+        "notes": "Read-only games, conditions, odds, bettor bet history, WebSocket subscriptions, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting only accepts pre-signed wallet order payloads and stays disabled by default."
       }
     },
     "betfair_exchange": {

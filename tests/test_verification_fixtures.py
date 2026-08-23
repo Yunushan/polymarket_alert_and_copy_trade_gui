@@ -181,6 +181,7 @@ class VerificationFixtureTests(unittest.TestCase):
         game = json.loads((FIXTURE_ROOT / "azuro" / "games_by_ids.json").read_text(encoding="utf-8"))
         conditions = json.loads((FIXTURE_ROOT / "azuro" / "conditions_by_game_ids.json").read_text(encoding="utf-8"))
         order = json.loads((FIXTURE_ROOT / "azuro" / "order_response.json").read_text(encoding="utf-8"))
+        bet_history = json.loads((FIXTURE_ROOT / "azuro" / "bet_history.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(games.get("games"), list)
         self.assertIn("gameId", games["games"][0])
@@ -189,6 +190,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("outcomes", conditions["conditions"][0])
         self.assertIn("currentOdds", conditions["conditions"][0]["outcomes"][0])
         self.assertIn("state", order)
+        self.assertIsInstance(bet_history.get("data", {}).get("v3Bets"), list)
+        self.assertIsInstance(bet_history.get("data", {}).get("liveBets"), list)
+        self.assertIn("createdTxHash", bet_history["data"]["v3Bets"][0])
+        self.assertIn("isRedeemable", bet_history["data"]["liveBets"][0])
 
     def test_legacy_web3_fixtures_cover_core_payload_shapes(self) -> None:
         augur_markets = json.loads((FIXTURE_ROOT / "augur" / "markets.json").read_text(encoding="utf-8"))

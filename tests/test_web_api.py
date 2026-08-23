@@ -865,6 +865,54 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(batch["data"], {"status": "accepted"})
         self.assertEqual(order_calls[-1][1]["orders"], [{"order_id": "order-1", "external_id": "external-1"}])
 
+    def test_azuro_bet_history_account_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="azuro",
+            display_name="Azuro",
+            capabilities=MarketCapabilities(),
+        )
+        adapter.account_recovery_operations = ("bet_history",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["azuro"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "azuro",
+            "bet_history",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "limit": ["25"],
+                "offset": ["4"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "bet_history")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "bet_history",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 25,
+                        "offset": 4,
+                    },
+                )
+            ],
+        )
+
     def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

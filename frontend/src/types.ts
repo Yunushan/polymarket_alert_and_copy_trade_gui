@@ -197,6 +197,7 @@ export type MarketAccountOperation =
   | "subaccounts"
   | "spot_balances"
   | "positions_by_address"
+  | "bet_history"
   | "transactions";
 
 export interface MarketAccountPayload {

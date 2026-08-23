@@ -1386,6 +1386,7 @@ PREDICT_FUN_ACCOUNT_OPERATIONS = (
 IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
 MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
 PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
+AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1403,6 +1404,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + IBKR_ACCOUNT_OPERATIONS
         + MANIFOLD_ACCOUNT_OPERATIONS
         + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
+        + AZURO_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1655,6 +1657,12 @@ def run_market_account(args: argparse.Namespace) -> int:
                 "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
                 "limit": _cli_clamp_int(getattr(args, "limit", None), 10, 1, 500),
             }
+    elif market_id == "azuro":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
+            "offset": _cli_clamp_int(getattr(args, "offset", "0"), 0, 0, 1_000_000),
+        }
     elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": str(getattr(args, "status", "") or "").strip(),

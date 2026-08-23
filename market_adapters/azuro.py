@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
     MarketContract,
     MarketEvent,
@@ -20,6 +21,97 @@ DEFAULT_AZURO_WS_URL = "wss://streams.onchainfeed.org/v1/streams/feed"
 DEFAULT_AZURO_ENVIRONMENT = "PolygonUSDT"
 DEFAULT_AZURO_CHAIN_ID = 137
 AZURO_ODDS_SCALE = 10**12
+AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
+AZURO_BET_HISTORY_PAGE_MAX = 1000
+AZURO_BETTOR_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+AZURO_GRAPH_ENDPOINTS = {
+    "PolygonUSDT": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-polygon-v3",
+    "PolygonAmoyUSDT": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-polygon-amoy-dev-v3",
+    "GnosisXDAI": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-gnosis-v3",
+    "GnosisDevXDAI": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-gnosis-dev-v3",
+    "BaseWETH": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-base-v3",
+    "BaseSepoliaWETH": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-base-sepolia-dev-v3",
+    "ChilizWCHZ": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-chiliz-v3",
+    "ChilizSpicyWCHZ": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-chiliz-spicy-dev-v3",
+}
+AZURO_BET_HISTORY_QUERY = """
+query UserBetHistory($bettor: String!, $first: Int!, $skip: Int!) {
+  v3Bets(
+    first: $first
+    skip: $skip
+    where: { bettor: $bettor }
+    orderBy: createdBlockTimestamp
+    orderDirection: desc
+    subgraphError: allow
+  ) {
+    id
+    betId
+    type
+    amount
+    odds
+    potentialPayout
+    payout
+    status
+    result
+    createdBlockTimestamp
+    createdTxHash
+    selections {
+      odds
+      result
+      conditionKind
+      outcome {
+        outcomeId
+        condition {
+          conditionId
+        }
+      }
+    }
+    _gamesIds
+  }
+  liveBets(
+    first: $first
+    skip: $skip
+    where: { actor_starts_with_nocase: $bettor }
+    orderBy: createdAt
+    orderDirection: desc
+    subgraphError: allow
+  ) {
+    id
+    betId
+    status
+    amount
+    odds
+    createdAt
+    potentialPayout
+    payout
+    result
+    selections {
+      odds
+      result
+      outcome {
+        id
+        outcomeId
+        condition {
+          id
+          conditionId
+          status
+          gameId
+        }
+      }
+    }
+    isRedeemed
+    isRedeemable
+    txHash
+    core {
+      address
+      liquidityPool {
+        address
+        tokenSymbol
+      }
+    }
+  }
+}
+"""
 AZURO_REFERENCES = (
     "https://gem.azuro.org/hub/apps/APIs",
     "https://gem.azuro.org/hub/apps/APIs/backend",
@@ -28,6 +120,9 @@ AZURO_REFERENCES = (
     "https://gem.azuro.org/hub/apps/toolkit/feed/getGamesByFilters",
     "https://gem.azuro.org/hub/apps/toolkit/feed/getConditionsByGameIds",
     "https://gem.azuro.org/hub/apps/sdk/overview",
+    "https://gem.azuro.org/hub/apps/APIs/graph",
+    "https://gem.azuro.org/hub/apps/APIs/backend/betting",
+    "https://gem.azuro.org/hub/apps/guides/advanced/live/get-bets-history",
 )
 
 
@@ -36,6 +131,7 @@ class AzuroAdapter(MarketAdapter):
 
     live_order_sides = ("BUY",)
     metadata = get_market_metadata("azuro")
+    account_recovery_operations = AZURO_ACCOUNT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -56,6 +152,9 @@ class AzuroAdapter(MarketAdapter):
                 "environment": self.environment,
                 "references": list(AZURO_REFERENCES),
                 "orderbook_supported": False,
+                "graph_api_url": self.graph_api_url,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": ["POST Azuro client subgraph GraphQL v3Bets/liveBets"],
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
             }
@@ -79,6 +178,82 @@ class AzuroAdapter(MarketAdapter):
     @property
     def chain_id(self) -> int:
         return int(self.config.get("azuro_chain_id") or self.config.get("chain_id") or DEFAULT_AZURO_CHAIN_ID)
+
+    @property
+    def graph_api_url(self) -> str:
+        configured = self.config.get("azuro_graph_api_url") or self.config.get("graph_api_url")
+        if configured not in (None, ""):
+            value = str(configured).strip().rstrip("/")
+            if not re.fullmatch(r"https?://[^\s]+", value):
+                raise MarketConfigurationError("Azuro graph_api_url must be an absolute HTTP(S) URL.")
+            return value
+        return AZURO_GRAPH_ENDPOINTS.get(self.environment, AZURO_GRAPH_ENDPOINTS["PolygonUSDT"])
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read the documented Azuro V3 bettor and live-bet history feeds."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "Azuro account operation must be one of: " + ", ".join(self.account_recovery_operations) + "."
+            )
+        wallet = str(kwargs.get("wallet") or kwargs.get("bettor") or "").strip()
+        if not wallet:
+            credential = self.resolve_credential(
+                "azuro_bettor_address",
+                ("AZURO_BETTOR_ADDRESS",),
+                required=True,
+                label="AZURO_BETTOR_ADDRESS",
+            )
+            wallet = credential.value
+        if not AZURO_BETTOR_ADDRESS_RE.fullmatch(wallet):
+            raise MarketConfigurationError("Azuro bettor wallet must be a canonical 0x-prefixed 40-hex address.")
+        limit = self._bounded_bet_history_int(kwargs.get("limit", 100), "limit", default=100)
+        offset = self._bounded_bet_history_int(kwargs.get("offset", kwargs.get("skip", 0)), "offset", default=0)
+        payload = self.runtime.request_json(
+            "POST",
+            self.graph_api_url,
+            json_body={
+                "query": AZURO_BET_HISTORY_QUERY,
+                "variables": {"bettor": wallet, "first": limit, "skip": offset},
+            },
+            headers={"Content-Type": "application/json"},
+        )
+        if not isinstance(payload, Mapping):
+            raise MarketHTTPError("azuro GraphQL response was not an object.")
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            message = "; ".join(str(item.get("message") or item) for item in errors[:3] if isinstance(item, Mapping))
+            raise MarketHTTPError(f"azuro GraphQL query failed: {message or 'unknown error'}")
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise MarketHTTPError("azuro GraphQL response did not contain a data object.")
+        return {
+            "source": "azuro_client_subgraph",
+            "graph_api_url": self.graph_api_url,
+            "bettor": wallet,
+            "limit": limit,
+            "offset": offset,
+            "v3_bets": data.get("v3Bets") if isinstance(data.get("v3Bets"), list) else [],
+            "live_bets": data.get("liveBets") if isinstance(data.get("liveBets"), list) else [],
+            "data": dict(data),
+        }
+
+    @staticmethod
+    def _bounded_bet_history_int(value: Any, label: str, *, default: int) -> int:
+        if value in (None, ""):
+            return default
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Azuro bet history {label} must be an integer.") from exc
+        maximum = AZURO_BET_HISTORY_PAGE_MAX if label == "limit" else 1_000_000
+        minimum = 1 if label == "limit" else 0
+        if parsed < minimum or parsed > maximum:
+            raise MarketConfigurationError(
+                f"Azuro bet history {label} must be between {minimum} and {maximum}."
+            )
+        return parsed
 
     def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
         self.ensure_capability("event_listing")
