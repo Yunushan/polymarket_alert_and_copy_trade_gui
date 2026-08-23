@@ -458,6 +458,7 @@ class VerificationFixtureTests(unittest.TestCase):
     def test_dflow_fixtures_cover_nested_market_and_orderbook_shapes(self) -> None:
         events = json.loads((FIXTURE_ROOT / "dflow" / "events.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "dflow" / "orderbook.json").read_text(encoding="utf-8"))
+        trades = json.loads((FIXTURE_ROOT / "dflow" / "trades.json").read_text(encoding="utf-8"))
         rpc = json.loads((FIXTURE_ROOT / "dflow" / "rpc_response.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(events.get("events"), list)
@@ -466,6 +467,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("yesMint", next(iter(market["accounts"].values())))
         self.assertIsInstance(orderbook.get("yes_bids"), dict)
         self.assertIsInstance(orderbook.get("no_bids"), dict)
+        self.assertIsInstance(trades.get("trades"), list)
+        self.assertIn("tradeId", trades["trades"][0])
+        self.assertIn("yesPrice", trades["trades"][0])
         self.assertEqual(rpc.get("result"), "signature-123")
 
     def test_context_v2_fixtures_cover_market_prices_orderbook_and_order_shapes(self) -> None:

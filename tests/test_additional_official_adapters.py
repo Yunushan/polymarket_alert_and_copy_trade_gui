@@ -1389,6 +1389,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter = DFlowAdapter()
         events = load_fixture("dflow", "events")
         orderbook = load_fixture("dflow", "orderbook")
+        trades = load_fixture("dflow", "trades")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/api/v1/events"):
@@ -1416,6 +1417,29 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(price.midpoint or 0.0, 0.435)
         self.assertTrue(paper.accepted)
         self.assertEqual(paper.raw["trade_request"]["outputMint"], "mint-yes")
+
+        history_adapter = DFlowAdapter({"dflow_api_key": "dflow-key"})
+        history_adapter._market_cache = adapter._market_cache
+
+        def fake_history_get_json(url: str, *, params=None, headers=None):
+            self.assertTrue(url.endswith("/api/v1/trades/by-mint/mint-yes"))
+            self.assertEqual(params, {"limit": 2, "minTs": 1760000000, "maxTs": 1760010000})
+            self.assertEqual(headers, {"x-api-key": "dflow-key"})
+            return trades
+
+        history_adapter.runtime.get_json = fake_history_get_json  # type: ignore[method-assign]
+        history = history_adapter.list_trades(
+            order.contract_id,
+            limit=2,
+            after=1760000000,
+            before=1760010000,
+        )
+        self.assertEqual([trade.trade_id for trade in history], ["dflow-trade-1", "dflow-trade-2"])
+        self.assertEqual(history[0].contract_id, order.contract_id)
+        self.assertEqual(history[0].side, "YES")
+        self.assertAlmostEqual(history[0].price, 0.42)
+        self.assertAlmostEqual(history[0].size, 5.0)
+        self.assertEqual(history[0].timestamp, 1760004000.0)
 
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)

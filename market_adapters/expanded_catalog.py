@@ -236,6 +236,7 @@ DFLOW_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -443,7 +444,7 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://pond.dflow.net/introduction",
         description=(
             "Official DFlow Metadata/Trade API adapter for event and market discovery, outcome prices, "
-            "orderbooks, paper orders, and guarded wallet-signed Solana transaction submission."
+            "orderbooks, public trade history, paper orders, and guarded wallet-signed Solana transaction submission."
         ),
         capabilities=DFLOW_CAPABILITIES,
     ),

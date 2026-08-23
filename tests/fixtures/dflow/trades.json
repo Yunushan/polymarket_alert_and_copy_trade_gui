@@ -1,0 +1,29 @@
+{
+  "trades": [
+    {
+      "tradeId": "dflow-trade-1",
+      "ticker": "KXBTC-26DEC31-100K",
+      "count": 5,
+      "countFp": "5.000000",
+      "createdTime": 1760004000,
+      "noPrice": 0.58,
+      "noPriceDollars": "0.58",
+      "price": 0.42,
+      "takerSide": "yes",
+      "yesPrice": 0.42,
+      "yesPriceDollars": "0.42"
+    },
+    {
+      "tradeId": "dflow-trade-2",
+      "ticker": "KXBTC-26DEC31-100K",
+      "count": 3,
+      "countFp": "3.000000",
+      "createdTime": 1760007600,
+      "noPrice": 0.57,
+      "price": 0.43,
+      "takerSide": "yes",
+      "yesPrice": 0.43
+    }
+  ],
+  "cursor": null
+}

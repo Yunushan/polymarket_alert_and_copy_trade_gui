@@ -584,7 +584,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Kalshi via Robinhood (`kalshi_via_robinhood`) | Implemented | Yes | Yes (including trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
 | FanDuel Predicts (`fanduel_predicts`) | Implemented | Yes | Yes | Yes | No | No | Required | Account required for trading | Region/KYC limited |
 | Seer (`seer`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
-| DFlow (`dflow`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Wallet required for trading | Region limited |
+| DFlow (`dflow`) | Implemented | Yes | Yes (public trades) | Yes | Guarded, off by default | No | Required | Wallet required for trading | Region limited |
 | Space (`space`) | Implemented | Yes | Yes (including public trades/candles) | Yes | No | No | Required | No API key; wallet/settlement required only for future live chain flow | Jurisdiction varies |
 | Xmarket (`xmarket`) | Implemented | Yes (positions/orders) | Yes | Yes | Guarded, off by default (single and batch create; batch cancel) | No | Required | API credentials required | Jurisdiction varies |
 | Trueo (`trueo`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |

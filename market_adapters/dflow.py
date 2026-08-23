@@ -16,6 +16,7 @@ from .types import (
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 
 
@@ -26,6 +27,7 @@ DFLOW_REFERENCES = (
     "https://pond.dflow.net/introduction",
     "https://dflow.mintlify.app/build/metadata-api/markets/market-by-mint",
     "https://dflow.mintlify.app/build/metadata-api/orderbook/orderbook-by-mint",
+    "https://dflow.mintlify.app/build/metadata-api/trades/trades-by-mint",
     "https://dflow.mintlify.app/build/recipes/prediction-markets/decrease-position",
 )
 
@@ -196,6 +198,59 @@ class DFlowAdapter(MarketAdapter):
             source="dflow_metadata",
             raw=dict(book.raw),
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return public DFlow trades for an outcome mint.
+
+        DFlow's Metadata API exposes the trade feed by ledger/outcome mint.
+        The feed requires an API key and uses Unix-second ``minTs``/``maxTs``
+        filters; the normalized adapter surface intentionally does not expose
+        DFlow's cursor, so callers receive the bounded page returned here.
+        """
+
+        self.ensure_capability("trade_history")
+        self.resolve_credential("dflow_api_key", ("DFLOW_API_KEY",), required=True, label="DFLOW_API_KEY")
+        market, mint, outcome, canonical = self._resolve_contract(contract_id)
+        params: Dict[str, Any] = {"limit": self._history_limit(limit)}
+        if after is not None:
+            params["minTs"] = self._history_timestamp(after, "after")
+        if before is not None:
+            params["maxTs"] = self._history_timestamp(before, "before")
+
+        payload = self._metadata_get(f"/api/v1/trades/by-mint/{quote(mint, safe='')}", params=params)
+        ticker = self._market_id(market).upper()
+        trades: List[MarketTrade] = []
+        for raw in self._rows(payload, "trades", "data"):
+            row_ticker = str(raw.get("ticker") or "").strip().upper()
+            if row_ticker and row_ticker != ticker:
+                continue
+            price = self._trade_price(raw, outcome)
+            size = self._positive_number(raw.get("countFp") or raw.get("count") or raw.get("quantity"))
+            trade_id = str(raw.get("tradeId") or raw.get("trade_id") or raw.get("id") or "").strip()
+            if price is None or size is None or not trade_id:
+                continue
+            taker_side = str(raw.get("takerSide") or raw.get("taker_side") or "").strip().upper()
+            side = taker_side if taker_side in {"BUY", "SELL", "YES", "NO"} else outcome
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=self._timestamp_seconds(raw.get("createdTime") or raw.get("created_time") or raw.get("timestamp")),
+                    raw=dict(raw),
+                )
+            )
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -486,6 +541,58 @@ class DFlowAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return None
         return parsed if math.isfinite(parsed) and 0 <= parsed <= 1 else None
+
+    @staticmethod
+    def _history_limit(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("DFlow history limit must be an integer between 1 and 1000.") from exc
+        if parsed < 1 or parsed > 1000:
+            raise MarketConfigurationError("DFlow history limit must be between 1 and 1000.")
+        return parsed
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> int:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"DFlow {label} timestamp must be numeric.") from exc
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MarketConfigurationError(f"DFlow {label} timestamp must be a finite non-negative number.")
+        return int(parsed)
+
+    @classmethod
+    def _trade_price(cls, raw: Mapping[str, Any], outcome: str) -> Optional[float]:
+        keys = (("yesPrice", "yesPriceDollars") if outcome == "YES" else ("noPrice", "noPriceDollars")) + (
+            "price",
+            "priceDollars",
+        )
+        for key in keys:
+            price = cls._safe_probability(raw.get(key))
+            if price is not None:
+                return price
+        return None
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed) or parsed < 0:
+            return None
+        return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
 
     @staticmethod
     def _url(base: str, path: str) -> str:
