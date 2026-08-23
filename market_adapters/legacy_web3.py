@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .identity import require_activity_identity
 from .types import (
     MarketCandle,
     MarketContract,
@@ -700,6 +701,43 @@ class OmenAdapter(_GraphQLAdapter):
         outcomeIndex
         outcomeTokensTraded
         transactionHash
+        creator { id }
+      }
+    }
+    """
+
+    FPMM_ACTIVITY_QUERY = """
+    query OmenActivity(
+      $first: Int!
+      $creator: String!
+      $after: BigInt!
+      $before: BigInt!
+    ) {
+      fpmmTrades(
+        first: $first
+        orderBy: creationTimestamp
+        orderDirection: desc
+        where: {
+          creator: $creator
+          creationTimestamp_gte: $after
+          creationTimestamp_lte: $before
+        }
+      ) {
+        id
+        fpmm { id }
+        title
+        collateralToken
+        outcomeTokenMarginalPrice
+        oldOutcomeTokenMarginalPrice
+        type
+        creationTimestamp
+        collateralAmount
+        collateralAmountUSD
+        feeAmount
+        outcomeIndex
+        outcomeTokensTraded
+        transactionHash
+        creator { id }
       }
     }
     """
@@ -722,6 +760,9 @@ class OmenAdapter(_GraphQLAdapter):
                 "graphql_url_source": source,
                 "references": list(OMEN_REFERENCES),
                 "orderbook_supported": False,
+                "copy_trading_supported": bool(self.capabilities.copy_trading),
+                "copy_trading_source": "omen_fpmm_creator_trades",
+                "copy_trading_coverage": "bounded wallet-filtered public creator rows; simulation-first only",
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "signed_transaction_submission_enabled": self.config_bool(
@@ -854,6 +895,103 @@ class OmenAdapter(_GraphQLAdapter):
 
         trades.sort(key=lambda trade: float(trade.timestamp or 0), reverse=True)
         return trades[:desired]
+
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return bounded public FPMM trades created by an EVM wallet.
+
+        The official Omen subgraph exposes ``FPMMTrade.creator`` as an
+        ``Account`` relation.  The query is wallet-filtered server-side,
+        bounded to a finite timestamp range, and re-checked locally before a
+        row becomes eligible for a copy preview.  This is intentionally a
+        public activity preview, not a claim of complete account history.
+        """
+
+        self.ensure_capability("copy_trading")
+        identity = require_activity_identity(self.market_id, wallet_address)
+        desired = self._activity_limit(limit)
+        data = self._graphql(
+            self.FPMM_ACTIVITY_QUERY,
+            {
+                "first": desired,
+                "creator": identity,
+                "after": "0",
+                "before": "253402300799",
+            },
+        )
+        rows = data.get("fpmmTrades")
+        if not isinstance(rows, list):
+            return []
+
+        activities: List[Dict[str, Any]] = []
+        token_scales: Dict[str, int] = {}
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            creator = row.get("creator")
+            if isinstance(creator, Mapping):
+                creator = creator.get("id")
+            try:
+                row_identity = require_activity_identity(self.market_id, creator)
+            except MarketConfigurationError:
+                continue
+            if row_identity != identity:
+                continue
+            trade_id = str(row.get("id") or "").strip()
+            if not trade_id or trade_id in seen:
+                continue
+            fpmm = row.get("fpmm")
+            if isinstance(fpmm, Mapping):
+                fpmm = fpmm.get("id")
+            fpmm_id = str(fpmm or "").strip()
+            if not fpmm_id:
+                continue
+            try:
+                outcome_index = int(row.get("outcomeIndex"))
+            except (TypeError, ValueError):
+                continue
+            if outcome_index < 0:
+                continue
+            side = str(row.get("type") or "").strip().upper()
+            if side not in self.live_order_sides:
+                continue
+            timestamp = self._optional_history_timestamp(row.get("creationTimestamp"))
+            collateral_token = self._collateral_token(row.get("collateralToken"))
+            if timestamp is None or collateral_token is None:
+                continue
+            scale = token_scales.get(collateral_token)
+            if scale is None:
+                scale = self._token_scale(collateral_token)
+                token_scales[collateral_token] = scale
+            price, size = self._trade_price_and_size(row, token_scale=scale)
+            if price is None or size is None:
+                continue
+            contract_id = self._contract_id(fpmm_id, outcome_index)
+            seen.add(trade_id)
+            activities.append(
+                {
+                    "activityId": f"{self.market_id}:{trade_id}",
+                    "proxyWallet": identity,
+                    "asset": contract_id,
+                    "contract_id": contract_id,
+                    "market_id": self.market_id,
+                    "side": side,
+                    "size": size,
+                    "price": price,
+                    "timestamp": int(timestamp),
+                    "transactionHash": str(row.get("transactionHash") or "").strip(),
+                    "source": "omen_fpmm_creator_trades",
+                    "creator": identity,
+                    "trade_id": trade_id,
+                    "raw": dict(row),
+                }
+            )
+
+        activities.sort(
+            key=lambda row: (int(row.get("timestamp") or 0), str(row.get("activityId") or "")),
+            reverse=True,
+        )
+        return activities[:desired]
 
     def list_candles(
         self,
@@ -1039,10 +1177,46 @@ class OmenAdapter(_GraphQLAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]):
-        raise UnsupportedFeatureError(
+        self.ensure_capability("copy_trading")
+        identity = require_activity_identity(
             self.market_id,
-            "copy_trading",
-            "Omen copy trading is unsupported because this adapter has no official account activity mirroring API.",
+            activity.get("proxyWallet") or activity.get("proxy_wallet") or activity.get("wallet"),
+        )
+        raw = activity.get("raw") if isinstance(activity.get("raw"), Mapping) else {}
+        creator = activity.get("creator") or raw.get("creator")
+        if isinstance(creator, Mapping):
+            creator = creator.get("id")
+        if not creator:
+            raise MarketConfigurationError("Omen activity must include its creator identity.")
+        creator_identity = require_activity_identity(self.market_id, creator)
+        if creator_identity != identity:
+            raise MarketConfigurationError("Omen activity creator does not match proxyWallet.")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Omen activity has no contract id.")
+        fpmm_id, outcome_index = self._split_contract_id(contract_id)
+        canonical = self._contract_id(fpmm_id, outcome_index)
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in self.live_order_sides:
+            raise MarketConfigurationError("Omen activity side must be BUY or SELL.")
+        size = self._strict_positive_number(activity.get("size"), "activity size")
+        price = self._probability(activity.get("price"), allow_zero=False)
+        activity_market = str(activity.get("market_id") or activity.get("marketId") or "").strip()
+        if activity_market and activity_market != self.market_id:
+            raise MarketConfigurationError("Omen activity market id does not match the selected adapter.")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=canonical,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={
+                    "activity": dict(activity),
+                    "source": "omen_public_creator_trades",
+                    "activity_identity": identity,
+                },
+            )
         )
 
     def _fetch_fpmm(self, fpmm_id: str) -> Mapping[str, Any]:
@@ -1222,6 +1396,30 @@ class OmenAdapter(_GraphQLAdapter):
             raise MarketConfigurationError("Omen trade limit must be an integer between 1 and 1000.") from exc
         if parsed < 1 or parsed > 1000:
             raise MarketConfigurationError("Omen trade limit must be between 1 and 1000.")
+        return parsed
+
+    @staticmethod
+    def _activity_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Omen activity limit must be an integer.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketConfigurationError("Omen activity limit must be an integer.") from exc
+        if parsed < 1 or parsed > 100:
+            raise MarketConfigurationError("Omen activity limit must be between 1 and 100.")
+        return parsed
+
+    @staticmethod
+    def _strict_positive_number(value: Any, label: str) -> float:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Omen {label} must be positive and finite.")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketConfigurationError(f"Omen {label} must be positive and finite.") from exc
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise MarketConfigurationError(f"Omen {label} must be positive and finite.")
         return parsed
 
     @staticmethod

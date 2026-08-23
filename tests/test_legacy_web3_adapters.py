@@ -65,9 +65,14 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
             self.assertEqual(url, "https://example.test/omen")
             query = json_body["query"]
             if "fpmmTrades" in query:
-                self.assertNotIn("creator", query)
-                self.assertEqual(json_body["variables"]["fpmm"], OMEN_FPMM_ID)
-                self.assertEqual(json_body["variables"]["outcomeIndex"], "0")
+                if "OmenActivity" in query:
+                    self.assertEqual(json_body["variables"]["creator"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                    self.assertEqual(json_body["variables"]["after"], "0")
+                    self.assertEqual(json_body["variables"]["before"], "253402300799")
+                else:
+                    self.assertIn("creator", query)
+                    self.assertEqual(json_body["variables"]["fpmm"], OMEN_FPMM_ID)
+                    self.assertEqual(json_body["variables"]["outcomeIndex"], "0")
                 return trades
             if "token(id" in query:
                 self.assertEqual(
@@ -116,9 +121,14 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
             self.assertEqual(url, "https://example.test/gnosis")
             query = json_body["query"]
             if "fpmmTrades" in query:
-                self.assertNotIn("creator", query)
-                self.assertEqual(json_body["variables"]["fpmm"], OMEN_FPMM_ID)
-                self.assertEqual(json_body["variables"]["outcomeIndex"], "0")
+                if "OmenActivity" in query:
+                    self.assertEqual(json_body["variables"]["creator"], "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                    self.assertEqual(json_body["variables"]["after"], "0")
+                    self.assertEqual(json_body["variables"]["before"], "253402300799")
+                else:
+                    self.assertIn("creator", query)
+                    self.assertEqual(json_body["variables"]["fpmm"], OMEN_FPMM_ID)
+                    self.assertEqual(json_body["variables"]["outcomeIndex"], "0")
                 return trades
             if "token(id" in query:
                 self.assertEqual(
@@ -311,6 +321,31 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         self.assertTrue(candles[0].raw["derived"])
         self.assertEqual(candles[0].raw["trade_ids"], ["0xomentrade1", "0xomentrade2"])
 
+    def test_omen_creator_activity_is_bounded_and_copy_is_simulation_first(self) -> None:
+        adapter = self.make_omen()
+
+        activities = adapter.list_activity(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            limit=10,
+        )
+
+        self.assertEqual([row["trade_id"] for row in activities], ["0xomentrade2", "0xomentrade1"])
+        self.assertTrue(all(row["proxyWallet"] == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" for row in activities))
+        self.assertTrue(all(row["creator"] == row["proxyWallet"] for row in activities))
+        self.assertTrue(all(row["source"] == "omen_fpmm_creator_trades" for row in activities))
+
+        preview = adapter.copy_trade_from_activity(activities[0])
+        self.assertTrue(preview.accepted)
+        self.assertEqual(preview.contract_id, f"{OMEN_FPMM_ID}:0")
+        self.assertAlmostEqual(preview.average_price or 0.0, 3.8 / 6.0)
+
+        mismatched = dict(activities[0])
+        mismatched["proxyWallet"] = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        with self.assertRaisesRegex(MarketConfigurationError, "does not match"):
+            adapter.copy_trade_from_activity(mismatched)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", limit=0)
+
     def test_omen_history_validation_fails_closed(self) -> None:
         adapter = self.make_omen()
 
@@ -448,6 +483,11 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         price = adapter.get_price(f"{OMEN_FPMM_ID}:0")
         trades = adapter.list_trades(f"{OMEN_FPMM_ID}:0", limit=2)
         candles = adapter.list_candles(f"{OMEN_FPMM_ID}:0", resolution="1h")
+        activities = adapter.list_activity(
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            limit=1,
+        )
+        activity_preview = adapter.copy_trade_from_activity(activities[0])
         paper = adapter.place_paper_order(
             PaperOrderRequest(
                 market_id="gnosis_prediction_markets",
@@ -468,6 +508,9 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         self.assertEqual(len(candles), 1)
         self.assertEqual(candles[0].market_id, "gnosis_prediction_markets")
         self.assertTrue(paper.accepted)
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["market_id"], "gnosis_prediction_markets")
+        self.assertTrue(activity_preview.accepted)
 
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(f"{OMEN_FPMM_ID}:0")

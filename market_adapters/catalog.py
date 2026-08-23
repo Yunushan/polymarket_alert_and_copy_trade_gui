@@ -260,7 +260,9 @@ OMEN_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Public FPMMTrade.creator rows support bounded, simulation-first wallet
+    # activity previews; no live copy submission is performed.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -877,7 +879,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="omen",
         display_name="Omen",
         homepage_url="https://omen.eth.limo",
-        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, public FPMM trades, bounded derived candles, alerts, paper orders, and guarded externally signed live transactions.",
+        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, public FPMM trades, bounded derived candles, creator-scoped simulation-first copy previews, alerts, paper orders, and guarded externally signed live transactions.",
         capabilities=OMEN_CAPABILITIES,
     ),
     MarketMetadata(

@@ -15,7 +15,8 @@
         "feeAmount": "7600000000000000",
         "outcomeIndex": "0",
         "outcomeTokensTraded": "6000000000000000000",
-        "transactionHash": "0x2222222222222222222222222222222222222222222222222222222222222222"
+        "transactionHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "creator": {"id": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
       },
       {
         "id": "0xgnosistrade1",
@@ -31,7 +32,8 @@
         "feeAmount": "4800000000000000",
         "outcomeIndex": "0",
         "outcomeTokensTraded": "4000000000000000000",
-        "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "creator": {"id": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
       }
     ]
   }

@@ -142,7 +142,9 @@ GNOSIS_PREDICTION_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Alias uses the same public FPMMTrade.creator feed as Omen; copy remains
+    # bounded and simulation-first.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -513,8 +515,9 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://omen.eth.limo",
         description=(
             "Official Gnosis/Omen FixedProductMarketMaker adapter for market discovery, outcome prices, "
-            "public FPMM trades, bounded derived candles, alerts, local paper orders, and guarded externally signed FPMM transactions; CLOB depth, "
-            "collateral approval, settlement, and copy trading remain unsupported."
+            "public FPMM trades, bounded creator-scoped simulation-first copy previews, bounded derived candles, "
+            "alerts, local paper orders, and guarded externally signed FPMM transactions; CLOB depth, collateral "
+            "approval, and settlement remain unsupported."
         ),
         capabilities=GNOSIS_PREDICTION_CAPABILITIES,
     ),
