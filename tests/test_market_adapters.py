@@ -159,7 +159,7 @@ HISTORY_CAPABILITIES = {
     "kalshi": {"trade_history", "candle_history"},
     "robinhood_prediction_markets": {"trade_history", "candle_history"},
     "kalshi_via_robinhood": {"trade_history", "candle_history"},
-    "manifold": {"trade_history"},
+    "manifold": {"trade_history", "candle_history"},
     "metaculus": {"candle_history"},
     "good_judgment_open": {"candle_history"},
     "limitless_exchange": {"trade_history", "candle_history"},

@@ -53,6 +53,7 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.event_listing)
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertFalse(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.candle_history)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
         self.assertTrue(adapter.capabilities.copy_trading)
@@ -160,6 +161,41 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertEqual(len(multi_trades), 1)
         self.assertEqual(multi_trades[0].contract_id, "mf-multi-1:ANSWER:answer-a")
         self.assertAlmostEqual(multi_trades[0].price, 0.6)
+
+    def test_candle_history_derives_bounded_ohlcv_from_public_fills(self) -> None:
+        adapter = ManifoldAdapter()
+        trades_fixture = load_fixture("bets_trades")
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            if url.endswith("/bets"):
+                return trades_fixture
+            raise AssertionError(f"unexpected Manifold URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+
+        candles = adapter.list_candles(
+            "mf-binary-1:YES",
+            resolution="1m",
+            from_timestamp=1760000000,
+            to_timestamp=1760000060,
+        )
+
+        self.assertEqual(len(candles), 1)
+        candle = candles[0]
+        self.assertEqual(candle.timestamp, 1759999980.0)
+        self.assertAlmostEqual(candle.open, 0.6)
+        self.assertAlmostEqual(candle.high, 0.6)
+        self.assertAlmostEqual(candle.low, 0.6)
+        self.assertAlmostEqual(candle.close, 0.6)
+        self.assertAlmostEqual(candle.volume or 0, 10.0)
+        self.assertTrue(candle.raw["derived"])
+        self.assertEqual(candle.raw["source"], "manifold_public_bet_fills")
+        self.assertEqual(candle.raw["trade_ids"], ["trade-bet-1:0", "trade-bet-1:1"])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("mf-binary-1:YES", resolution="2h")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("mf-binary-1:YES", from_timestamp=10, to_timestamp=9)
 
     def test_activity_requires_prefixed_safe_manifold_identity(self) -> None:
         adapter = self.make_adapter()
