@@ -1649,8 +1649,19 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             live_adapter.list_candles("101:202:303", resolution="2h")
 
-        with self.assertRaises(UnsupportedFeatureError):
-            live_adapter.copy_trade_from_activity({"side": "BUY"})
+        copy_preview = live_adapter.copy_trade_from_activity(
+            {
+                **trades[0].raw,
+                "contract_id": trades[0].contract_id,
+                "side": trades[0].side,
+                "price": trades[0].price,
+                "size": trades[0].size,
+                "trade_id": trades[0].trade_id,
+            }
+        )
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, "101:202:303")
+        self.assertEqual(copy_preview.raw["source"], "matchbook_authenticated_matched_bets")
 
     def test_matchbook_order_management_uses_fixed_cancel_and_edit_contracts(self) -> None:
         confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"

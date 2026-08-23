@@ -578,7 +578,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Zeitgeist SDK / Markets (`zeitgeist_sdk_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Azuro (`azuro`) | Implemented | Yes (bettor bet history; single-selection activity) | Yes | Yes | Guarded, off by default | Yes (simulation-first single-bet previews) | Required | Live signed orders only | Jurisdiction varies |
 | SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes (public trades plus bounded derived trade-tape candles and API-key account bets/fills/positions) | Guarded, off by default (v3 order/event/all cancellation) | No | Required | API credentials required | Jurisdiction varies |
-| Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded place/cancel/batch/market-cancel, off by default | No | Required | Account/API token required | Jurisdiction varies |
+| Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded place/cancel/batch/market-cancel, off by default | Yes, simulation-first | Required | Account/API token required | Jurisdiction varies |
 | Predict.fun (`predict_fun`) | Implemented | Yes (public matches/timeseries) | Yes (account/orders/activity/positions) | Yes | Guarded place/relay-remove, off by default | Yes (authenticated account activity, simulation-first) | Required | API key; JWT for private reads/removal | Jurisdiction varies |
 | Smarkets (`smarkets`) | Implemented | Yes | Yes (authenticated orders/account) | Yes | Guarded place/cancel, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes (current/cleared account orders, bounded derived execution candles, funds, account details, statements, currency rates) | Yes | Guarded place/cancel/update/replace, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
@@ -606,7 +606,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | SportsTrade (`sportstrade`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Prophet Exchange (`prophet_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Sporttrade Prediction / Exchange Products (`sporttrade_products`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Matchbook (`matchbook`) | Implemented | Yes | Yes | Yes (matched bets plus bounded derived candles, settled/current bets) | Guarded, off by default; cancel/edit offer mutations are separately opt-in | No | Required | Exchange account/API keys | Region/KYC limited |
+| Matchbook (`matchbook`) | Implemented | Yes | Yes | Yes (matched bets plus bounded derived candles, settled/current bets) | Guarded, off by default; cancel/edit offer mutations are separately opt-in | Yes, simulation-first | Required | Exchange account/API keys | Region/KYC limited |
 | Meta Arena (`meta_arena`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 
 ## Verification

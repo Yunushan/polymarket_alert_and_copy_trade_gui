@@ -189,7 +189,9 @@ LIMITLESS_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated portfolio history exposes complete fills for local,
+    # simulation-first copy previews; previews never submit live orders.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -878,7 +880,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="limitless_exchange",
         display_name="Limitless Exchange",
         homepage_url="https://limitless.exchange",
-        description="Official Limitless REST adapter for market data, orderbooks, dry-run orders, and guarded HMAC live orders.",
+        description=(
+            "Official Limitless REST adapter for market data, orderbooks, authenticated portfolio-history "
+            "copy previews, dry-run orders, and guarded HMAC live orders."
+        ),
         capabilities=LIMITLESS_CAPABILITIES,
     ),
     MarketMetadata(

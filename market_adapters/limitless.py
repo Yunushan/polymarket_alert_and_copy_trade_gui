@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -504,11 +504,80 @@ class LimitlessAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Limitless copy trading is unsupported because this adapter has no official account activity mirroring model.",
+        """Build a local copy preview from Limitless portfolio history.
+
+        The documented HMAC ``GET /portfolio/history`` endpoint returns
+        sub-account fills and supports the same delegated profile boundary as
+        the other portfolio reads.  This method accepts a normalized history
+        row, resolves its market/outcome from the documented token ids when
+        needed, and only creates a local paper preview.
+        """
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        token_id = str(activity.get("token_id") or activity.get("tokenId") or "").strip()
+        market_slug = str(activity.get("market_slug") or activity.get("marketSlug") or "").strip()
+        if contract_id:
+            slug, outcome = self._split_contract_id(contract_id)
+            market_slug = slug
+            outcome = outcome.upper()
+            if outcome not in {"YES", "NO"}:
+                raise MarketConfigurationError("Limitless activity outcome must be YES or NO.")
+            contract_id = self._contract_id(slug, outcome)
+        else:
+            market_slug = self._validated_market_slug(market_slug)
+            outcome_value = str(activity.get("outcome") or activity.get("position") or "").strip().upper()
+            if outcome_value in {"YES", "NO"}:
+                outcome = outcome_value
+            elif token_id:
+                market = self._get_market(market_slug)
+                tokens = market.get("tokens") if isinstance(market, Mapping) else None
+                positions = market.get("positionIds") or market.get("position_ids") if isinstance(market, Mapping) else None
+                yes_token = str(tokens.get("yes") or tokens.get("YES") or "").strip() if isinstance(tokens, Mapping) else ""
+                no_token = str(tokens.get("no") or tokens.get("NO") or "").strip() if isinstance(tokens, Mapping) else ""
+                if not yes_token and isinstance(positions, list) and len(positions) >= 2:
+                    yes_token, no_token = str(positions[0]).strip(), str(positions[1]).strip()
+                if token_id == yes_token:
+                    outcome = "YES"
+                elif token_id == no_token:
+                    outcome = "NO"
+                else:
+                    raise MarketConfigurationError("Limitless activity tokenId does not match the selected market.")
+            else:
+                raise MarketConfigurationError("Limitless activity requires contract_id or marketSlug plus outcome/tokenId.")
+            contract_id = self._contract_id(market_slug, outcome)
+
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Limitless activity side must be BUY or SELL.")
+        try:
+            size = float(activity.get("size") if activity.get("size") not in (None, "") else activity.get("quantity"))
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Limitless activity size must be numeric.") from exc
+        if not self._is_positive_number(size):
+            raise MarketConfigurationError("Limitless activity size must be positive and finite.")
+        price = self._safe_probability(activity.get("price"))
+        if price is None or price <= 0.0 or price >= 1.0:
+            raise MarketConfigurationError("Limitless activity price must be between 0 and 1.")
+        trade_id = str(activity.get("trade_id") or activity.get("tradeId") or activity.get("id") or "").strip()
+        if not trade_id:
+            raise MarketConfigurationError("Limitless activity requires a documented trade id.")
+        metadata = {"activity": dict(activity), "source": "limitless_portfolio_history"}
+        if token_id:
+            metadata["token_id"] = token_id
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata=metadata,
+            )
         )
+        preview.raw["source"] = "limitless_portfolio_history"
+        preview.raw["activity"] = dict(activity)
+        return preview
 
     def websocket_connection_info(
         self,

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from market_adapters import LimitlessAdapter, PaperOrderRequest
-from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "limitless_exchange"
@@ -62,7 +62,7 @@ class LimitlessAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("api.limitless.exchange", health["api_base_url"])
         self.assertIn("ws.limitless.exchange", health["websocket_url"])
         self.assertEqual(health["websocket_namespace"], "/markets")
@@ -424,14 +424,21 @@ class LimitlessAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.list_user_orders("doge/other")
 
-    def test_copy_trading_is_clear_unsupported_feature(self) -> None:
+    def test_portfolio_history_supports_simulation_copy_preview(self) -> None:
         adapter = self.make_adapter()
+        activity = load_fixture("portfolio_history")["history"][0]
 
-        with self.assertRaises(UnsupportedFeatureError) as ctx:
-            adapter.copy_trade_from_activity({})
+        preview = adapter.copy_trade_from_activity(activity)
 
-        self.assertEqual(ctx.exception.feature, "copy_trading")
-        self.assertIn("unsupported", str(ctx.exception))
+        self.assertTrue(preview.accepted)
+        self.assertEqual(preview.contract_id, "doge-above-021652-sep-1-1200-utc:YES")
+        self.assertEqual(preview.raw["source"], "limitless_portfolio_history")
+        self.assertTrue(preview.raw["request"]["dryRun"])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**activity, "price": 0})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**activity, "tokenId": "not-the-market-token"})
 
 
 if __name__ == "__main__":

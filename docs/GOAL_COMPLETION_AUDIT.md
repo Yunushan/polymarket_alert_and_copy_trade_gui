@@ -142,6 +142,15 @@ failure does not erase the historical successful observations above, but it
 does mean the public-live tier must be re-established from the target network
 before a current production claim is made.
 
+### 2026-08-23 Copy Preview Parity Evidence
+
+Matchbook and Limitless now convert complete official account fills/history into
+validated simulation-first copy previews. Matchbook uses authenticated
+`matched-bets/aggregated`; Limitless uses HMAC `GET /portfolio/history` and
+preserves its optional delegated-profile boundary. Both paths require a
+documented trade identity, validate contract/side/price/size fields, retain the
+raw activity in the preview, and never submit live offers/orders.
+
 ## Open External Evidence Gates
 
 These are deliberately not replaced with simulated success:

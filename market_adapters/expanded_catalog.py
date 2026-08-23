@@ -187,7 +187,10 @@ MATCHBOOK_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated matched bets contain the side, odds, stake, and identity
+    # needed for a local copy preview.  The preview path never submits an
+    # offer automatically.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -623,7 +626,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://developers.matchbook.com/",
         description=(
             "Official Matchbook exchange API adapter for event/market discovery, decimal-odds prices, "
-            "orderbooks, matched-bet history, paper orders, and guarded session-authenticated offers."
+            "orderbooks, matched-bet history, simulation-first copy previews, paper orders, and guarded "
+            "session-authenticated offers."
         ),
         capabilities=MATCHBOOK_CAPABILITIES,
     ),

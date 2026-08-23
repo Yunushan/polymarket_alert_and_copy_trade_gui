@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -649,11 +649,68 @@ class MatchbookAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Matchbook copy trading is unsupported because the adapter does not mirror account activity.",
+        """Build a local copy preview from an authenticated matched bet.
+
+        Matchbook's documented ``matched-bets/aggregated`` feed includes the
+        runner identity, back/lay side, decimal odds, matched stake, and bet
+        id.  This method accepts a normalized row (or those documented raw
+        aliases), converts it to the shared BUY/SELL paper model, and never
+        calls the live offer route.
+        """
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            event_id = self._required_id(
+                self._value(activity, "event-id", "eventId", "event_id"),
+                "event",
+            )
+            market_id = self._required_id(
+                self._value(activity, "market-id", "marketId", "market_id"),
+                "market",
+            )
+            runner_id = self._required_id(
+                self._value(activity, "runner-id", "runnerId", "runner_id"),
+                "runner",
+            )
+            contract_id = self._contract_id(event_id, market_id, runner_id)
+        else:
+            self._split_contract_id(contract_id)
+
+        side = self._trade_side(activity.get("side") or activity.get("bet-side") or activity.get("betSide"))
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Matchbook activity side must be back/lay or BUY/SELL.")
+        size = self._positive_float(
+            self._value(activity, "size", "stake", "matched-stake", "matchedStake", "matched-amount", "matchedAmount")
         )
+        if size is None:
+            raise MarketConfigurationError("Matchbook activity stake must be positive and finite.")
+        raw_price = self._value(activity, "price", "probability")
+        if raw_price in (None, ""):
+            odds = self._positive_float(self._value(activity, "odds", "decimal-odds", "decimalOdds"))
+            raw_price = (1.0 / odds) if odds is not None and odds > 1.0 else None
+        price = self._safe_probability(raw_price)
+        if price is None or price <= 0.0:
+            raise MarketConfigurationError("Matchbook activity price/odds must map to a probability in (0, 1].")
+        trade_id = str(
+            self._value(activity, "trade_id", "tradeId", "id", "bet-id", "betId", "matched-bet-id", "matchedBetId")
+            or ""
+        ).strip()
+        if not trade_id:
+            raise MarketConfigurationError("Matchbook activity requires a documented matched-bet id.")
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={"activity": dict(activity), "source": "matchbook_authenticated_matched_bets"},
+            )
+        )
+        preview.raw["source"] = "matchbook_authenticated_matched_bets"
+        preview.raw["activity"] = dict(activity)
+        return preview
 
     def _get_market(self, event_id: str, market_id: str) -> Mapping[str, Any]:
         params = {
