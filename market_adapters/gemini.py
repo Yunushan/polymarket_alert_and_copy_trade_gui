@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -339,6 +339,7 @@ class GeminiPredictionAdapter(MarketAdapter):
                 f"for {order.size:.4f} contracts"
                 + (f" at limit {order.limit_price:.2f}" if order.limit_price is not None else "")
             ),
+            average_price=order.limit_price,
             raw={"event_ticker": event_ticker, "instrument_symbol": instrument_symbol},
         )
 
@@ -606,11 +607,96 @@ class GeminiPredictionAdapter(MarketAdapter):
         )
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Gemini Prediction Markets does not expose an account activity mirroring model in this adapter.",
+        """Build a local copy preview from a filled authenticated order.
+
+        Gemini's documented order-history feed exposes filled order identity,
+        event instrument, account direction, filled quantity, execution price,
+        and timestamps.  This path validates those fields and only creates a
+        local paper preview; it never calls the Gemini order endpoint.
+        """
+
+        self.ensure_capability("copy_trading")
+        def first_present(*keys: str) -> Any:
+            for key in keys:
+                value = activity.get(key)
+                if value not in (None, ""):
+                    return value
+            return None
+
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        event_ticker = str(
+            activity.get("event_ticker")
+            or activity.get("eventTicker")
+            or activity.get("event_id")
+            or activity.get("eventId")
+            or ""
+        ).strip()
+        instrument_symbol = str(
+            activity.get("symbol")
+            or activity.get("instrumentSymbol")
+            or activity.get("instrument_symbol")
+            or ""
+        ).strip()
+        if contract_id:
+            parsed_event, parsed_symbol = self._split_contract_id(contract_id)
+            if event_ticker and parsed_event != event_ticker:
+                raise MarketConfigurationError("Gemini activity event ticker does not match contract_id.")
+            if instrument_symbol and parsed_symbol != instrument_symbol:
+                raise MarketConfigurationError("Gemini activity instrument symbol does not match contract_id.")
+            event_ticker, instrument_symbol = parsed_event, parsed_symbol
+        elif event_ticker and instrument_symbol:
+            contract_id = self._contract_id(event_ticker, instrument_symbol)
+        else:
+            raise MarketConfigurationError("Gemini activity requires contract_id or event ticker plus symbol.")
+
+        status = str(activity.get("status") or "filled").strip().lower()
+        if status != "filled":
+            raise MarketConfigurationError("Gemini copy previews require a filled order-history row.")
+        side = str(activity.get("side") or activity.get("orderSide") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Gemini activity side must be BUY or SELL.")
+        size = self._positive_number(
+            first_present("filledQuantity", "filled_quantity", "executedQuantity", "quantity", "size")
         )
+        if size is None:
+            raise MarketConfigurationError("Gemini activity filled quantity must be positive and finite.")
+        price = self._safe_probability(
+            first_present("averageFillPrice", "average_fill_price", "avgFillPrice", "fillPrice", "price")
+        )
+        if price is None:
+            raise MarketConfigurationError("Gemini activity fill price must be between 0 and 1.")
+        timestamp = self._history_timestamp(
+            first_present("filledAt", "filled_at", "executedAt", "updatedAt", "updated_at", "createdAt"),
+            "activity timestamp",
+        )
+        if timestamp is None:
+            raise MarketConfigurationError("Gemini activity requires a filled/execution timestamp.")
+        order_id = str(
+            activity.get("orderId")
+            or activity.get("order_id")
+            or activity.get("trade_id")
+            or activity.get("tradeId")
+            or activity.get("id")
+            or ""
+        ).strip()
+        if not order_id:
+            raise MarketConfigurationError("Gemini activity requires a documented order id.")
+
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={"activity": dict(activity), "source": "gemini_authenticated_filled_orders"},
+            )
+        )
+        preview.raw["source"] = "gemini_authenticated_filled_orders"
+        preview.raw["activity"] = dict(activity)
+        preview.raw["order_id"] = order_id
+        preview.raw["timestamp"] = timestamp
+        return preview
 
     def _get_event(self, event_id: str) -> Mapping[str, Any]:
         ticker = str(event_id or "").strip()

@@ -2291,6 +2291,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 after=1787385600,
                 before=1787389200,
             )
+            copy_preview = adapter.copy_trade_from_activity(
+                {
+                    **history["orders"][0],
+                    "contract_id": "BTC100K2026:GEMI-BTC100K26-YES",
+                }
+            )
             positions = adapter.get_positions(
                 "BTC100K2026",
                 limit=100,
@@ -2319,6 +2325,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(trades[0].side, "BUY")
         self.assertEqual(trades[0].size, 2.0)
         self.assertAlmostEqual(trades[0].price, 0.41)
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, "BTC100K2026:GEMI-BTC100K26-YES")
+        self.assertEqual(copy_preview.average_price, 0.41)
+        self.assertEqual(copy_preview.raw["source"], "gemini_authenticated_filled_orders")
+        self.assertEqual(copy_preview.raw["order_id"], "order-0999")
         self.assertEqual(positions["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
         self.assertEqual(settled["positions"][0]["settlementStatus"], "settled")
         self.assertEqual(volume["eventTicker"], "BTC100K2026")
@@ -2358,6 +2369,16 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             adapter.get_volume_metrics("../BTC100K2026")
         with self.assertRaises(MarketConfigurationError):
             adapter.list_order_history(from_timestamp=1787389200, to_timestamp=1787385600)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**history["orders"][0], "status": "cancelled"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity(
+                {
+                    **history["orders"][0],
+                    "contract_id": "BTC100K2026:GEMI-BTC100K26-YES",
+                    "filledQuantity": 0,
+                }
+            )
 
     def test_gemini_prediction_order_management_uses_fixed_cancel_contracts_and_guards(self) -> None:
         adapter = GeminiPredictionAdapter(

@@ -165,6 +165,12 @@ shared adapter validates execution id, event conid, B/S direction, probability
 price, and whole filled size, preserves the execution payload, and routes only
 to a local paper preview; no IBKR order endpoint is called by copy preview.
 
+Gemini now provides the same parity from authenticated filled order history.
+The adapter validates event/instrument identity, filled status, BUY/SELL
+direction, positive filled quantity, probability price, timestamp, and order
+identity, preserves the raw order, and never calls the live order endpoint from
+copy preview.
+
 ## Open External Evidence Gates
 
 These are deliberately not replaced with simulated success:

@@ -290,7 +290,10 @@ GEMINI_PREDICTION_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated filled order history contains event/instrument identity,
+    # BUY/SELL direction, filled quantity, price, timestamp, and order id for
+    # simulation-first previews; previews never submit live orders.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
