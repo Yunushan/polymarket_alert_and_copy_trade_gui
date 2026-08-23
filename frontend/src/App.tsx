@@ -185,6 +185,10 @@ interface MarketReadForm {
   account_status: string;
   account_event_type_id: string;
   account_event_id: string;
+  account_outcome_id: string;
+  account_event_type: string;
+  account_start_time: string;
+  account_end_time: string;
   account_runner_id: string;
   account_bet_id: string;
   account_group_by: string;
@@ -476,6 +480,10 @@ function emptyMarketReadForm(): MarketReadForm {
     account_status: "",
     account_event_type_id: "",
     account_event_id: "",
+    account_outcome_id: "",
+    account_event_type: "",
+    account_start_time: "",
+    account_end_time: "",
     account_runner_id: "",
     account_bet_id: "",
     account_group_by: "BET",
@@ -1047,6 +1055,10 @@ export default function App() {
             is_resolved: form.account_is_resolved.trim() || undefined,
             event_type_id: form.account_event_type_id.trim() || undefined,
             event_id: form.account_event_id.trim() || undefined,
+            outcome_id: form.account_outcome_id.trim() || undefined,
+            event_type: form.account_event_type.trim() || undefined,
+            start_time: form.account_start_time.trim() || undefined,
+            end_time: form.account_end_time.trim() || undefined,
             runner_id: form.account_runner_id.trim() || undefined,
             bet_id: form.account_bet_id.trim() || undefined,
             group_by: form.account_group_by.trim() || undefined,
@@ -2888,6 +2900,14 @@ function MarketsView({
               />
             </label>
             <label>
+              <span>Account client order id</span>
+              <input
+                value={marketReadForm.account_client_order_id}
+                onChange={(event) => onMarketReadFormChange({ account_client_order_id: event.target.value })}
+                placeholder="Probable / SX Bet lookup"
+              />
+            </label>
+            <label>
               <span>Polymarket trade id</span>
               <input
                 value={marketReadForm.account_trade_id}
@@ -2954,14 +2974,6 @@ function MarketsView({
                   />
                 </label>
                 <label>
-                  <span>SX Bet client order id</span>
-                  <input
-                    value={marketReadForm.account_client_order_id}
-                    onChange={(event) => onMarketReadFormChange({ account_client_order_id: event.target.value })}
-                    placeholder="For order_by_client_id"
-                  />
-                </label>
-                <label>
                   <span>SX Bet start date</span>
                   <input
                     value={marketReadForm.account_start_date}
@@ -2984,6 +2996,42 @@ function MarketsView({
                     onChange={(event) => onMarketReadFormChange({ account_sort_asc: event.target.checked })}
                   />
                   <span>Sort SX Bet account reads ascending</span>
+                </label>
+              </>
+            ) : null}
+            {selectedMarket.market_id === "xo_market" ? (
+              <>
+                <label>
+                  <span>XO outcome id</span>
+                  <input
+                    value={marketReadForm.account_outcome_id}
+                    onChange={(event) => onMarketReadFormChange({ account_outcome_id: event.target.value })}
+                    placeholder="Optional outcome filter"
+                  />
+                </label>
+                <label>
+                  <span>XO audit event type</span>
+                  <input
+                    value={marketReadForm.account_event_type}
+                    onChange={(event) => onMarketReadFormChange({ account_event_type: event.target.value })}
+                    placeholder="order_filled, balance_change"
+                  />
+                </label>
+                <label>
+                  <span>XO start time</span>
+                  <input
+                    value={marketReadForm.account_start_time}
+                    onChange={(event) => onMarketReadFormChange({ account_start_time: event.target.value })}
+                    placeholder="ISO-8601 or Unix seconds"
+                  />
+                </label>
+                <label>
+                  <span>XO end time</span>
+                  <input
+                    value={marketReadForm.account_end_time}
+                    onChange={(event) => onMarketReadFormChange({ account_end_time: event.target.value })}
+                    placeholder="ISO-8601 or Unix seconds"
+                  />
                 </label>
               </>
             ) : null}

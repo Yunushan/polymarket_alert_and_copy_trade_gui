@@ -74,6 +74,7 @@ class FinalParityTests(unittest.TestCase):
 
     def test_react_sx_bet_order_management_is_wired_through_settings_and_form(self) -> None:
         source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        type_source = (ROOT / "frontend" / "src" / "types.ts").read_text(encoding="utf-8")
 
         self.assertIn("sx_bet_order_management_enabled", source)
         self.assertIn('selectedMarket.market_id === "sx_bet"', source)
@@ -84,6 +85,8 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("account_client_order_id", source)
         self.assertIn("account_start_date", source)
         self.assertIn("account_sort_asc", source)
+        self.assertIn("account_outcome_id", source)
+        self.assertIn('"order_by_client_id"', type_source)
 
     def test_react_analytics_source_exposes_direct_mdd_lookup_and_cached_detail(self) -> None:
         app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
