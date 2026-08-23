@@ -169,7 +169,7 @@ HISTORY_CAPABILITIES = {
     "cme_prediction_markets": {"trade_history", "candle_history"},
     "myriad_markets": {"trade_history", "candle_history"},
     "opinion_labs": {"trade_history", "candle_history"},
-    "betfair_exchange": {"trade_history"},
+    "betfair_exchange": {"trade_history", "candle_history"},
     "matchbook": {"trade_history"},
     "sx_bet": {"trade_history", "candle_history"},
     "gemini_titan": {"trade_history", "candle_history"},

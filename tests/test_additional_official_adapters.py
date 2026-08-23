@@ -3466,6 +3466,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             book = adapter.get_orderbook("1.234:101")
             price = adapter.get_price("1.234:101")
             trades = adapter.list_trades("1.234:101", limit=2, after=1780344000, before=1780344200)
+            candles = adapter.list_candles(
+                "1.234:101",
+                resolution="1h",
+                from_timestamp=1780344000,
+                to_timestamp=1780344200,
+            )
             active = adapter.account_recovery(
                 "active_orders",
                 contract_id="1.234:101",
@@ -3508,6 +3514,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([trade.price for trade in trades], [0.5])
         self.assertEqual([trade.size for trade in trades], [4.0])
         self.assertEqual([trade.timestamp for trade in trades], [1780344003.0])
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].timestamp, 1780344000.0)
+        self.assertAlmostEqual(candles[0].open, 0.5)
+        self.assertAlmostEqual(candles[0].volume or 0, 4.0)
+        self.assertTrue(candles[0].raw["derived"])
+        self.assertEqual(candles[0].raw["source"], "betfair_matched_account_orders")
         self.assertEqual([row["betId"] for row in active["currentOrders"]], ["bet_matched_101"])
         self.assertEqual(set(settled), {"clearedOrders", "moreAvailable"})
         self.assertEqual(settled["clearedOrders"][0]["betId"], "bet-1")

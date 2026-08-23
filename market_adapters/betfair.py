@@ -8,6 +8,7 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketTrade,
@@ -254,6 +255,67 @@ class BetfairExchangeAdapter(MarketAdapter):
             if len(trades) >= desired:
                 break
         return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from matched Betfair executions."""
+
+        self.ensure_capability("candle_history")
+        market_id, selection_id = self._split_contract_id(contract_id)
+        interval = self._candle_interval(resolution)
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError("Betfair candle history requires to_timestamp to be at or after from_timestamp.")
+
+        trades = self.list_trades(
+            contract_id,
+            limit=self._candle_trade_limit(),
+            before=end_ts,
+            after=start_ts,
+        )
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in trades:
+            if trade.timestamp is None or trade.timestamp < 0:
+                continue
+            bucket_timestamp = int(float(trade.timestamp) // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {"open": trade.price, "high": trade.price, "low": trade.price, "close": trade.price, "volume": 0.0, "trade_ids": []},
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += max(0.0, float(trade.size))
+            bucket["trade_ids"].append(trade.trade_id)
+
+        canonical = self._contract_id(market_id, selection_id)
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "betfair_matched_account_orders",
+                    "derived": True,
+                    "resolution": str(resolution or "").strip().lower(),
+                    "interval_seconds": interval,
+                    "trade_ids": list(bucket["trade_ids"]),
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
 
     def list_cleared_orders(
         self,
@@ -929,6 +991,30 @@ class BetfairExchangeAdapter(MarketAdapter):
         if not math.isfinite(parsed) or parsed < 0:
             raise MarketConfigurationError(f"Betfair {label} must be a non-negative finite epoch timestamp.")
         return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+            "1w": 604800,
+        }
+        normalized = str(resolution or "").strip().lower()
+        try:
+            return intervals[normalized]
+        except KeyError as exc:
+            raise MarketConfigurationError(
+                f"Betfair candle resolution must be one of: {', '.join(intervals)}."
+            ) from exc
+
+    def _candle_trade_limit(self) -> int:
+        raw_limit = self.config.get("betfair_candle_trade_limit", 1000)
+        return self._trade_limit(raw_limit)
 
     @staticmethod
     def _timestamp_iso(value: float) -> str:
