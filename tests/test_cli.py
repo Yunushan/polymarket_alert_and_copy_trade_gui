@@ -218,6 +218,91 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(order_calls[0][1]["external_operator"], "desk-1")
         self.assertEqual(order_payload["data"]["operation"], "modify_order")
 
+    def test_manifold_account_and_order_management_commands_forward_documented_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="manifold")
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("account", "active_orders", "order_history"),
+            account_recovery=account_recovery,
+            order_management_operations=("cancel_order",),
+            manage_orders=manage_orders,
+        )
+        common_patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "active_orders",
+                        "--market",
+                        "manifold",
+                        "--contract",
+                        "mf-binary-1:YES",
+                        "--limit",
+                        "20",
+                        "--before",
+                        "bet-open-1",
+                        "--from",
+                        "1760000000",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        account_payload = json.loads(stdout.getvalue())
+        self.assertEqual(account_calls, [("active_orders", {
+            "contract_id": "mf-binary-1:YES",
+            "limit": 20,
+            "before": "bet-open-1",
+            "after": None,
+            "before_time": None,
+            "after_time": 1760000000.0,
+        })])
+        self.assertEqual(account_payload["data"]["operation"], "active_orders")
+
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "manifold",
+                        "--order-id",
+                        "bet-open-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        order_payload = json.loads(stdout.getvalue())
+        self.assertEqual(order_calls, [("cancel_order", {
+            "order_id": "bet-open-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+        self.assertEqual(order_payload["data"]["operation"], "cancel_order")
+
     def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
         cfg = SimpleNamespace(selected_market_id="myriad_markets")
         calls = []

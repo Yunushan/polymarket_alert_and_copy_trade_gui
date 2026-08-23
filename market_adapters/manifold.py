@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -18,12 +19,18 @@ from .types import (
 
 
 DEFAULT_MANIFOLD_BASE_URL = "https://api.manifold.markets/v0"
+MANIFOLD_ACCOUNT_RECOVERY_OPERATIONS = ("account", "active_orders", "order_history")
+MANIFOLD_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order",)
+MANIFOLD_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+MANIFOLD_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class ManifoldAdapter(MarketAdapter):
     """Manifold adapter using the documented public REST API."""
 
     metadata = get_market_metadata("manifold")
+    account_recovery_operations = MANIFOLD_ACCOUNT_RECOVERY_OPERATIONS
+    order_management_operations = MANIFOLD_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -38,6 +45,11 @@ class ManifoldAdapter(MarketAdapter):
                 "orderbook_supported": False,
                 "activity_feed_supported": True,
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("manifold_order_management_enabled", False),
+                "authenticated_account_endpoints": ["GET /v0/me", "GET /v0/bets"],
+                "order_management_endpoints": ["POST /v0/bet/{id}/cancel"],
             }
         )
         return health
@@ -296,6 +308,117 @@ class ManifoldAdapter(MarketAdapter):
             "response": response,
         }
 
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read Manifold's documented authenticated account and bet feeds."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "Manifold account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+
+        headers = self._auth_headers()
+        account = self._get("/me", headers=headers)
+        if normalized == "account":
+            return account
+        if not isinstance(account, Mapping):
+            raise MarketConfigurationError("Manifold /me response was not an object.")
+
+        user_id = self._safe_id(account.get("id") or account.get("userId"), "account id")
+        username = str(account.get("username") or "").strip()
+        if not user_id and not username:
+            raise MarketConfigurationError("Manifold /me response omitted both id and username.")
+
+        params: Dict[str, Any] = {
+            "limit": self._history_limit(kwargs.get("limit", 50)),
+        }
+        if user_id:
+            params["userId"] = user_id
+        elif username:
+            params["username"] = self._safe_id(username, "username")
+
+        contract_id = str(kwargs.get("contract_id") or "").strip()
+        if contract_id:
+            params["contractId"] = self._safe_id(contract_id.split(":", 1)[0], "contract id")
+
+        for key in ("before", "after"):
+            value = str(kwargs.get(key) or "").strip()
+            if value:
+                params[key] = self._safe_id(value, f"{key} cursor")
+
+        before_time = kwargs.get("before_time")
+        after_time = kwargs.get("after_time")
+        if before_time not in (None, ""):
+            params["beforeTime"] = self._history_timestamp_millis(before_time, "before")
+        if after_time not in (None, ""):
+            params["afterTime"] = self._history_timestamp_millis(after_time, "after")
+        if "beforeTime" in params and "afterTime" in params and params["beforeTime"] < params["afterTime"]:
+            raise MarketConfigurationError("Manifold account history before_time must not precede after_time.")
+        if normalized == "active_orders":
+            params["kinds"] = "open-limit"
+
+        response = self._get("/bets", params=params, headers=headers)
+        return {
+            "account": {"id": user_id, "username": username or None},
+            "operation": normalized,
+            "parameters": params,
+            "response": response,
+        }
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Cancel one open Manifold limit bet through the documented endpoint."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            raise MarketConfigurationError(
+                "Manifold order-management operation must be one of: "
+                + ", ".join(self.order_management_operations)
+                + "."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("manifold_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Manifold order management is disabled by adapter config. "
+                "Set manifold_order_management_enabled=true only after reviewing live-order risk controls."
+            )
+        self.ensure_live_trading_enabled("Manifold order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != MANIFOLD_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Manifold order management requires exact confirmation text "
+                f"{MANIFOLD_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Manifold order cancellation does not support async_request.")
+
+        bet_id = self._safe_id(kwargs.get("order_id"), "bet id")
+        if not bet_id:
+            raise MarketConfigurationError("Manifold cancel_order requires order_id.")
+        response = self.runtime.request_json(
+            "POST",
+            self._url(f"/bet/{bet_id}/cancel"),
+            headers=self._auth_headers(),
+        )
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "order_id": bet_id,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "endpoint": "POST /v0/bet/{id}/cancel",
+            },
+            "response": response,
+        }
+
     def _get_market(self, ref: str) -> Optional[Mapping[str, Any]]:
         if not ref:
             return None
@@ -306,8 +429,17 @@ class ManifoldAdapter(MarketAdapter):
             data = self._get(f"/slug/{market_id}")
         return data if isinstance(data, Mapping) else None
 
-    def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
-        return self.runtime.get_json(self._url(path), params=params)
+    def _get(
+        self,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> Any:
+        request_kwargs: Dict[str, Any] = {"params": params}
+        if headers is not None:
+            request_kwargs["headers"] = headers
+        return self.runtime.get_json(self._url(path), **request_kwargs)
 
     @staticmethod
     def _activity_rows(data: Any) -> List[Mapping[str, Any]]:
@@ -406,6 +538,15 @@ class ManifoldAdapter(MarketAdapter):
             label="MANIFOLD_API_KEY",
         )
         return {"Authorization": f"Key {credential.value}", "Content-Type": "application/json"}
+
+    @staticmethod
+    def _safe_id(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if not MANIFOLD_ID_PATTERN.fullmatch(text):
+            raise MarketConfigurationError(f"Manifold {label} is invalid or contains path separators.")
+        return text
 
     def _event_from_market(self, market: Mapping[str, Any]) -> MarketEvent:
         event_id = str(market.get("id") or "").strip()

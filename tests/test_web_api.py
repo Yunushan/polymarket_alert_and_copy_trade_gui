@@ -714,6 +714,80 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(order_calls[0][1]["external_operator"], "desk-1")
         self.assertNotIn("unexpected", order_calls[0][1])
 
+    def test_manifold_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="manifold",
+            display_name="Manifold",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("account", "active_orders", "order_history")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["manifold"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "manifold",
+            "active_orders",
+            {
+                "contract_id": ["mf-binary-1:YES"],
+                "limit": ["20"],
+                "before": ["bet-open-1"],
+                "from": ["1760000000"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "active_orders")
+        self.assertEqual(account_calls, [("active_orders", {
+            "contract_id": "mf-binary-1:YES",
+            "limit": 20,
+            "before": "bet-open-1",
+            "after": None,
+            "before_time": None,
+            "after_time": 1760000000.0,
+        })])
+
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "manifold",
+            "cancel_order",
+            {
+                "order_id": "bet-open-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls, [("cancel_order", {
+            "market_id": "",
+            "instructions": None,
+            "customer_ref": "",
+            "market_version": None,
+            "async_request": False,
+            "confirm_global_cancel": "",
+            "order_id": "bet-open-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+
     def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

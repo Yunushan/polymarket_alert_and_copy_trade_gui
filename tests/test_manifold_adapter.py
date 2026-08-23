@@ -310,6 +310,93 @@ class ManifoldAdapterTests(unittest.TestCase):
 
         self.assertIn("multi-bet", str(ctx.exception))
 
+    def test_authenticated_account_reads_use_documented_me_and_bets_filters(self) -> None:
+        adapter = ManifoldAdapter()
+        me = load_fixture("me")
+        bets = load_fixture("bets_account")
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params, headers))
+            if url.endswith("/me"):
+                return me
+            if url.endswith("/bets"):
+                return bets
+            raise AssertionError(f"unexpected Manifold URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            account = adapter.account_recovery("account")
+            active = adapter.account_recovery(
+                "active_orders",
+                contract_id="mf-binary-1:YES",
+                limit=2000,
+                before="bet-open-1",
+                after_time=1760000000,
+            )
+            history = adapter.account_recovery("order_history", limit=10, before_time=1760000030)
+
+        self.assertEqual(account["id"], "user-123")
+        self.assertEqual(active["response"], bets)
+        self.assertEqual(active["parameters"]["userId"], "user-123")
+        self.assertEqual(active["parameters"]["contractId"], "mf-binary-1")
+        self.assertEqual(active["parameters"]["kinds"], "open-limit")
+        self.assertEqual(active["parameters"]["limit"], 1000)
+        self.assertEqual(active["parameters"]["afterTime"], 1760000000000)
+        self.assertNotIn("kinds", history["parameters"])
+        self.assertEqual(calls[0][2]["Authorization"], "Key unit-test-key")
+        self.assertTrue(calls[2][0].endswith("/bets"))
+
+    def test_account_reads_reject_unsafe_ids_and_reversed_time_bounds(self) -> None:
+        adapter = ManifoldAdapter()
+        adapter.runtime.get_json = lambda url, *, params=None, headers=None: load_fixture("me")  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.account_recovery("active_orders", before="../outside")
+            with self.assertRaises(MarketConfigurationError):
+                adapter.account_recovery(
+                    "order_history",
+                    before_time=10,
+                    after_time=20,
+                )
+
+    def test_guarded_open_limit_cancellation_uses_fixed_endpoint_and_confirmation(self) -> None:
+        adapter = ManifoldAdapter(
+            {
+                "manifold_order_management_enabled": True,
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+            }
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append((method, url, params, json_body, headers))
+            return load_fixture("cancel_response")
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            result = adapter.manage_orders(
+                "cancel_order",
+                order_id="bet-open-1",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+
+        self.assertTrue(result["live"])
+        self.assertEqual(result["response"]["isCancelled"], True)
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/bet/bet-open-1/cancel"))
+        self.assertEqual(calls[0][4]["Authorization"], "Key unit-test-key")
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "cancel_order",
+                    order_id="../unsafe",
+                    confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders("cancel_order", order_id="bet-open-1")
+
 
 if __name__ == "__main__":
     unittest.main()

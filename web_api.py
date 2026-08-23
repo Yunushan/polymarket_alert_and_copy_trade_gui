@@ -3684,6 +3684,22 @@ def market_account_payload(
             }
             if normalized_operation == "account_activity":
                 kwargs["event_types"] = _query_value(query_params, "event_types")
+    elif normalized_market_id == "manifold":
+        if normalized_operation == "account":
+            kwargs = {}
+        else:
+            kwargs = {
+                "contract_id": _query_value(query_params, "contract_id") or None,
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "before": _query_value(query_params, "before") or None,
+                "after": _query_value(query_params, "after") or None,
+                "before_time": _query_float(query_params, "before_time")
+                if _query_value(query_params, "before_time")
+                else _query_float(query_params, "to"),
+                "after_time": _query_float(query_params, "after_time")
+                if _query_value(query_params, "after_time")
+                else _query_float(query_params, "from"),
+            }
     elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": _query_value(query_params, "status") or "",
@@ -3795,7 +3811,7 @@ def market_account_payload(
                 "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
             }
         )
-    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "smarkets"} and normalized_operation == "order_history":
+    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "smarkets", "manifold"} and normalized_operation == "order_history":
         kwargs.update(
             {
                 "status": _query_value(query_params, "status", "filled").lower(),

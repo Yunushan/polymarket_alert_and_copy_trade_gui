@@ -1384,6 +1384,7 @@ PREDICT_FUN_ACCOUNT_OPERATIONS = (
     "positions_by_address",
 )
 IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
+MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1399,6 +1400,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + POLYMARKET_ACCOUNT_OPERATIONS
         + PREDICT_FUN_ACCOUNT_OPERATIONS
         + IBKR_ACCOUNT_OPERATIONS
+        + MANIFOLD_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1631,6 +1633,18 @@ def run_market_account(args: argparse.Namespace) -> int:
             }
             if operation == "account_activity":
                 kwargs["event_types"] = str(getattr(args, "event_types", "") or "").strip()
+    elif market_id == "manifold":
+        if operation == "account":
+            kwargs = {}
+        else:
+            kwargs = {
+                "contract_id": str(args.contract or "").strip() or None,
+                "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
+                "before": str(getattr(args, "before", "") or "").strip() or None,
+                "after": str(getattr(args, "after", "") or "").strip() or None,
+                "before_time": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
+                "after_time": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
+            }
     elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
             "filters": str(getattr(args, "status", "") or "").strip(),
@@ -1736,6 +1750,7 @@ HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
 PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS = ("remove_orders", "remove_orders_by_hash")
 XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
 IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders", "modify_order")
+MANIFOLD_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order",)
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1752,6 +1767,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS
         + XMARKET_ORDER_MANAGEMENT_OPERATIONS
         + IBKR_ORDER_MANAGEMENT_OPERATIONS
+        + MANIFOLD_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 

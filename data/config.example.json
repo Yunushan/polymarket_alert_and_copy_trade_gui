@@ -407,7 +407,8 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Read-only market discovery, probabilities, public manifold:<username> bet activity, simulation-first copy previews, and local paper trading are implemented through the official Manifold API. Authenticated MANA betting is guarded by live_trading_enabled and MANIFOLD_API_KEY."
+        "manifold_order_management_enabled": false,
+        "notes": "Official market discovery, probabilities, public manifold:<username> bet activity, authenticated /me and /bets account reads, simulation-first copy previews, local paper trading, and guarded open-limit bet cancellation are implemented through the official Manifold API. Authenticated MANA betting and order management are guarded by live_trading_enabled, separate opt-ins, exact confirmations, and MANIFOLD_API_KEY."
       }
     },
     "metaculus": {
