@@ -58,6 +58,7 @@ from .thales import ThalesMarketAdapter
 from .trueo import TrueoAdapter
 from .zetarium import ZetariumWorldAdapter
 from .stub import StubMarketAdapter, VerifiedBlockedAdapter, create_stub_adapter, create_verified_blocked_adapter
+from .support_matrix import SUPPORT_OPERATIONS, support_matrix_entry
 from .sx_bet import SxBetAdapter
 from .xo import XOMarketAdapter
 from .xmarket import XMarketAdapter
@@ -143,6 +144,7 @@ __all__ = [
     "RobinhoodPredictionMarketsAdapter",
     "ResolvedCredential",
     "SxBetAdapter",
+    "SUPPORT_OPERATIONS",
     "SmarketsAdapter",
     "SeerAdapter",
     "SciCastAdapter",
@@ -164,6 +166,7 @@ __all__ = [
     "create_stub_adapter",
     "create_verified_blocked_adapter",
     "capability_contract_issues",
+    "support_matrix_entry",
     "get_market_metadata",
     "load_json_fixture",
     "load_market_fixture",

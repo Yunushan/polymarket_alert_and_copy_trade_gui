@@ -18,6 +18,43 @@ export interface MarketCapabilities {
   region_limited: boolean;
 }
 
+export type MarketSupportStatus = "supported" | "guarded" | "unsupported" | "blocked";
+
+export interface MarketSupportState {
+  status: MarketSupportStatus;
+  advertised: boolean;
+  guarded: boolean;
+  reason: string;
+  operations?: string[];
+}
+
+export interface MarketSupportEntry {
+  market_id: string;
+  display_name: string;
+  implementation_status: "implemented" | "verified_blocked" | "unavailable";
+  implementation_reason: string;
+  adapter: string;
+  operations: Record<string, MarketSupportState>;
+  account_recovery: MarketSupportState & { operations: string[] };
+  order_management: MarketSupportState & { operations: string[] };
+  requirements: {
+    api_required: boolean;
+    credentials_required: boolean;
+    kyc_required: boolean;
+    region_limited: boolean;
+  };
+  blocker: {
+    reason: string;
+    references: string[];
+    last_reviewed?: string;
+  } | null;
+  audit: {
+    capability_contract_issues: string[];
+    ok: boolean;
+  };
+  counts: Record<MarketSupportStatus, number>;
+}
+
 export interface Market {
   market_id: string;
   display_name: string;
@@ -27,6 +64,7 @@ export interface Market {
   description: string;
   capabilities: MarketCapabilities;
   enabled_capabilities: string[];
+  support: MarketSupportEntry;
   settings: Record<string, unknown>;
   safety: {
     enabled: boolean;
@@ -63,11 +101,21 @@ export interface Market {
 export interface MarketsPayload {
   selected_market_id: string;
   markets: Market[];
+  support_matrix: MarketSupportEntry[];
   counts: {
     total: number;
     enabled: number;
     implemented: number;
+    verified_blocked: number;
+    guarded_markets: number;
   };
+}
+
+export interface MarketSupportPayload {
+  selected_market_id: string;
+  market?: MarketSupportEntry;
+  markets: MarketSupportEntry[];
+  counts: MarketsPayload["counts"];
 }
 
 export interface MarketEvent {

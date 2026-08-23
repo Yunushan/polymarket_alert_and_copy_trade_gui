@@ -29,7 +29,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
-from market_adapters import build_default_registry
+from market_adapters import build_default_registry, support_matrix_entry
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
 from market_adapters.errors import UnsupportedFeatureError
@@ -270,6 +270,8 @@ API_ROUTES = {
         "/api/state",
         "/api/config",
         "/api/markets",
+        "/api/markets/support-matrix",
+        "/api/markets/{market_id}/support",
         "/api/markets/{market_id}/events",
         "/api/markets/{market_id}/contracts",
         "/api/markets/{market_id}/price",
@@ -800,10 +802,13 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
     market_cfg = cfg.markets.get(meta.market_id)
     settings = dict(market_cfg.settings) if market_cfg else {}
     registry = registry or build_default_registry()
+    adapter = None
+    adapter_error = ""
     try:
         adapter = registry.create(meta.market_id, settings)
         health = adapter.health_check()
     except Exception as exc:
+        adapter_error = f"Adapter health check failed: {type(exc).__name__}."
         health = {
             "market_id": meta.market_id,
             "ok": False,
@@ -812,6 +817,14 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
             "adapter": "",
             "capabilities": meta.capabilities.to_dict(),
         }
+    blocker = None
+    if health.get("verified_blocker"):
+        blocker = {
+            "reason": health.get("message") or "Verified upstream blocker.",
+            "references": health.get("references") or [],
+            "last_reviewed": health.get("last_reviewed") or "",
+        }
+    support = support_matrix_entry(meta, adapter, blocker=blocker, adapter_error=adapter_error)
     credential_sources = health.get("credential_sources") if isinstance(health.get("credential_sources"), list) else []
     credential_env_vars = [str(value) for value in settings.get("credential_env_vars") or []]
     return {
@@ -826,6 +839,7 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
         "settings": sanitize_settings(settings),
         "safety": market_safety_payload(settings, bool(market_cfg and market_cfg.enabled)),
         "health": health,
+        "support": support,
         "status_text": market_status_text(meta, bool(market_cfg and market_cfg.enabled), health, settings),
         "credential_env_vars": credential_env_vars,
         "credential_sources": credential_sources,
@@ -841,14 +855,48 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
 def markets_payload(cfg: AppConfig, registry: Optional[AdapterRegistry] = None) -> Dict[str, Any]:
     registry = registry or build_default_registry()
     markets = [market_health_payload(meta, cfg, registry) for meta in MARKET_CATALOG]
+    support_matrix = [market["support"] for market in markets]
     return {
         "selected_market_id": cfg.selected_market_id,
         "markets": markets,
+        "support_matrix": support_matrix,
         "counts": {
             "total": len(markets),
             "enabled": sum(1 for market in markets if market["enabled"]),
             "implemented": sum(1 for market in markets if any(market["capabilities"].values())),
+            "verified_blocked": sum(1 for item in support_matrix if item["implementation_status"] == "verified_blocked"),
+            "guarded_markets": sum(
+                1
+                for item in support_matrix
+                if any(operation["status"] == "guarded" for operation in item["operations"].values())
+            ),
         },
+    }
+
+
+def market_support_payload(
+    cfg: AppConfig,
+    registry: Optional[AdapterRegistry] = None,
+    market_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the canonical support matrix, optionally narrowed to one market."""
+
+    payload = markets_payload(cfg, registry)
+    normalized = str(market_id or "").strip().lower()
+    if not normalized:
+        return {
+            "selected_market_id": payload["selected_market_id"],
+            "markets": payload["support_matrix"],
+            "counts": payload["counts"],
+        }
+    rows = [row for row in payload["support_matrix"] if row["market_id"] == normalized]
+    if not rows:
+        raise ValueError(f"Unknown market id: {normalized}")
+    return {
+        "selected_market_id": normalized,
+        "market": rows[0],
+        "markets": rows,
+        "counts": payload["counts"],
     }
 
 
@@ -4612,9 +4660,18 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if path == "/api/markets":
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
                 return
+            if path == "/api/markets/support-matrix":
+                self._send_json(HTTPStatus.OK, market_support_payload(cfg, self.app_server.adapter_registry))
+                return
             market_route = path.strip("/").split("/")
             if len(market_route) == 4 and market_route[:2] == ["api", "markets"]:
                 market_id = unquote(market_route[2])
+                if market_route[3] == "support":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_support_payload(cfg, self.app_server.adapter_registry, market_id),
+                    )
+                    return
                 if market_route[3] == "events":
                     self._send_json(
                         HTTPStatus.OK,

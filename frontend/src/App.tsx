@@ -120,6 +120,7 @@ import type {
   MarketPositionIntentPayload,
   MarketPositionOperation,
   MarketPricePayload,
+  MarketSupportStatus,
   MarketTradesPayload,
   MarketsPayload,
   PaperOrderForm,
@@ -410,6 +411,16 @@ function credentialRequirementText(market: Market): string {
 
 function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?: "good" | "warn" | "neutral" }) {
   return <span className={`status-pill ${tone}`}>{children}</span>;
+}
+
+function supportStatusTone(status: MarketSupportStatus): "good" | "warn" | "neutral" {
+  if (status === "supported") {
+    return "good";
+  }
+  if (status === "guarded" || status === "blocked") {
+    return "warn";
+  }
+  return "neutral";
 }
 
 function Metric({ label, value, tone }: { label: string; value: string | number; tone?: "good" | "warn" | "neutral" }) {
@@ -2884,6 +2895,44 @@ function MarketsView({
             </button>
           </div>
         </form>
+      ) : null}
+      {selectedMarket ? (
+        <div className="market-detail">
+          <div className="market-detail-main">
+            <div>
+              <h3>Support matrix</h3>
+              <p>Every advertised operation is explicit: supported, safety-guarded, unsupported, or blocked by the reviewed upstream surface.</p>
+            </div>
+            <StatusPill tone={selectedMarket.support.audit.ok ? "good" : "warn"}>
+              {selectedMarket.support.implementation_status.replaceAll("_", " ")}
+            </StatusPill>
+          </div>
+          <div className="diagnostic-grid">
+            {Object.entries(selectedMarket.support.operations).map(([operation, state]) => (
+              <div key={operation}>
+                <span>{operation.replaceAll("_", " ")}</span>
+                <strong><StatusPill tone={supportStatusTone(state.status)}>{state.status}</StatusPill></strong>
+                <small>{state.reason}</small>
+              </div>
+            ))}
+            <div>
+              <span>account recovery</span>
+              <strong><StatusPill tone={supportStatusTone(selectedMarket.support.account_recovery.status)}>{selectedMarket.support.account_recovery.status}</StatusPill></strong>
+              <small>{selectedMarket.support.account_recovery.operations.length ? selectedMarket.support.account_recovery.operations.join(", ") : selectedMarket.support.account_recovery.reason}</small>
+            </div>
+            <div>
+              <span>order management</span>
+              <strong><StatusPill tone={supportStatusTone(selectedMarket.support.order_management.status)}>{selectedMarket.support.order_management.status}</StatusPill></strong>
+              <small>{selectedMarket.support.order_management.operations.length ? selectedMarket.support.order_management.operations.join(", ") : selectedMarket.support.order_management.reason}</small>
+            </div>
+          </div>
+          {selectedMarket.support.blocker ? (
+            <p className="notice warning">
+              {selectedMarket.support.blocker.reason}
+              {selectedMarket.support.blocker.last_reviewed ? ` Last reviewed ${selectedMarket.support.blocker.last_reviewed}.` : ""}
+            </p>
+          ) : null}
+        </div>
       ) : null}
       {selectedMarket ? (
         <div className="market-detail">

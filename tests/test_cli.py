@@ -88,6 +88,22 @@ class MarketSentinelCliTests(unittest.TestCase):
                     self.assertEqual(market_sentinel_cli.main(command), 0)
                     self.assertIn(key, json.loads(stdout.getvalue()))
 
+    def test_markets_support_command_exposes_canonical_matrix(self) -> None:
+        expected = {
+            "selected_market_id": "kalshi",
+            "market": {
+                "market_id": "kalshi",
+                "implementation_status": "implemented",
+                "operations": {"live_trading": {"status": "guarded"}},
+            },
+        }
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=SimpleNamespace()), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.market_support_payload", return_value=expected), patch("sys.stdout", stdout):
+            self.assertEqual(market_sentinel_cli.main(["markets", "support", "--market", "kalshi", "--compact"]), 0)
+        self.assertEqual(json.loads(stdout.getvalue()), expected)
+
     def test_market_read_commands_reject_non_finite_time_bounds(self) -> None:
         with patch("market_sentinel_cli._load_cfg", return_value=SimpleNamespace(selected_market_id="space")), patch(
             "market_sentinel_cli.require_market_enabled"

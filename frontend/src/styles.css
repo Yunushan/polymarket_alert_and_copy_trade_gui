@@ -843,6 +843,23 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.diagnostic-grid small {
+  display: block;
+  margin-top: 7px;
+  color: #68726c;
+  line-height: 1.35;
+}
+
+.notice.warning {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #e8b4a7;
+  border-radius: 8px;
+  background: #fff4ef;
+  color: #7f2d1c;
+  line-height: 1.4;
+}
+
 .safety-grid {
   grid-template-columns: repeat(4, minmax(140px, 1fr));
   align-items: end;

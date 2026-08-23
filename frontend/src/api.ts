@@ -12,6 +12,7 @@ import type {
   LivePreflightPayload,
   LiveSafetyPayload,
   MarketsPayload,
+  MarketSupportPayload,
   MarketAccountOperation,
   MarketAccountPayload,
   MarketPositionIntentPayload,
@@ -149,6 +150,13 @@ export function fetchConfig(): Promise<ConfigPayload> {
 
 export function fetchMarkets(): Promise<MarketsPayload> {
   return request<MarketsPayload>("/api/markets");
+}
+
+export function fetchMarketSupport(marketId = ""): Promise<MarketSupportPayload> {
+  const path = marketId.trim()
+    ? `/api/markets/${encodeURIComponent(marketId.trim())}/support`
+    : "/api/markets/support-matrix";
+  return request<MarketSupportPayload>(path);
 }
 
 function marketReadQuery(values: Record<string, string | number | boolean | undefined>): string {

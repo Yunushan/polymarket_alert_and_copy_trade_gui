@@ -73,6 +73,7 @@ from market_adapters import (
     account_surface_issues,
     capability_contract_issues,
     create_stub_adapter,
+    support_matrix_entry,
 )
 from market_adapters.errors import MarketConfigurationError
 
@@ -430,6 +431,44 @@ class AdapterFoundationTests(unittest.TestCase):
                     ),
                     (),
                 )
+
+    def test_support_matrix_covers_every_catalog_market_truthfully(self) -> None:
+        registry = build_default_registry()
+
+        rows = {
+            market_id: support_matrix_entry(
+                registry.get_metadata(market_id),
+                registry.create(market_id),
+                blocker=VERIFIED_BLOCKERS.get(market_id),
+            )
+            for market_id in MARKET_IDS
+        }
+        self.assertEqual(set(rows), set(MARKET_IDS))
+
+        for market_id, row in rows.items():
+            with self.subTest(market_id=market_id):
+                self.assertIn(row["implementation_status"], {"implemented", "verified_blocked"})
+                self.assertEqual(set(row["operations"]), {
+                    "market_discovery",
+                    "event_listing",
+                    "price_reading",
+                    "orderbook_reading",
+                    "trade_history",
+                    "candle_history",
+                    "alerts",
+                    "paper_trading",
+                    "live_trading",
+                    "copy_trading",
+                })
+                self.assertEqual(set(row["counts"]), {"supported", "guarded", "unsupported", "blocked"})
+                self.assertEqual(row["audit"]["ok"], not row["audit"]["capability_contract_issues"])
+                if market_id in VERIFIED_BLOCKED_MARKETS:
+                    self.assertEqual(row["implementation_status"], "verified_blocked")
+                    self.assertIsNotNone(row["blocker"])
+                    self.assertTrue(all(item["status"] == "blocked" for item in row["operations"].values()))
+                else:
+                    self.assertEqual(row["implementation_status"], "implemented")
+                    self.assertIsNone(row["blocker"])
 
     def test_stub_adapters_reject_all_operational_methods(self) -> None:
         registry = build_default_registry()

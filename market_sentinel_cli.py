@@ -50,6 +50,7 @@ from web_api import (
     live_preflight_payload,
     live_safety_payload,
     markets_payload,
+    market_support_payload,
     paper_order_from_payload,
     paper_order_impact,
     paper_payload,
@@ -1175,6 +1176,15 @@ def run_config_set(args: argparse.Namespace) -> int:
 
 def run_markets_list(args: argparse.Namespace) -> int:
     return _write_command_payload(args, markets_payload(_load_cfg(args), _registry()))
+
+
+def run_markets_support(args: argparse.Namespace) -> int:
+    """Print the truthful support state for every catalog market or one id."""
+
+    return _write_command_payload(
+        args,
+        market_support_payload(_load_cfg(args), _registry(), getattr(args, "market", None)),
+    )
 
 
 def run_market_set(args: argparse.Namespace) -> int:
@@ -2939,6 +2949,14 @@ def build_parser() -> argparse.ArgumentParser:
     markets_list = markets_sub.add_parser("list", parents=[common], help="List configured markets and capabilities.")
     _add_json_output_args(markets_list)
     markets_list.set_defaults(func=run_markets_list)
+    markets_support = markets_sub.add_parser(
+        "support",
+        parents=[common],
+        help="Show supported, safety-guarded, unsupported, and verified-blocked operations for catalog markets.",
+    )
+    markets_support.add_argument("--market", default=None, help="Optional market id; omit to show the full catalog matrix.")
+    _add_json_output_args(markets_support)
+    markets_support.set_defaults(func=run_markets_support)
     market_set = markets_sub.add_parser("set", parents=[common], help="Patch one market config.")
     market_set.add_argument("market_id")
     market_set.add_argument("--enabled", action=argparse.BooleanOptionalAction, default=None)

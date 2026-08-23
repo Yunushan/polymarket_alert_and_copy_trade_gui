@@ -67,6 +67,7 @@ from web_api import (
     market_orderbook_payload,
     market_price_payload,
     market_trades_payload,
+    market_support_payload,
     paper_payload,
     paper_order_impact,
     paper_order_from_payload,
@@ -563,6 +564,13 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["selected_market_id"], "kalshi")
         self.assertGreaterEqual(payload["counts"]["total"], 1)
         self.assertGreaterEqual(payload["counts"]["implemented"], 1)
+        self.assertEqual(len(payload["support_matrix"]), payload["counts"]["total"])
+        self.assertEqual(kalshi["support"]["operations"]["paper_trading"]["status"], "supported")
+        self.assertEqual(kalshi["support"]["operations"]["live_trading"]["status"], "guarded")
+
+        support = market_support_payload(cfg, market_id="kalshi")
+        self.assertEqual(support["market"]["market_id"], "kalshi")
+        self.assertEqual(support["markets"], [support["market"]])
 
     def test_market_history_payloads_serialize_normalized_records(self) -> None:
         adapter = MarketAdapter({})
@@ -3705,6 +3713,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["observability"]["request_logging"], "structured_json")
         self.assertIn("/metrics", payload["routes"]["GET"])
         self.assertIn("/api/state", payload["routes"]["GET"])
+        self.assertIn("/api/markets/support-matrix", payload["routes"]["GET"])
+        self.assertIn("/api/markets/{market_id}/support", payload["routes"]["GET"])
         self.assertIn("/api/live-safety", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/coverage", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/clob-readiness", payload["routes"]["GET"])
@@ -4520,6 +4530,28 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["health"]["status"], "ok")
         self.assertEqual(payload["config"]["selected_market_id"], "kalshi")
         self.assertEqual(payload["paper"]["counts"]["history"], 1)
+
+    def test_http_support_matrix_routes_return_full_catalog_and_single_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            try:
+                status, payload = self._request_json(base_url, "/api/markets/support-matrix")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(len(payload["markets"]), 68)
+                self.assertEqual(payload["counts"]["total"], 68)
+
+                status, row_payload = self._request_json(base_url, "/api/markets/kalshi/support")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(row_payload["market"]["market_id"], "kalshi")
+                self.assertEqual(row_payload["markets"], [row_payload["market"]])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
 
 if __name__ == "__main__":

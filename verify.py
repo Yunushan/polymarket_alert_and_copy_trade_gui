@@ -222,6 +222,8 @@ def run_adapter_catalog_check() -> None:
         account_surface_issues,
         build_default_registry,
         capability_contract_issues,
+        support_matrix_entry,
+        VERIFIED_BLOCKERS,
     )
     import market_sentinel_cli
 
@@ -261,6 +263,24 @@ def run_adapter_catalog_check() -> None:
     ]
     if account_failures:
         raise SystemExit("Authenticated operation surfaces are incomplete: " + " | ".join(account_failures))
+    support_failures = []
+    for market_id in MARKET_IDS:
+        metadata = registry.get_metadata(market_id)
+        adapter = registry.create(market_id)
+        row = support_matrix_entry(metadata, adapter, blocker=VERIFIED_BLOCKERS.get(market_id))
+        if row["implementation_status"] not in {"implemented", "verified_blocked"}:
+            support_failures.append(f"{market_id}: invalid implementation status")
+        if not row["audit"]["ok"]:
+            support_failures.append(f"{market_id}: support matrix audit failed")
+        if market_id in VERIFIED_BLOCKERS:
+            if row["implementation_status"] != "verified_blocked" or any(
+                item["status"] != "blocked" for item in row["operations"].values()
+            ):
+                support_failures.append(f"{market_id}: verified blocker is not represented as blocked")
+        elif any(item["status"] == "blocked" for item in row["operations"].values()):
+            support_failures.append(f"{market_id}: non-blocked adapter has a blocked operation")
+    if support_failures:
+        raise SystemExit("Support matrix is incomplete: " + " | ".join(support_failures))
     print(f"[ok] adapter catalog ({len(MARKET_CATALOG)} markets)")
 
 
