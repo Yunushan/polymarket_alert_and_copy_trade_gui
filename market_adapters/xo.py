@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -395,11 +395,61 @@ class XOMarketAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "XO copy trading is unsupported because this adapter does not implement account activity mirroring.",
+        """Build a local copy preview from XO's authenticated trade feed.
+
+        XO exposes complete account trade rows through its documented
+        ``GET /trades`` endpoint.  The shared copy surface remains
+        simulation-first: this method validates and forwards the normalized
+        fill to ``place_paper_order`` and never calls the live order route.
+        """
+
+        self.ensure_capability("copy_trading")
+        market_id = str(activity.get("market_id") or activity.get("marketId") or "").strip()
+        outcome_id = str(activity.get("outcome_id") or activity.get("outcomeId") or "").strip()
+        contract_id = str(activity.get("contract_id") or "").strip()
+        if not contract_id:
+            if not market_id or not outcome_id:
+                raise MarketConfigurationError(
+                    "XO activity requires contract_id or both market_id and outcome_id."
+                )
+            contract_id = self._contract_id(market_id, outcome_id)
+        else:
+            parsed_market, parsed_outcome = self._split_contract_id(contract_id)
+            if market_id and parsed_market != market_id:
+                raise MarketConfigurationError("XO activity market_id does not match contract_id.")
+            if outcome_id and parsed_outcome != outcome_id:
+                raise MarketConfigurationError("XO activity outcome_id does not match contract_id.")
+            market_id, outcome_id = parsed_market, parsed_outcome
+
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("XO activity side must be BUY or SELL.")
+        size = self._positive_number(
+            activity.get("size")
+            if activity.get("size") is not None
+            else activity.get("qty") if activity.get("qty") is not None else activity.get("quantity")
         )
+        if size is None:
+            raise MarketConfigurationError("XO activity quantity must be positive and finite.")
+        price = self._safe_probability(activity.get("price"))
+        if price is None or price <= 0.0 or price >= 1.0:
+            raise MarketConfigurationError("XO activity price must be between 0 and 1.")
+        if not str(activity.get("trade_id") or activity.get("tradeId") or activity.get("id") or "").strip():
+            raise MarketConfigurationError("XO activity requires a documented trade id.")
+
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={"activity": dict(activity), "source": "xo_account_trades"},
+            )
+        )
+        preview.raw["source"] = "xo_account_trades"
+        preview.raw["activity"] = dict(activity)
+        return preview
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
         clean = str(market_id or "").strip()

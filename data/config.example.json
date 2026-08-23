@@ -640,7 +640,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, outcome listing, orderbooks, alerts, local paper orders, and guarded signed live order posting are implemented through official XO Markets HMAC endpoints. Live trading remains disabled by default; copy trading is unsupported."
+        "notes": "Authenticated market discovery, outcome listing, orderbooks, public/account trades, OHLCV candles, alerts, local paper orders, simulation-first copy previews, and guarded signed live order posting are implemented through official XO Markets HMAC endpoints. Live trading remains disabled by default; copy previews never submit live orders."
       }
     },
     "zeitgeist": {

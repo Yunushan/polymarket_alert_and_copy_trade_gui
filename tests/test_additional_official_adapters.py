@@ -3376,6 +3376,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 end_time=1733045400,
                 limit=2,
             )
+            copy_preview = adapter.copy_trade_from_activity(account_trades["trades"][0])
             settlement_payload = adapter.account_recovery("settlement", market_id="us-election-2028")
             settlement_history_payload = adapter.account_recovery(
                 "settlement_history",
@@ -3411,6 +3412,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(positions_payload["positions"][0]["outcome_id"], "vance")
         self.assertEqual(orders_payload["orders"][0]["status"], "filled")
         self.assertEqual(recovered_trades["trades"][0]["trade_id"], "trd_8a7b6c5d")
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, "us-election-2028:vance")
+        self.assertEqual(copy_preview.raw["source"], "xo_account_trades")
         self.assertEqual(settlement_payload["status"], "resolved")
         self.assertEqual(settlement_history_payload["settlements"][0]["status"], "resolved")
         self.assertEqual(audit_payload["events"][0]["event_type"], "order_filled")

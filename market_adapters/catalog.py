@@ -362,7 +362,10 @@ XO_MARKET_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The authenticated /trades feed contains complete, normalized fills
+    # suitable for simulation-first copy previews.  Copy never submits a
+    # live order automatically.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
