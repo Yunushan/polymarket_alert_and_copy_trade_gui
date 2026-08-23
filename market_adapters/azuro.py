@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .identity import require_activity_identity
 from .types import (
     MarketContract,
     MarketEvent,
@@ -21,6 +22,16 @@ DEFAULT_AZURO_WS_URL = "wss://streams.onchainfeed.org/v1/streams/feed"
 DEFAULT_AZURO_ENVIRONMENT = "PolygonUSDT"
 DEFAULT_AZURO_CHAIN_ID = 137
 AZURO_ODDS_SCALE = 10**12
+AZURO_TOKEN_DECIMALS = {
+    "PolygonUSDT": 6,
+    "PolygonAmoyUSDT": 6,
+    "GnosisXDAI": 18,
+    "GnosisDevXDAI": 18,
+    "BaseWETH": 18,
+    "BaseSepoliaWETH": 18,
+    "ChilizWCHZ": 18,
+    "ChilizSpicyWCHZ": 18,
+}
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
 AZURO_BET_HISTORY_PAGE_MAX = 1000
 AZURO_BETTOR_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -122,7 +133,8 @@ AZURO_REFERENCES = (
     "https://gem.azuro.org/hub/apps/sdk/overview",
     "https://gem.azuro.org/hub/apps/APIs/graph",
     "https://gem.azuro.org/hub/apps/APIs/backend/betting",
-    "https://gem.azuro.org/hub/apps/guides/advanced/live/get-bets-history",
+    "https://gem.azuro.org/hub/apps/guides/advanced/prematch/get-bets-history",
+    "https://gem.azuro.org/hub/apps/guides/advanced/live-tutorial/get-bets-history",
 )
 
 
@@ -239,6 +251,23 @@ class AzuroAdapter(MarketAdapter):
             "data": dict(data),
         }
 
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return safe, single-selection bettor activity for copy previews.
+
+        Azuro's documented history is a bet feed rather than a CLOB fill feed.
+        Only ordinary bets with exactly one selection are normalized here;
+        express/combo bets are skipped because one transaction can contain
+        multiple outcomes that cannot be represented by one contract id.
+        The result is simulation-only; no wallet signing or live mutation is
+        performed by this method.
+        """
+
+        self.ensure_capability("copy_trading")
+        wallet = require_activity_identity(self.market_id, wallet_address)
+        desired = self._bounded_bet_history_int(limit, "limit", default=25)
+        payload = self.account_recovery("bet_history", wallet=wallet, limit=desired, offset=0)
+        return self._normalize_activity_payload(wallet, payload, desired)
+
     @staticmethod
     def _bounded_bet_history_int(value: Any, label: str, *, default: int) -> int:
         if value in (None, ""):
@@ -254,6 +283,138 @@ class AzuroAdapter(MarketAdapter):
                 f"Azuro bet history {label} must be between {minimum} and {maximum}."
             )
         return parsed
+
+    def _normalize_activity_payload(
+        self,
+        wallet: str,
+        payload: Mapping[str, Any],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        activities: List[Dict[str, Any]] = []
+        for source, rows in (
+            ("v3Bets", payload.get("v3_bets")),
+            ("liveBets", payload.get("live_bets")),
+        ):
+            if not isinstance(rows, list):
+                continue
+            for index, bet in enumerate(rows):
+                if not isinstance(bet, Mapping):
+                    continue
+                selections = bet.get("selections")
+                if not isinstance(selections, list) or len(selections) != 1:
+                    # Express/combo bets cannot be represented as one token
+                    # contract and are intentionally excluded from copying.
+                    continue
+                selection = selections[0]
+                if not isinstance(selection, Mapping):
+                    continue
+                outcome = selection.get("outcome")
+                if not isinstance(outcome, Mapping):
+                    continue
+                condition = outcome.get("condition")
+                if not isinstance(condition, Mapping):
+                    continue
+                game_id = str(
+                    condition.get("gameId")
+                    or condition.get("game_id")
+                    or ((bet.get("_gamesIds") or bet.get("gamesIds") or [None])[0])
+                    or ""
+                ).strip()
+                condition_id = str(condition.get("conditionId") or condition.get("id") or "").strip()
+                outcome_id = str(outcome.get("outcomeId") or outcome.get("id") or "").strip()
+                if not game_id or not condition_id or not outcome_id:
+                    continue
+                odds = self._decimal_odds_value(selection.get("odds") or bet.get("odds"))
+                stake = self._stake_amount(bet.get("amount"))
+                timestamp = self._activity_timestamp(
+                    bet.get("createdBlockTimestamp") or bet.get("createdAt") or bet.get("timestamp")
+                )
+                if odds is None or stake is None or timestamp is None:
+                    continue
+                transaction_hash = str(
+                    bet.get("createdTxHash") or bet.get("txHash") or bet.get("transactionHash") or ""
+                ).strip()
+                bet_id = str(bet.get("betId") or bet.get("id") or f"{source}:{index}").strip()
+                if not bet_id:
+                    continue
+                contract_id = self._contract_id(game_id, condition_id, outcome_id)
+                activities.append(
+                    {
+                        "type": "BET",
+                        "activityType": "BET",
+                        "proxyWallet": wallet,
+                        "wallet": wallet,
+                        "asset": contract_id,
+                        "contract_id": contract_id,
+                        "marketId": game_id,
+                        "conditionId": condition_id,
+                        "outcomeId": outcome_id,
+                        "side": "BUY",
+                        "size": stake,
+                        "price": 1.0 / odds,
+                        "odds": odds,
+                        "timestamp": timestamp,
+                        "transactionHash": transaction_hash,
+                        "betId": bet_id,
+                        "status": str(bet.get("status") or "").strip(),
+                        "source": "azuro_bettor_bet_history",
+                        "raw": dict(bet),
+                    }
+                )
+        activities.sort(key=lambda item: (float(item.get("timestamp") or 0), str(item.get("betId") or "")), reverse=True)
+        return activities[: max(1, min(int(limit), AZURO_BET_HISTORY_PAGE_MAX))]
+
+    def _stake_amount(self, value: Any) -> Optional[float]:
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(amount) or amount <= 0:
+            return None
+        try:
+            decimals = int(AZURO_TOKEN_DECIMALS.get(self.environment, self.config.get("azuro_token_decimals", 6)))
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Azuro token decimals must be an integer between 0 and 30.") from exc
+        if decimals < 0 or decimals > 30:
+            raise MarketConfigurationError("Azuro token decimals must be between 0 and 30.")
+        normalized = amount / float(10**decimals)
+        return normalized if math.isfinite(normalized) and normalized > 0 else None
+
+    @staticmethod
+    def _decimal_odds_value(value: Any) -> Optional[float]:
+        try:
+            odds = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(odds) or odds <= 0:
+            return None
+        # The subgraph publishes odds in 1e12 fixed-point units.
+        if odds >= AZURO_ODDS_SCALE:
+            odds /= AZURO_ODDS_SCALE
+        return odds if math.isfinite(odds) and odds > 0 else None
+
+    @staticmethod
+    def _activity_timestamp(value: Any) -> Optional[float]:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(timestamp) or timestamp < 0:
+            return None
+        # Keep second precision for the shared wallet activity cursor.
+        if timestamp > 10**12:
+            timestamp /= 1000.0
+        return timestamp
+
+    @staticmethod
+    def _required_positive_number(value: Any, label: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be a positive number.") from exc
+        if not math.isfinite(number) or number <= 0:
+            raise MarketConfigurationError(f"{label} must be a positive number.")
+        return number
 
     def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
         self.ensure_capability("event_listing")
@@ -352,10 +513,36 @@ class AzuroAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Azuro copy trading is unsupported because this adapter has no official account activity mirroring model.",
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Azuro activity has no game/condition/outcome contract id.")
+        if str(activity.get("side") or "").strip().upper() != "BUY":
+            raise MarketConfigurationError("Azuro activity side must be BUY because bets select an outcome.")
+        size = self._required_positive_number(activity.get("size"), "Azuro activity stake")
+        raw_odds = activity.get("odds")
+        if raw_odds in (None, ""):
+            raw_price = activity.get("price")
+            try:
+                probability = float(raw_price)
+            except (TypeError, ValueError) as exc:
+                raise MarketConfigurationError("Azuro activity must include decimal odds or an implied probability.") from exc
+            if not math.isfinite(probability) or probability <= 0 or probability > 1:
+                raise MarketConfigurationError("Azuro activity implied probability must be between 0 and 1.")
+            odds = 1.0 / probability
+        else:
+            odds = self._decimal_odds_value(raw_odds)
+            if odds is None:
+                raise MarketConfigurationError("Azuro activity decimal odds must be positive and finite.")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side="BUY",
+                size=size,
+                limit_price=odds,
+                metadata={"activity": dict(activity), "source": "azuro_bettor_bet_history"},
+            )
         )
 
     def websocket_connection_info(

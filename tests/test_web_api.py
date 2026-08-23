@@ -267,6 +267,20 @@ class FakeMyriadCopyAdapter(FakePolymarketAdapter):
         ][:limit]
 
 
+class FakeAzuroCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="azuro",
+        display_name="Azuro",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            paper_trading=True,
+            live_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+
 class FakeRegistry:
     def __init__(self, adapter: MarketAdapter) -> None:
         self.adapter = adapter
@@ -2476,6 +2490,42 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(preview["order"]["contract_id"], "501:1")
         self.assertAlmostEqual(preview["order"]["size"], 1.0)
         self.assertAlmostEqual(preview["order"]["approx_notional"], 1.0)
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_azuro_wallet_copy_uses_decimal_odds_and_stake_budget(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "azuro"
+        cfg.markets["azuro"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+
+        preview = copy_trade_preview_from_activity(
+            cfg,
+            FakeRegistry(FakeAzuroCopyAdapter()),
+            {
+                "proxyWallet": WALLET,
+                "asset": "30061006000000000029214016:300610060000000000649714110000000000000227249395:29",
+                "side": "BUY",
+                "price": 1 / 1.85,
+                "odds": 1.85,
+                "size": 10.0,
+                "transactionHash": "azuro-tx-1",
+            },
+        )
+
+        self.assertEqual(preview["status"], "simulation")
+        self.assertAlmostEqual(preview["order"]["size"], 1.0)
+        self.assertAlmostEqual(preview["order"]["limit_price"], 1.85 * 0.98)
+        self.assertAlmostEqual(preview["order"]["approx_notional"], 1.0)
+        self.assertEqual(preview["pricing"]["raw_odds"], 1.85)
         self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
 
     def test_manifold_wallet_and_copy_settings_use_prefixed_public_identity(self) -> None:

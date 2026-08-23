@@ -221,7 +221,7 @@ AZURO_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    copy_trading=True,
     api_required=True,
     credentials_required=False,
     kyc_required=False,
@@ -837,7 +837,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="azuro",
         display_name="Azuro",
         homepage_url="https://azuro.org",
-        description="Official Azuro V3 backend/feed API adapter for games, conditions, odds, WebSocket subscriptions, dry-run bets, and guarded pre-signed live order posting.",
+        description="Official Azuro V3 backend/feed API adapter for games, conditions, odds, bettor-scoped single-bet activity, simulation-first copy previews, WebSocket subscriptions, dry-run bets, and guarded pre-signed live order posting.",
         capabilities=AZURO_CAPABILITIES,
     ),
     MarketMetadata(

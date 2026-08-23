@@ -58,7 +58,7 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.orderbook_reading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("api.onchainfeed.org", health["api_base_url"])
         self.assertIn("streams.onchainfeed.org", health["websocket_url"])
         self.assertEqual(health["account_recovery_operations"], ["bet_history"])
@@ -137,7 +137,7 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertEqual(price.raw["decimal_odds"], 1.85)
         self.assertEqual(price.source, "azuro_current_odds")
 
-    def test_orderbook_and_copy_trading_are_clear_unsupported_features(self) -> None:
+    def test_orderbook_remains_unsupported_for_vamm_markets(self) -> None:
         adapter = self.make_adapter()
 
         with self.assertRaises(UnsupportedFeatureError) as orderbook_ctx:
@@ -145,9 +145,56 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertEqual(orderbook_ctx.exception.feature, "orderbook_reading")
         self.assertIn("vAMM", str(orderbook_ctx.exception))
 
-        with self.assertRaises(UnsupportedFeatureError) as copy_ctx:
-            adapter.copy_trade_from_activity({})
-        self.assertEqual(copy_ctx.exception.feature, "copy_trading")
+
+    def test_bettor_activity_normalizes_single_bets_and_supports_paper_copy(self) -> None:
+        adapter = AzuroAdapter({"azuro_graph_api_url": "https://graph.fixture.test/query"})
+        response = load_fixture("bet_history")
+        wallet = "0x0000000000000000000000000000000000000001"
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual((method, url), ("POST", "https://graph.fixture.test/query"))
+            return response
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        activities = adapter.list_activity(wallet, limit=10)
+
+        self.assertEqual(len(activities), 2)
+        self.assertEqual([item["betId"] for item in activities], ["8", "7"])
+        self.assertEqual(activities[0]["contract_id"], f"{GAME_ID}:{CONDITION_ID}:29")
+        self.assertEqual(activities[0]["side"], "BUY")
+        self.assertAlmostEqual(activities[0]["size"], 10.0)
+        self.assertAlmostEqual(activities[0]["odds"], 1.85)
+        self.assertAlmostEqual(activities[0]["price"], 1 / 1.85)
+        self.assertEqual(activities[0]["source"], "azuro_bettor_bet_history")
+        self.assertEqual(activities[0]["transactionHash"], "0xlivebet")
+
+        result = adapter.copy_trade_from_activity(activities[0])
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.raw["paper_stake"], 10.0)
+        self.assertEqual(result.raw["min_odds"], "1850000000000")
+
+    def test_bettor_activity_skips_combo_rows_and_rejects_invalid_copy_inputs(self) -> None:
+        adapter = AzuroAdapter({"azuro_graph_api_url": "https://graph.fixture.test/query"})
+        response = load_fixture("bet_history")
+        response["data"]["v3Bets"].append(
+            {
+                **response["data"]["v3Bets"][0],
+                "betId": "combo",
+                "selections": [
+                    response["data"]["v3Bets"][0]["selections"][0],
+                    response["data"]["v3Bets"][0]["selections"][0],
+                ],
+            }
+        )
+        adapter.runtime.request_json = lambda *args, **kwargs: response  # type: ignore[method-assign]
+        wallet = "0x0000000000000000000000000000000000000001"
+        activities = adapter.list_activity(wallet, limit=10)
+        self.assertNotIn("combo", [item["betId"] for item in activities])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({"asset": "x", "side": "SELL", "size": 1, "odds": 1.5})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({"asset": "x", "side": "BUY", "size": 1, "odds": 0})
 
     def test_paper_order_returns_official_calculation_request_shape(self) -> None:
         adapter = self.make_adapter()

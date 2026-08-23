@@ -4496,15 +4496,28 @@ class App(tk.Tk):
 
         # Pull current best bid/ask for safer limit pricing
         best_bid = best_ask = None
-        try:
-            book = adapter.get_orderbook(token_id)
-            best_bid = book.bids[0].price if book.bids else None
-            best_ask = book.asks[0].price if book.asks else None
-        except Exception:
-            pass
+        is_azuro = market_id == "azuro"
+        if not is_azuro:
+            try:
+                book = adapter.get_orderbook(token_id)
+                best_bid = book.bids[0].price if book.bids else None
+                best_ask = book.asks[0].price if book.asks else None
+            except Exception:
+                pass
 
         slip = max(0.0, min(float(s.slippage), 1.0))
-        if side == "BUY":
+        if is_azuro:
+            raw_odds = safe_float(item.get("odds"), None)
+            if raw_odds is None and raw_price is not None and raw_price > 0:
+                raw_odds = 1.0 / raw_price
+            if raw_odds is None or raw_odds <= 0:
+                self.ui_queue.put(("log", "[copy] Azuro activity has no valid decimal odds."))
+                return
+            # Azuro's minimum-odds field is a decimal-odds floor. Allow the
+            # configured slippage to reduce that floor, rather than treating
+            # it as a 0..1 probability cap.
+            limit_price = max(1e-12, float(raw_odds) * (1.0 - slip))
+        elif side == "BUY":
             # pick an ask-based price cap
             ref = best_ask if best_ask is not None else raw_price
             if ref is None:
@@ -4518,7 +4531,7 @@ class App(tk.Tk):
 
         # Enforce max USDC exposure by shrinking share size
         max_usdc = max(0.01, float(s.max_usdc_per_trade))
-        buy_budget_activity = market_id in {"manifold", "myriad_markets"} and side == "BUY"
+        buy_budget_activity = market_id in {"azuro", "manifold", "myriad_markets"} and side == "BUY"
         if buy_budget_activity:
             if size > max_usdc:
                 size = max_usdc

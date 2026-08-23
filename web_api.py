@@ -3066,14 +3066,25 @@ def copy_trade_preview_from_activity(
     raw_price = _safe_float(activity.get("price"), None)
     size = max(0.0, raw_size * float(settings.scale))
     best_bid = best_ask = None
-    try:
-        orderbook = adapter.get_orderbook(token_id)
-        best_bid = orderbook.bids[0].price if orderbook.bids else None
-        best_ask = orderbook.asks[0].price if orderbook.asks else None
-    except Exception:
-        pass
+    is_azuro = market_id == "azuro"
+    if not is_azuro:
+        try:
+            orderbook = adapter.get_orderbook(token_id)
+            best_bid = orderbook.bids[0].price if orderbook.bids else None
+            best_ask = orderbook.asks[0].price if orderbook.asks else None
+        except Exception:
+            pass
     slippage = max(0.0, min(float(settings.slippage), 1.0))
-    if side == "BUY":
+    if is_azuro:
+        raw_odds = _safe_float(activity.get("odds"), None)
+        if raw_odds is None and raw_price is not None and raw_price > 0:
+            raw_odds = 1.0 / raw_price
+        if raw_odds is None or raw_odds <= 0:
+            return {"status": "skipped", "reason": "Azuro activity has no valid decimal odds"}
+        # Azuro copy previews use decimal minimum odds; slippage lowers the
+        # accepted odds floor instead of adding to a probability.
+        limit_price = max(1e-12, float(raw_odds) * (1.0 - slippage))
+    elif side == "BUY":
         reference_price = best_ask if best_ask is not None else raw_price
         limit_price = min(1.0, float(reference_price if reference_price is not None else 0.99) + slippage)
     else:
@@ -3084,7 +3095,7 @@ def copy_trade_preview_from_activity(
     # Manifold and Myriad BUY activity sizes are collateral budgets, while
     # SELL activity sizes are shares. Do not divide a BUY budget by
     # probability a second time.
-    buy_budget_activity = market_id in {"manifold", "myriad_markets"} and side == "BUY"
+    buy_budget_activity = market_id in {"azuro", "manifold", "myriad_markets"} and side == "BUY"
     if buy_budget_activity:
         if size > max_usdc:
             size = max_usdc
@@ -3129,6 +3140,7 @@ def copy_trade_preview_from_activity(
         },
         "pricing": {
             "raw_price": raw_price,
+            "raw_odds": _safe_float(activity.get("odds"), None),
             "best_bid": best_bid,
             "best_ask": best_ask,
             "slippage": slippage,

@@ -120,7 +120,7 @@ Current catalog snapshot:
 - Orderbook reading supported: 26 yes, 42 no
 - Paper trading supported: 53 yes, 15 no
 - Live trading supported: 36 guarded/off by default, 32 no
-- Copy trading supported: 7 yes, 61 no (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, Predict.fun authenticated account activity, and Probable public wallet activity; all simulation-first and guarded)
+- Copy trading supported: 8 yes, 60 no (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, Predict.fun authenticated account activity, Probable public wallet activity, and Azuro single-selection bettor activity; all simulation-first and guarded)
 
 Important status rules:
 
@@ -312,6 +312,7 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 171 Myriad Position-Transaction Intent Parity: scope complete for this pass; the official `POST /positions/split`, `/merge`, `/redeem`, `/redeem-voided`, `/neg-risk/split`, and `/neg-risk/merge` endpoints are exposed through a preview-only CLI/API/React surface. Market/network ids, uint256 amounts, NegRisk bytes32 event ids, and outcome indexes are validated; only unsigned `{to, calldata, value}` intents are returned, and external wallet signing, settlement, account eligibility, and funding remain operator-owned gates.
 - Article 172 Myriad Current Discovery Contract Parity: scope complete for this pass; Myriad discovery now uses the current official `/markets?group_by_event=true` and `/events/{id}` contracts, preserves standalone market rows through a deterministic `/markets/{id}` fallback, validates grouped discovery parameters, and keeps event/contract normalization fixture-backed. The legacy `/questions` route is no longer used for production discovery.
 - Article 173 Myriad Best-Quote Price Parity and Catalog Snapshot Audit: scope complete for this pass; Myriad normalized price reads now preserve documented `bestBid`/`bestAsk` values and derive a midpoint when both are present, while the catalog/readiness documentation is synchronized to the current 68-market, 56-implemented, 12-blocked inventory and capability counts.
+- Article 174 Azuro Single-Bet Wallet Copy Preview: scope complete for this pass; the documented Azuro client-subgraph `v3Bets`/`liveBets` bettor history is normalized into wallet activity for ordinary single-selection bets, including fixed-point stake/odds conversion, canonical game/condition/outcome contract ids, timestamps, transaction ids, and simulation-first paper-copy previews. Express/combo rows are rejected because they contain multiple selections, and wallet signing, funding, settlement, and live execution remain external gates.
 
 ## Active continuation goals
 
