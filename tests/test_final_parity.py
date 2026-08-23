@@ -86,6 +86,15 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("account_start_date", source)
         self.assertIn("account_sort_asc", source)
         self.assertIn("account_outcome_id", source)
+        self.assertIn("account_locale", source)
+        self.assertIn("account_exclude_item", source)
+        self.assertIn("account_from_currency", source)
+        self.assertIn("account_order_by", source)
+        self.assertIn("account_sort_dir", source)
+        self.assertIn("account_search", source)
+        self.assertIn("account_with_cash_outs", source)
+        self.assertIn("account_before", source)
+        self.assertIn("account_after", source)
         self.assertIn('"order_by_client_id"', type_source)
 
     def test_react_analytics_source_exposes_direct_mdd_lookup_and_cached_detail(self) -> None:

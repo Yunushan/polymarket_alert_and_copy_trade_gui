@@ -193,6 +193,16 @@ interface MarketReadForm {
   account_bet_id: string;
   account_group_by: string;
   account_include_item_description: boolean;
+  account_locale: string;
+  account_exclude_item: boolean;
+  account_from_currency: string;
+  account_order_by: string;
+  account_sort_dir: string;
+  account_search: string;
+  account_category: string;
+  account_with_cash_outs: boolean;
+  account_before: string;
+  account_after: string;
   account_sport_id: string;
   account_side: string;
   account_offer_status: string;
@@ -488,6 +498,16 @@ function emptyMarketReadForm(): MarketReadForm {
     account_bet_id: "",
     account_group_by: "BET",
     account_include_item_description: false,
+    account_locale: "en",
+    account_exclude_item: false,
+    account_from_currency: "",
+    account_order_by: "BY_MATCH_TIME",
+    account_sort_dir: "EARLIEST_TO_LATEST",
+    account_search: "",
+    account_category: "",
+    account_with_cash_outs: false,
+    account_before: "",
+    account_after: "",
     account_sport_id: "",
     account_side: "",
     account_offer_status: "",
@@ -1063,6 +1083,16 @@ export default function App() {
             bet_id: form.account_bet_id.trim() || undefined,
             group_by: form.account_group_by.trim() || undefined,
             include_item_description: form.account_include_item_description,
+            locale: form.account_locale.trim() || undefined,
+            exclude_item: form.account_exclude_item,
+            from_currency: form.account_from_currency.trim() || undefined,
+            order_by: form.account_order_by.trim() || undefined,
+            sort_dir: form.account_sort_dir.trim() || undefined,
+            search: form.account_search.trim() || undefined,
+            category: form.account_category.trim() || undefined,
+            with_cash_outs: form.account_with_cash_outs,
+            before: form.account_before.trim() || undefined,
+            after: form.account_after.trim() || undefined,
             sport_id: form.account_sport_id.trim() || undefined,
             side: form.account_side.trim() || undefined,
             offer_status: form.account_offer_status.trim() || undefined,
@@ -2963,6 +2993,98 @@ function MarketsView({
                 placeholder="Opinion / Betfair / Xmarket market id"
               />
             </label>
+            {selectedMarket.market_id === "betfair_exchange" ? (
+              <>
+                <label>
+                  <span>Betfair statement locale</span>
+                  <input
+                    value={marketReadForm.account_locale}
+                    onChange={(event) => onMarketReadFormChange({ account_locale: event.target.value })}
+                    placeholder="en"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_exclude_item}
+                    onChange={(event) => onMarketReadFormChange({ account_exclude_item: event.target.checked })}
+                  />
+                  <span>Exclude Betfair statement item details</span>
+                </label>
+                <label>
+                  <span>Betfair source currency</span>
+                  <input
+                    value={marketReadForm.account_from_currency}
+                    onChange={(event) => onMarketReadFormChange({ account_from_currency: event.target.value })}
+                    placeholder="Optional, e.g. EUR"
+                  />
+                </label>
+                <label>
+                  <span>Betfair order by</span>
+                  <input
+                    value={marketReadForm.account_order_by}
+                    onChange={(event) => onMarketReadFormChange({ account_order_by: event.target.value })}
+                    placeholder="BY_MATCH_TIME"
+                  />
+                </label>
+                <label>
+                  <span>Betfair sort direction</span>
+                  <input
+                    value={marketReadForm.account_sort_dir}
+                    onChange={(event) => onMarketReadFormChange({ account_sort_dir: event.target.value })}
+                    placeholder="EARLIEST_TO_LATEST"
+                  />
+                </label>
+              </>
+            ) : null}
+            {marketReadForm.account_operation === "settled_positions" ? (
+              <>
+                <label>
+                  <span>Settled-position search</span>
+                  <input
+                    value={marketReadForm.account_search}
+                    onChange={(event) => onMarketReadFormChange({ account_search: event.target.value })}
+                    placeholder="Optional search text"
+                  />
+                </label>
+                <label>
+                  <span>Settled-position category</span>
+                  <input
+                    value={marketReadForm.account_category}
+                    onChange={(event) => onMarketReadFormChange({ account_category: event.target.value })}
+                    placeholder="Optional category"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_with_cash_outs}
+                    onChange={(event) => onMarketReadFormChange({ account_with_cash_outs: event.target.checked })}
+                  />
+                  <span>Include settled-position cash-outs</span>
+                </label>
+              </>
+            ) : null}
+            {(selectedMarket.market_id === "polymarket" || selectedMarket.market_id === "manifold") ? (
+              <>
+                <label>
+                  <span>Account before cursor/time</span>
+                  <input
+                    value={marketReadForm.account_before}
+                    onChange={(event) => onMarketReadFormChange({ account_before: event.target.value })}
+                    placeholder="Optional venue cursor or timestamp"
+                  />
+                </label>
+                <label>
+                  <span>Account after cursor/time</span>
+                  <input
+                    value={marketReadForm.account_after}
+                    onChange={(event) => onMarketReadFormChange({ account_after: event.target.value })}
+                    placeholder="Optional venue cursor or timestamp"
+                  />
+                </label>
+              </>
+            ) : null}
             {selectedMarket.market_id === "sx_bet" ? (
               <>
                 <label>
