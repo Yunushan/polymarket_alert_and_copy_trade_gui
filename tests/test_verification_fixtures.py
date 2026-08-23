@@ -11,6 +11,18 @@ FIXTURE_ROOT = ROOT / "fixtures"
 
 
 class VerificationFixtureTests(unittest.TestCase):
+    def test_omen_history_configuration_declares_bounded_trade_limits(self) -> None:
+        config = json.loads((ROOT.parent / "data" / "config.example.json").read_text(encoding="utf-8"))
+        markets = config["markets"]
+
+        self.assertEqual(markets["omen"]["settings"]["omen_candle_trade_limit"], 1000)
+        self.assertEqual(
+            markets["gnosis_prediction_markets"]["settings"]["gnosis_candle_trade_limit"],
+            1000,
+        )
+        self.assertIn("indexed scale", markets["omen"]["settings"]["notes"])
+        self.assertIn("same-second", markets["gnosis_prediction_markets"]["settings"]["notes"])
+
     def test_fixture_json_files_parse(self) -> None:
         fixture_paths = sorted(FIXTURE_ROOT.glob("**/*.json"))
 
@@ -217,8 +229,16 @@ class VerificationFixtureTests(unittest.TestCase):
     def test_legacy_web3_fixtures_cover_core_payload_shapes(self) -> None:
         augur_markets = json.loads((FIXTURE_ROOT / "augur" / "markets.json").read_text(encoding="utf-8"))
         omen_markets = json.loads((FIXTURE_ROOT / "omen" / "fpmms.json").read_text(encoding="utf-8"))
+        omen_trades = json.loads((FIXTURE_ROOT / "omen" / "trades.json").read_text(encoding="utf-8"))
+        omen_token = json.loads((FIXTURE_ROOT / "omen" / "token.json").read_text(encoding="utf-8"))
         gnosis_markets = json.loads(
             (FIXTURE_ROOT / "gnosis_prediction_markets" / "fpmms.json").read_text(encoding="utf-8")
+        )
+        gnosis_trades = json.loads(
+            (FIXTURE_ROOT / "gnosis_prediction_markets" / "trades.json").read_text(encoding="utf-8")
+        )
+        gnosis_token = json.loads(
+            (FIXTURE_ROOT / "gnosis_prediction_markets" / "token.json").read_text(encoding="utf-8")
         )
         zeitgeist_markets = json.loads((FIXTURE_ROOT / "zeitgeist" / "markets.json").read_text(encoding="utf-8"))
         zeitgeist_assets = json.loads((FIXTURE_ROOT / "zeitgeist" / "assets.json").read_text(encoding="utf-8"))
@@ -236,8 +256,14 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("outcomes", augur_markets["data"]["markets"][0])
         self.assertIsInstance(omen_markets.get("data", {}).get("fixedProductMarketMakers"), list)
         self.assertIn("outcomeTokenMarginalPrices", omen_markets["data"]["fixedProductMarketMakers"][0])
+        self.assertIsInstance(omen_trades.get("data", {}).get("fpmmTrades"), list)
+        self.assertIn("outcomeTokensTraded", omen_trades["data"]["fpmmTrades"][0])
+        self.assertEqual(omen_token["data"]["token"]["scale"], "1000000000000000000")
         self.assertIsInstance(gnosis_markets.get("data", {}).get("fixedProductMarketMakers"), list)
         self.assertIn("outcomeTokenMarginalPrices", gnosis_markets["data"]["fixedProductMarketMakers"][0])
+        self.assertIsInstance(gnosis_trades.get("data", {}).get("fpmmTrades"), list)
+        self.assertIn("outcomeTokensTraded", gnosis_trades["data"]["fpmmTrades"][0])
+        self.assertEqual(gnosis_token["data"]["token"]["scale"], "1000000000000000000")
         self.assertIsInstance(zeitgeist_markets.get("data", {}).get("markets"), list)
         self.assertIn("outcomeAssets", zeitgeist_markets["data"]["markets"][0])
         self.assertIsInstance(zeitgeist_assets.get("data", {}).get("assets"), list)

@@ -138,6 +138,14 @@ class BlockersDocTests(unittest.TestCase):
         self.assertIn("`smarkets`", text)
         self.assertIn("written approval", text)
 
+    def test_omen_rows_document_history_scaling_and_ordering_limits(self) -> None:
+        text = BLOCKERS.read_text(encoding="utf-8")
+
+        self.assertIn("per-collateral indexed trade-size scaling", text)
+        self.assertIn("ambiguous same-second rejection", text)
+        self.assertIn("`omen_candle_trade_limit`", text)
+        self.assertIn("`gnosis_candle_trade_limit`", text)
+
 
 if __name__ == "__main__":
     unittest.main()

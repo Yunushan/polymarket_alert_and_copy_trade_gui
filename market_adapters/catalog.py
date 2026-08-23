@@ -255,6 +255,8 @@ OMEN_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -871,7 +873,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="omen",
         display_name="Omen",
         homepage_url="https://omen.eth.limo",
-        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, alerts, paper orders, and guarded externally signed live transactions.",
+        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, public FPMM trades, bounded derived candles, alerts, paper orders, and guarded externally signed live transactions.",
         capabilities=OMEN_CAPABILITIES,
     ),
     MarketMetadata(

@@ -42,6 +42,8 @@ def capability_contract_issues(adapter: MarketAdapter) -> tuple[str, ...]:
 
     if capabilities.get("market_discovery") and not capabilities.get("event_listing"):
         issues.append("market_discovery requires event_listing")
+    if capabilities.get("alerts") and not capabilities.get("price_reading"):
+        issues.append("alerts require price_reading for the shared price-trigger engine")
 
     for capability, method_names in CORE_CAPABILITY_METHODS.items():
         if not capabilities.get(capability, False):

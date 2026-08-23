@@ -54,6 +54,8 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         adapter = OmenAdapter(config)
         markets = load_fixture("omen", "fpmms")
         market = load_fixture("omen", "fpmm")
+        trades = load_fixture("omen", "trades")
+        token = load_fixture("omen", "token")
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
             self.assertEqual(method, "POST")
@@ -62,6 +64,17 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
                 return {"jsonrpc": "2.0", "id": 1, "result": "0x" + "ab" * 32}
             self.assertEqual(url, "https://example.test/omen")
             query = json_body["query"]
+            if "fpmmTrades" in query:
+                self.assertNotIn("creator", query)
+                self.assertEqual(json_body["variables"]["fpmm"], OMEN_FPMM_ID)
+                self.assertEqual(json_body["variables"]["outcomeIndex"], "0")
+                return trades
+            if "token(id" in query:
+                self.assertEqual(
+                    json_body["variables"]["id"],
+                    "0x0000000000000000000000000000000000000001",
+                )
+                return token
             if "fixedProductMarketMakers" in query:
                 return markets
             if "fixedProductMarketMaker" in query:
@@ -95,11 +108,24 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         adapter = GnosisPredictionMarketsAdapter({"gnosis_subgraph_url": "https://example.test/gnosis"})
         markets = load_fixture("gnosis_prediction_markets", "fpmms")
         market = load_fixture("gnosis_prediction_markets", "fpmm")
+        trades = load_fixture("gnosis_prediction_markets", "trades")
+        token = load_fixture("gnosis_prediction_markets", "token")
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
             self.assertEqual(method, "POST")
             self.assertEqual(url, "https://example.test/gnosis")
             query = json_body["query"]
+            if "fpmmTrades" in query:
+                self.assertNotIn("creator", query)
+                self.assertEqual(json_body["variables"]["fpmm"], OMEN_FPMM_ID)
+                self.assertEqual(json_body["variables"]["outcomeIndex"], "0")
+                return trades
+            if "token(id" in query:
+                self.assertEqual(
+                    json_body["variables"]["id"],
+                    "0x0000000000000000000000000000000000000001",
+                )
+                return token
             if "fixedProductMarketMakers" in query:
                 return markets
             if "fixedProductMarketMaker" in query:
@@ -201,7 +227,7 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         contracts = adapter.list_contracts(REALITY_QUESTION_ENTITY_ID)
 
         self.assertTrue(adapter.capabilities.market_discovery)
-        self.assertTrue(adapter.capabilities.alerts)
+        self.assertFalse(adapter.capabilities.alerts)
         self.assertFalse(adapter.capabilities.price_reading)
         self.assertTrue(health["question_schema_supported"])
         self.assertEqual(health["graphql_url_source"], "config:reality_eth_subgraph_url")
@@ -254,6 +280,138 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
                 PaperOrderRequest(market_id="omen", contract_id=f"{OMEN_FPMM_ID}:0", side="BUY", size=1)
             )
 
+    def test_omen_normalizes_public_fpmm_trades_and_derived_candles(self) -> None:
+        adapter = self.make_omen()
+
+        trades = adapter.list_trades(
+            f"{OMEN_FPMM_ID}:0",
+            limit=2,
+            after=1733316000,
+            before=1733316400,
+        )
+        candles = adapter.list_candles(
+            f"{OMEN_FPMM_ID}:0",
+            resolution="1h",
+            from_timestamp=1733316000,
+            to_timestamp=1733316400,
+        )
+
+        self.assertTrue(adapter.capabilities.trade_history)
+        self.assertTrue(adapter.capabilities.candle_history)
+        self.assertEqual([trade.trade_id for trade in trades], ["0xomentrade2", "0xomentrade1"])
+        self.assertEqual([trade.side for trade in trades], ["SELL", "BUY"])
+        self.assertAlmostEqual(trades[0].price, 3.8 / 6.0)
+        self.assertAlmostEqual(trades[0].size, 6.0)
+        self.assertEqual(trades[0].raw["source"], "omen_fpmm_trades")
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].timestamp, 1733313600.0)
+        self.assertAlmostEqual(candles[0].open, 0.6)
+        self.assertAlmostEqual(candles[0].close, 3.8 / 6.0)
+        self.assertAlmostEqual(candles[0].volume or 0.0, 10.0)
+        self.assertTrue(candles[0].raw["derived"])
+        self.assertEqual(candles[0].raw["trade_ids"], ["0xomentrade1", "0xomentrade2"])
+
+    def test_omen_history_validation_fails_closed(self) -> None:
+        adapter = self.make_omen()
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{OMEN_FPMM_ID}:0", limit=0)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{OMEN_FPMM_ID}:0", after=20, before=10)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(f"{OMEN_FPMM_ID}:0", resolution="2h")
+
+    def test_omen_uses_indexed_scale_for_each_collateral_token(self) -> None:
+        adapter = OmenAdapter({"omen_subgraph_url": "https://example.test/omen"})
+        fpmm_six = "0x" + "a" * 40
+        fpmm_eighteen = "0x" + "b" * 40
+        token_six = "0x" + "0" * 38 + "06"
+        token_eighteen = "0x" + "0" * 38 + "18"
+        token_queries = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(method, "POST")
+            query = json_body["query"]
+            variables = json_body["variables"]
+            if "fpmmTrades" in query:
+                fpmm = variables["fpmm"]
+                collateral_token = token_six if fpmm == fpmm_six else token_eighteen
+                scale = 10**6 if fpmm == fpmm_six else 10**18
+                return {
+                    "data": {
+                        "fpmmTrades": [
+                            {
+                                "id": f"{fpmm}-trade",
+                                "fpmm": {"id": fpmm},
+                                "collateralToken": collateral_token,
+                                "type": "Buy",
+                                "creationTimestamp": "1733316060",
+                                "collateralAmount": str(3 * scale),
+                                "outcomeIndex": "0",
+                                "outcomeTokensTraded": str(6 * scale),
+                                "transactionHash": "0x" + "1" * 64,
+                            }
+                        ]
+                    }
+                }
+            if "token(id" in query:
+                token_id = variables["id"]
+                token_queries.append(token_id)
+                return {
+                    "data": {
+                        "token": {
+                            "id": token_id,
+                            "scale": str(10**6 if token_id == token_six else 10**18),
+                        }
+                    }
+                }
+            raise AssertionError(f"unexpected Omen query: {query}")
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        six_decimal_trade = adapter.list_trades(f"{fpmm_six}:0", limit=1)[0]
+        eighteen_decimal_trade = adapter.list_trades(f"{fpmm_eighteen}:0", limit=1)[0]
+        adapter.list_trades(f"{fpmm_six}:0", limit=1)
+
+        self.assertEqual(six_decimal_trade.size, 6.0)
+        self.assertEqual(eighteen_decimal_trade.size, 6.0)
+        self.assertEqual(token_queries, [token_six, token_eighteen])
+
+    def test_omen_candles_reject_ambiguous_same_second_prices(self) -> None:
+        adapter = self.make_omen()
+        trades = load_fixture("omen", "trades")
+        token = load_fixture("omen", "token")
+        trades["data"]["fpmmTrades"][1]["creationTimestamp"] = trades["data"]["fpmmTrades"][0][
+            "creationTimestamp"
+        ]
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            query = json_body["query"]
+            if "fpmmTrades" in query:
+                return trades
+            if "token(id" in query:
+                return token
+            raise AssertionError(f"unexpected Omen query: {query}")
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with self.assertRaisesRegex(MarketConfigurationError, "same-second trades"):
+            adapter.list_candles(f"{OMEN_FPMM_ID}:0", resolution="1h")
+
+    def test_omen_trade_history_fails_closed_without_indexed_token_scale(self) -> None:
+        adapter = self.make_omen()
+        trades = load_fixture("omen", "trades")
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            query = json_body["query"]
+            if "fpmmTrades" in query:
+                return trades
+            if "token(id" in query:
+                return {"data": {"token": None}}
+            raise AssertionError(f"unexpected Omen query: {query}")
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with self.assertRaisesRegex(MarketConfigurationError, "token scale was not indexed"):
+            adapter.list_trades(f"{OMEN_FPMM_ID}:0", limit=1)
+
     def test_omen_guarded_live_order_forwards_reviewed_signed_fpmm_transaction(self) -> None:
         adapter = self.make_omen(
             {
@@ -288,6 +446,8 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         events = adapter.list_events("gnosis", limit=10)
         contracts = adapter.list_contracts(OMEN_FPMM_ID)
         price = adapter.get_price(f"{OMEN_FPMM_ID}:0")
+        trades = adapter.list_trades(f"{OMEN_FPMM_ID}:0", limit=2)
+        candles = adapter.list_candles(f"{OMEN_FPMM_ID}:0", resolution="1h")
         paper = adapter.place_paper_order(
             PaperOrderRequest(
                 market_id="gnosis_prediction_markets",
@@ -303,6 +463,10 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(len(contracts), 2)
         self.assertAlmostEqual(price.last or 0, 0.62)
+        self.assertEqual([trade.trade_id for trade in trades], ["0xgnosistrade2", "0xgnosistrade1"])
+        self.assertTrue(all(trade.market_id == "gnosis_prediction_markets" for trade in trades))
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].market_id, "gnosis_prediction_markets")
         self.assertTrue(paper.accepted)
 
         with self.assertRaises(UnsupportedFeatureError):

@@ -491,8 +491,9 @@
         "live_trading_enabled": false,
         "omen_rpc_url": "",
         "omen_submit_signed_transactions": false,
+        "omen_candle_trade_limit": 1000,
         "min_request_interval_seconds": 0.5,
-        "notes": "Market discovery, outcome listing, AMM marginal-price alerts, and local paper orders are implemented through the documented Omen FixedProductMarketMaker subgraph schema. Configure OMEN_SUBGRAPH_URL or omen_subgraph_url to a maintained GraphQL endpoint. Guarded live submission forwards only an externally signed buy/sell transaction after reviewed FPMM/side/outcome/calldata checks; it remains off by default and requires collateral approval and settlement handling."
+        "notes": "Market discovery, outcome listing, AMM marginal-price alerts, public FPMM trades, and bounded derived candles are implemented through the documented Omen subgraph schema. Trade size uses each collateral token's indexed scale; candle derivation rejects ambiguous same-second prices. Configure OMEN_SUBGRAPH_URL or omen_subgraph_url to a maintained GraphQL endpoint. Guarded live submission forwards only an externally signed buy/sell transaction after reviewed FPMM/side/outcome/calldata checks; it remains off by default and requires collateral approval and settlement handling."
       }
     },
     "polymarket": {
@@ -548,7 +549,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: no public official PrizePicks developer API for programmatic projections, entries, market data, or automation is published for this app."
+        "notes": "Verified 2026-08-23: PrizePicks identifies Kalshi as its event-contract provider, but no official machine-readable mapping from the venue-wide catalog to the current PrizePicks board or PrizePicks account/order automation API is published."
       }
     },
     "probo": {
@@ -624,7 +625,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Underdog is a consumer app with eligibility restrictions and no public official API or automation terms for third-party prediction/event-market integration."
+        "notes": "Verified 2026-08-23: Underdog identifies CDNA as its event-contract exchange, but no official machine-readable mapping from the venue-wide catalog to the current Underdog board or Underdog account/order automation API is published."
       }
     },
     "xo_market": {
@@ -797,7 +798,8 @@
         "credential_env_vars": ["GNOSIS_SUBGRAPH_URL", "OMEN_SUBGRAPH_URL"],
         "live_trading_enabled": false,
         "gnosis_submit_signed_transactions": false,
-        "notes": "Official Gnosis/Omen FixedProductMarketMaker GraphQL alias; configure a current Gnosis/Omen subgraph endpoint. Discovery, prices, alerts, paper orders, and a guarded externally signed buy/sell transaction boundary are supported; live submission remains off by default and CLOB depth, collateral approval, settlement, and copy trading remain unsupported."
+        "gnosis_candle_trade_limit": 1000,
+        "notes": "Official Gnosis/Omen FixedProductMarketMaker GraphQL alias; configure a current Gnosis/Omen subgraph endpoint. Discovery, prices, public FPMM trades, per-collateral indexed scaling, bounded derived candles with ambiguous same-second OHLC rejection, alerts, paper orders, and a guarded externally signed buy/sell transaction boundary are supported; live submission remains off by default and CLOB depth, collateral approval, settlement, and copy trading remain unsupported."
       }
     },
     "zeitgeist_sdk_markets": {
@@ -906,7 +908,7 @@
         "reality_eth_subgraph_url": "",
         "credential_env_vars": ["REALITY_ETH_SUBGRAPH_URL", "REALITYETH_SUBGRAPH_URL"],
         "live_trading_enabled": false,
-        "notes": "Official Reality.eth question-subgraph adapter; configure a current GraphQL endpoint. Question discovery, response-option listing, lifecycle alerts, and read-only metadata are supported. Prices, orderbooks, paper orders, and trading remain unsupported because Reality.eth is an oracle/question protocol."
+        "notes": "Official Reality.eth question-subgraph adapter; configure a current GraphQL endpoint. Question discovery, response-option listing, lifecycle status, and read-only metadata are supported. Prices, price-triggered alerts, orderbooks, paper orders, and trading remain unsupported because Reality.eth is an oracle/question protocol."
       }
     },
     "sportstrade": {

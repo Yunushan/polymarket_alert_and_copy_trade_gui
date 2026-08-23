@@ -132,6 +132,8 @@ GNOSIS_PREDICTION_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -166,7 +168,7 @@ REALITY_ETH_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=False,
     orderbook_reading=False,
-    alerts=True,
+    alerts=False,
     paper_trading=False,
     live_trading=False,
     copy_trading=False,
@@ -506,7 +508,7 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://omen.eth.limo",
         description=(
             "Official Gnosis/Omen FixedProductMarketMaker adapter for market discovery, outcome prices, "
-            "alerts, local paper orders, and guarded externally signed FPMM transactions; CLOB depth, "
+            "public FPMM trades, bounded derived candles, alerts, local paper orders, and guarded externally signed FPMM transactions; CLOB depth, "
             "collateral approval, settlement, and copy trading remain unsupported."
         ),
         capabilities=GNOSIS_PREDICTION_CAPABILITIES,
@@ -594,7 +596,7 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://reality.eth.limo",
         description=(
             "Official Reality.eth subgraph adapter for read-only question discovery, response-option listing, "
-            "and lifecycle alerts; prices, orderbooks, and trading are not part of the oracle protocol."
+            "and lifecycle status; prices, price-triggered alerts, orderbooks, and trading are not part of the oracle protocol."
         ),
         capabilities=REALITY_ETH_CAPABILITIES,
     ),

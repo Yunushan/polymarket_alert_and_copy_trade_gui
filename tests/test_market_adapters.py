@@ -188,6 +188,8 @@ HISTORY_CAPABILITIES = {
     "dflow": {"trade_history", "candle_history"},
     "drift_bet": {"trade_history", "candle_history"},
     "xo_market": {"trade_history", "candle_history"},
+    "omen": {"trade_history", "candle_history"},
+    "gnosis_prediction_markets": {"trade_history", "candle_history"},
 }
 
 
@@ -419,6 +421,19 @@ class AdapterFoundationTests(unittest.TestCase):
         for market_id in MARKET_IDS:
             with self.subTest(market_id=market_id):
                 self.assertEqual(capability_contract_issues(registry.create(market_id)), ())
+
+    def test_alert_capability_requires_normalized_price_reading(self) -> None:
+        class AlertWithoutPriceAdapter(MarketAdapter):
+            metadata = MarketMetadata(
+                market_id="alert_without_price",
+                display_name="Alert Without Price",
+                capabilities=MarketCapabilities(alerts=True),
+            )
+
+        self.assertEqual(
+            capability_contract_issues(AlertWithoutPriceAdapter()),
+            ("alerts require price_reading for the shared price-trigger engine",),
+        )
 
     def test_declared_authenticated_operations_have_cli_surfaces(self) -> None:
         import market_sentinel_cli

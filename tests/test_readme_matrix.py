@@ -190,6 +190,13 @@ class ReadmeCapabilityMatrixTests(unittest.TestCase):
             if any(f"`{market_id}`" in line for market_id in MARKET_IDS):
                 self.assertIn("| Stub |", line)
 
+    def test_readme_documents_omen_history_safety_boundaries(self) -> None:
+        text = README.read_text(encoding="utf-8")
+
+        self.assertIn("Omen/Gnosis public FPMM trades plus bounded derived candles", text)
+        self.assertIn("resolve each collateral token's indexed scale", text)
+        self.assertIn("reject ambiguous same-second OHLC", text)
+
 
 if __name__ == "__main__":
     unittest.main()

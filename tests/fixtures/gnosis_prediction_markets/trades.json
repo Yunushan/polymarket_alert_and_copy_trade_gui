@@ -1,0 +1,38 @@
+{
+  "data": {
+    "fpmmTrades": [
+      {
+        "id": "0xgnosistrade2",
+        "fpmm": {"id": "0xomenfpmm1"},
+        "title": "Sell",
+        "collateralToken": "0x0000000000000000000000000000000000000001",
+        "outcomeTokenMarginalPrice": "0.64",
+        "oldOutcomeTokenMarginalPrice": "0.62",
+        "type": "Sell",
+        "creationTimestamp": "1733316300",
+        "collateralAmount": "3800000000000000000",
+        "collateralAmountUSD": "3.8",
+        "feeAmount": "7600000000000000",
+        "outcomeIndex": "0",
+        "outcomeTokensTraded": "6000000000000000000",
+        "transactionHash": "0x2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "id": "0xgnosistrade1",
+        "fpmm": {"id": "0xomenfpmm1"},
+        "title": "Buy",
+        "collateralToken": "0x0000000000000000000000000000000000000001",
+        "outcomeTokenMarginalPrice": "0.62",
+        "oldOutcomeTokenMarginalPrice": "0.59",
+        "type": "Buy",
+        "creationTimestamp": "1733316060",
+        "collateralAmount": "2400000000000000000",
+        "collateralAmountUSD": "2.4",
+        "feeAmount": "4800000000000000",
+        "outcomeIndex": "0",
+        "outcomeTokensTraded": "4000000000000000000",
+        "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ]
+  }
+}

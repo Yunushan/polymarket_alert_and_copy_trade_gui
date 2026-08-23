@@ -34,25 +34,31 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     },
     "prizepicks": {
         "reason": (
-            "Verified 2026-05-26: PrizePicks exposes consumer fantasy/pick products and support pages, "
-            "but no public official developer API for programmatic projections, entries, market data, or "
-            "automation is published for this app."
+            "Verified 2026-08-23: PrizePicks documents that its event contracts are provided by Kalshi, but "
+            "neither party publishes a machine-readable mapping from the venue-wide Kalshi catalog to the "
+            "current PrizePicks board. Relabeling every Kalshi contract as PrizePicks would overstate support; "
+            "PrizePicks also publishes no account/order automation API for this app."
         ),
         "references": [
-            "https://www.prizepicks.com",
-            "https://www.prizepicks.com/helpcenter",
+            "https://www.prizepicks.com/press-news/prizepicks-launches-prediction-markets-offering-with-kalshi",
+            "https://www.prizepicks.com/playbook-article/prediction-markets-vs-sports-betting-differences-explained",
+            "https://docs.kalshi.com/getting_started/quick_start_market_data",
         ],
+        "last_reviewed": "2026-08-23",
     },
     "underdog_sports": {
         "reason": (
-            "Verified 2026-05-26: Underdog Sports/Fantasy is a consumer app with eligibility restrictions "
-            "and support documentation, but no public official API or automation terms are published for "
-            "third-party prediction/event-market integration."
+            "Verified 2026-08-23: Underdog identifies CDNA as its event-contract exchange, but no official "
+            "machine-readable mapping from the venue-wide CDNA catalog to the current Underdog board is "
+            "published. Relabeling every CDNA contract as Underdog would overstate support; no Underdog "
+            "account/order automation API is published for this app."
         ),
         "references": [
-            "https://www.underdogfantasy.com/",
-            "https://help.underdogfantasy.com/",
+            "https://legal.underdogsports.com/",
+            "https://data.crypto.com/docs",
+            "https://data.crypto.com/quickstart",
         ],
+        "last_reviewed": "2026-08-23",
     },
     "probo": {
         "reason": (

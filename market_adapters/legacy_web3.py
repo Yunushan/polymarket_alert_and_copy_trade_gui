@@ -9,7 +9,15 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
-from .types import MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import (
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
+    MarketTrade,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 DEFAULT_ZEITGEIST_INDEXER_URL = "https://processor.bsr.zeitgeist.pm/graphql"
@@ -659,6 +667,52 @@ class OmenAdapter(_GraphQLAdapter):
     }
     """
 
+    FPMM_TRADES_QUERY = """
+    query OmenTrades(
+      $first: Int!
+      $fpmm: String!
+      $outcomeIndex: BigInt!
+      $after: BigInt!
+      $before: BigInt!
+    ) {
+      fpmmTrades(
+        first: $first
+        orderBy: creationTimestamp
+        orderDirection: desc
+        where: {
+          fpmm: $fpmm
+          outcomeIndex: $outcomeIndex
+          creationTimestamp_gte: $after
+          creationTimestamp_lte: $before
+        }
+      ) {
+        id
+        fpmm { id }
+        title
+        collateralToken
+        outcomeTokenMarginalPrice
+        oldOutcomeTokenMarginalPrice
+        type
+        creationTimestamp
+        collateralAmount
+        collateralAmountUSD
+        feeAmount
+        outcomeIndex
+        outcomeTokensTraded
+        transactionHash
+      }
+    }
+    """
+
+    TOKEN_SCALE_QUERY = """
+    query OmenTokenScale($id: ID!) {
+      token(id: $id) {
+        id
+        scale
+      }
+    }
+    """
+
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
         url, source = self._graphql_url_with_source(required=False)
@@ -716,6 +770,186 @@ class OmenAdapter(_GraphQLAdapter):
             "orderbook_reading",
             "Omen uses FixedProductMarketMaker AMM pools and the documented subgraph exposes marginal prices, not CLOB depth.",
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return public Omen FPMM buys and sells from the official subgraph."""
+
+        self.ensure_capability("trade_history")
+        fpmm_id, outcome_index = self._split_contract_id(contract_id)
+        desired = self._history_limit(limit)
+        after_ts = self._history_timestamp(after, "after") if after is not None else 0
+        before_ts = (
+            self._history_timestamp(before, "before") if before is not None else 253_402_300_799
+        )
+        if before_ts < after_ts:
+            raise MarketConfigurationError("Omen trade history requires before to be at or after after.")
+
+        data = self._graphql(
+            self.FPMM_TRADES_QUERY,
+            {
+                "first": desired,
+                "fpmm": fpmm_id,
+                "outcomeIndex": str(outcome_index),
+                "after": str(after_ts),
+                "before": str(before_ts),
+            },
+        )
+        rows = data.get("fpmmTrades")
+        if not isinstance(rows, list):
+            return []
+
+        canonical = self._contract_id(fpmm_id, outcome_index)
+        trades: List[MarketTrade] = []
+        token_scales: Dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            row_fpmm = row.get("fpmm")
+            if isinstance(row_fpmm, Mapping):
+                row_fpmm = row_fpmm.get("id")
+            if str(row_fpmm or "").strip().casefold() != fpmm_id.casefold():
+                continue
+            try:
+                row_outcome = int(row.get("outcomeIndex"))
+            except (TypeError, ValueError):
+                continue
+            if row_outcome != outcome_index:
+                continue
+            side = str(row.get("type") or "").strip().upper()
+            if side not in {"BUY", "SELL"}:
+                continue
+            trade_id = str(row.get("id") or "").strip()
+            timestamp = self._optional_history_timestamp(row.get("creationTimestamp"))
+            collateral_token = self._collateral_token(row.get("collateralToken"))
+            if collateral_token is None:
+                continue
+            scale = token_scales.get(collateral_token)
+            if scale is None:
+                scale = self._token_scale(collateral_token)
+                token_scales[collateral_token] = scale
+            price, size = self._trade_price_and_size(row, token_scale=scale)
+            if not trade_id or timestamp is None or price is None or size is None:
+                continue
+            if timestamp < after_ts or timestamp > before_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw={"source": "omen_fpmm_trades", **dict(row)},
+                )
+            )
+
+        trades.sort(key=lambda trade: float(trade.timestamp or 0), reverse=True)
+        return trades[:desired]
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from the official FPMM trade tape."""
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        start_ts = (
+            self._history_timestamp(from_timestamp, "from_timestamp")
+            if from_timestamp is not None
+            else None
+        )
+        end_ts = (
+            self._history_timestamp(to_timestamp, "to_timestamp")
+            if to_timestamp is not None
+            else None
+        )
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError(
+                "Omen candle history requires to_timestamp to be at or after from_timestamp."
+            )
+
+        trades = self.list_trades(
+            contract_id,
+            limit=self._candle_trade_limit(),
+            before=end_ts,
+            after=start_ts,
+        )
+        timestamp_prices: Dict[float, float] = {}
+        for trade in trades:
+            if trade.timestamp is None:
+                continue
+            timestamp = float(trade.timestamp)
+            prior_price = timestamp_prices.get(timestamp)
+            if prior_price is not None and not math.isclose(
+                prior_price,
+                trade.price,
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            ):
+                raise MarketConfigurationError(
+                    "Omen cannot derive chronological OHLC from same-second trades with different prices; "
+                    "the official subgraph does not expose a block/log ordering key."
+                )
+            timestamp_prices[timestamp] = trade.price
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in sorted(trades, key=lambda item: float(item.timestamp or 0)):
+            if trade.timestamp is None:
+                continue
+            bucket_timestamp = int(float(trade.timestamp) // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {
+                    "open": trade.price,
+                    "high": trade.price,
+                    "low": trade.price,
+                    "close": trade.price,
+                    "volume": 0.0,
+                    "trade_ids": [],
+                },
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += trade.size
+            bucket["trade_ids"].append(trade.trade_id)
+
+        fpmm_id, outcome_index = self._split_contract_id(contract_id)
+        canonical = self._contract_id(fpmm_id, outcome_index)
+        normalized_resolution = str(resolution or "").strip().lower()
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "omen_fpmm_trades",
+                    "derived": True,
+                    "resolution": normalized_resolution,
+                    "interval_seconds": interval,
+                    "trade_ids": list(bucket["trade_ids"]),
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -979,6 +1213,128 @@ class OmenAdapter(_GraphQLAdapter):
         if not isinstance(raw, list):
             return []
         return [OmenAdapter._optional_probability(value) for value in raw]
+
+    @staticmethod
+    def _history_limit(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Omen trade limit must be an integer between 1 and 1000.") from exc
+        if parsed < 1 or parsed > 1000:
+            raise MarketConfigurationError("Omen trade limit must be between 1 and 1000.")
+        return parsed
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> int:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Omen {label} timestamp must be numeric epoch seconds.") from exc
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MarketConfigurationError(
+                f"Omen {label} timestamp must be a finite non-negative epoch second."
+            )
+        return int(parsed)
+
+    @staticmethod
+    def _optional_history_timestamp(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14_400,
+            "1d": 86_400,
+            "1w": 604_800,
+        }
+        normalized = str(resolution or "").strip().lower()
+        try:
+            return intervals[normalized]
+        except KeyError as exc:
+            raise MarketConfigurationError(
+                f"Omen candle resolution must be one of: {', '.join(intervals)}."
+            ) from exc
+
+    def _candle_trade_limit(self) -> int:
+        key = (
+            "gnosis_candle_trade_limit"
+            if self.market_id == "gnosis_prediction_markets"
+            else "omen_candle_trade_limit"
+        )
+        return self._history_limit(self.config.get(key, 1000))
+
+    @staticmethod
+    def _collateral_token(value: Any) -> Optional[str]:
+        token = str(value or "").strip().lower()
+        if not re.fullmatch(r"0x[0-9a-f]{40}", token):
+            return None
+        return token
+
+    def _token_scale(self, collateral_token: str) -> int:
+        cache = getattr(self, "_omen_token_scale_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._omen_token_scale_cache = cache
+        cached = cache.get(collateral_token)
+        if isinstance(cached, int):
+            return cached
+
+        data = self._graphql(self.TOKEN_SCALE_QUERY, {"id": collateral_token})
+        token = data.get("token")
+        if not isinstance(token, Mapping):
+            raise MarketConfigurationError(
+                f"{self.display_name} token scale was not indexed for collateral {collateral_token}."
+            )
+        returned_id = str(token.get("id") or "").strip().lower()
+        try:
+            scale = int(token.get("scale"))
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(
+                f"{self.display_name} token scale for collateral {collateral_token} was invalid."
+            ) from exc
+        if returned_id != collateral_token or scale <= 0 or scale > 10**30:
+            raise MarketConfigurationError(
+                f"{self.display_name} token scale for collateral {collateral_token} was invalid."
+            )
+        cache[collateral_token] = scale
+        return scale
+
+    def _trade_price_and_size(
+        self,
+        row: Mapping[str, Any],
+        *,
+        token_scale: int,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        try:
+            collateral = int(row.get("collateralAmount"))
+            outcome_tokens = int(row.get("outcomeTokensTraded"))
+        except (TypeError, ValueError):
+            return None, None
+        if (
+            collateral <= 0
+            or outcome_tokens <= 0
+            or collateral.bit_length() > 256
+            or outcome_tokens.bit_length() > 256
+        ):
+            return None, None
+        price = collateral / outcome_tokens
+        if not math.isfinite(price) or price <= 0 or price > 1:
+            return None, None
+        size = outcome_tokens / float(token_scale)
+        if not math.isfinite(size) or size <= 0:
+            return None, None
+        return price, size
 
     @staticmethod
     def _split_contract_id(contract_id: str) -> Tuple[str, int]:
