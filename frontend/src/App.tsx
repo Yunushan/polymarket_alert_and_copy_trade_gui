@@ -81,6 +81,7 @@ import {
   refreshPaperMarks,
   refreshPaperQuote,
   refreshSelectedPaperMark,
+  requestMarketPositionIntent,
   searchPolymarketUsers,
   submitPaperOrder,
   storePolymarketLiveValidationReport,
@@ -116,6 +117,8 @@ import type {
   MarketOrderbookPayload,
   MarketOrderManagementOperation,
   MarketOrderManagementPayload,
+  MarketPositionIntentPayload,
+  MarketPositionOperation,
   MarketPricePayload,
   MarketTradesPayload,
   MarketsPayload,
@@ -210,6 +213,12 @@ interface MarketReadForm {
   from: string;
   to: string;
   account_operation: MarketAccountOperation;
+  position_operation: MarketPositionOperation;
+  position_market_id: string;
+  position_amount: string;
+  position_network_id: string;
+  position_event_id: string;
+  position_outcome_index: string;
   order_management_operation: MarketOrderManagementOperation;
   order_management_market_id: string;
   order_management_market_slug: string;
@@ -256,6 +265,7 @@ interface MarketReadState {
   trades: MarketTradesPayload | null;
   candles: MarketCandlesPayload | null;
   account: MarketAccountPayload | null;
+  position_intent: MarketPositionIntentPayload | null;
   order_management: MarketOrderManagementPayload | null;
 }
 
@@ -488,6 +498,12 @@ function emptyMarketReadForm(): MarketReadForm {
     from: "",
     to: "",
     account_operation: "active_orders",
+    position_operation: "split",
+    position_market_id: "",
+    position_amount: "",
+    position_network_id: "",
+    position_event_id: "",
+    position_outcome_index: "",
     order_management_operation: "cancel_orders",
     order_management_market_id: "",
     order_management_market_slug: "",
@@ -536,6 +552,7 @@ function emptyMarketReadState(): MarketReadState {
     trades: null,
     candles: null,
     account: null,
+    position_intent: null,
     order_management: null
   };
 }
@@ -1048,6 +1065,46 @@ export default function App() {
           setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
         }
       }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setMarketReadBusy(null);
+    }
+  }
+
+  async function handleMarketPositionIntent() {
+    const marketId = selectedMarket?.market_id;
+    if (marketId !== "myriad_markets") {
+      setError("Unsigned position intents are currently available only for Myriad.");
+      return;
+    }
+    const form = marketReadForm;
+    const operation = form.position_operation;
+    if (!form.position_market_id.trim()) {
+      setError("Enter a Myriad on-chain market id.");
+      return;
+    }
+    if (["split", "merge", "neg_risk_split"].includes(operation) && !form.position_amount.trim()) {
+      setError("Enter an amount in the token's smallest unit.");
+      return;
+    }
+    if (["neg_risk_split", "neg_risk_merge"].includes(operation) && (!form.position_event_id.trim() || !form.position_outcome_index.trim())) {
+      setError("NegRisk operations require a bytes32 event id and outcome index.");
+      return;
+    }
+    setMarketReadBusy("position-intent");
+    setMarketReadMessage("");
+    setError(null);
+    try {
+      const payload = await requestMarketPositionIntent(marketId, operation, {
+        market_id: form.position_market_id.trim(),
+        amount: form.position_amount.trim() || undefined,
+        network_id: form.position_network_id.trim() || undefined,
+        event_id: form.position_event_id.trim() || undefined,
+        outcome_index: form.position_outcome_index.trim() || undefined
+      });
+      setMarketRead((current) => ({ ...current, position_intent: payload }));
+      setMarketReadMessage("Unsigned transaction calldata loaded for external review/signing.");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -2195,6 +2252,7 @@ export default function App() {
             marketReadMessage={marketReadMessage}
             markets={markets}
             onMarketOrderManagement={() => void handleMarketOrderManagement()}
+            onMarketPositionIntent={() => void handleMarketPositionIntent()}
             onQueryChange={setMarketQuery}
             onMarketRead={(action) => void handleMarketRead(action)}
             onMarketReadFormChange={(patch) => setMarketReadForm((current) => ({ ...current, ...patch }))}
@@ -2463,6 +2521,7 @@ function MarketsView({
   marketReadMessage,
   markets,
   onMarketOrderManagement,
+  onMarketPositionIntent,
   onMarketRead,
   onMarketReadFormChange,
   onQueryChange,
@@ -2481,6 +2540,7 @@ function MarketsView({
   marketReadMessage: string;
   markets: MarketsPayload | null;
   onMarketOrderManagement: () => void;
+  onMarketPositionIntent: () => void;
   onMarketRead: (action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles" | "account") => void;
   onMarketReadFormChange: (patch: Partial<MarketReadForm>) => void;
   onQueryChange: (value: string) => void;
@@ -3169,6 +3229,76 @@ function MarketsView({
               </button>
             ) : null}
           </div>
+          {selectedMarket.market_id === "myriad_markets" ? (
+            <div className="order-management-panel">
+              <div className="market-detail-main">
+                <div>
+                  <h4>Unsigned position transaction intent</h4>
+                  <p>Myriad returns calldata only. Review the target and calldata, then sign and submit through your external wallet.</p>
+                </div>
+                <StatusPill tone="neutral">preview only</StatusPill>
+              </div>
+              <div className="safety-grid">
+                <label>
+                  <span>Operation</span>
+                  <select
+                    value={marketReadForm.position_operation}
+                    onChange={(event) => onMarketReadFormChange({ position_operation: event.target.value as MarketPositionOperation })}
+                  >
+                    {(["split", "merge", "redeem", "redeem_voided", "neg_risk_split", "neg_risk_merge"] as const).map((operation) => (
+                      <option key={operation} value={operation}>{operation.replaceAll("_", " ")}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Market id</span>
+                  <input
+                    value={marketReadForm.position_market_id}
+                    onChange={(event) => onMarketReadFormChange({ position_market_id: event.target.value })}
+                    placeholder="On-chain id"
+                  />
+                </label>
+                <label>
+                  <span>Amount (base units)</span>
+                  <input
+                    value={marketReadForm.position_amount}
+                    onChange={(event) => onMarketReadFormChange({ position_amount: event.target.value })}
+                    placeholder="Required for split/merge"
+                  />
+                </label>
+                <label>
+                  <span>Network id</span>
+                  <input
+                    value={marketReadForm.position_network_id}
+                    onChange={(event) => onMarketReadFormChange({ position_network_id: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>NegRisk event id</span>
+                  <input
+                    value={marketReadForm.position_event_id}
+                    onChange={(event) => onMarketReadFormChange({ position_event_id: event.target.value })}
+                    placeholder="0x + 64 hex chars"
+                  />
+                </label>
+                <label>
+                  <span>Outcome index</span>
+                  <input
+                    value={marketReadForm.position_outcome_index}
+                    onChange={(event) => onMarketReadFormChange({ position_outcome_index: event.target.value })}
+                    placeholder="0–255"
+                  />
+                </label>
+                <button className="secondary-button" type="button" disabled={marketReadBusy !== null} onClick={onMarketPositionIntent}>
+                  Build unsigned calldata
+                </button>
+              </div>
+              {marketRead.position_intent ? (
+                <pre className="json-preview">{JSON.stringify(marketRead.position_intent.data, null, 2)}</pre>
+              ) : null}
+            </div>
+          ) : null}
           {selectedMarket.health.order_management_operations?.length ? (
             <div className="order-management-panel">
               <div className="market-detail-main">

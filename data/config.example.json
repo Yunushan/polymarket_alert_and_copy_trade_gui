@@ -351,7 +351,7 @@
         "live_trading_max_notional": 25.0,
         "myriad_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, bounded account_activity, portfolio, and market_positions reads from the public wallet endpoints, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all/batch-modify mutations are implemented through the official Myriad API. Live trading and order management stay disabled by default."
+        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, bounded account_activity, portfolio, and market_positions reads from the public wallet endpoints, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded unsigned split/merge/redeem transaction intents, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all/batch-modify mutations are implemented through the official Myriad API. Position intents never sign or submit on-chain; live trading and order management stay disabled by default."
       }
     },
     "kalshi": {

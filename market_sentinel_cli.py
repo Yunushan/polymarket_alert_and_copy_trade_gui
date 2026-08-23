@@ -1765,6 +1765,45 @@ def run_market_account(args: argparse.Namespace) -> int:
     )
 
 
+MYRIAD_POSITION_INTENT_OPERATIONS = (
+    "split",
+    "merge",
+    "redeem",
+    "redeem_voided",
+    "neg_risk_split",
+    "neg_risk_merge",
+)
+
+
+def run_market_position_intent(args: argparse.Namespace) -> int:
+    """Request an unsigned Myriad position transaction for external signing."""
+
+    _cfg, market_id, adapter = _market_read_context(args, "position transaction intent")
+    operation = str(args.operation or "").strip().lower()
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "position_intent_operations", ()))
+    if operation not in supported:
+        raise ValueError(
+            f"{market_id} does not support position operation {operation or '<empty>'}; "
+            f"supported: {', '.join(supported) or 'none'}."
+        )
+    payload = _json_arg(getattr(args, "json", None))
+    _put_optional(payload, "market_id", getattr(args, "position_market_id", None))
+    _put_optional(payload, "amount", getattr(args, "amount", None))
+    _put_optional(payload, "network_id", getattr(args, "network_id", None))
+    _put_optional(payload, "event_id", getattr(args, "event_id", None))
+    _put_optional(payload, "outcome_index", getattr(args, "outcome_index", None))
+    data = adapter.position_intent(operation, **payload)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "operation": operation,
+            "parameters": payload,
+            "data": data,
+        },
+    )
+
+
 BETFAIR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_orders", "update_orders", "replace_orders")
 KALSHI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")
 POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
@@ -2957,6 +2996,22 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--after", default=None, help="Optional Polymarket fill timestamp lower bound.")
     _add_json_output_args(market_account)
     market_account.set_defaults(func=run_market_account)
+
+    market_position = markets_sub.add_parser(
+        "position-intent",
+        parents=[common],
+        help="Request a documented unsigned position transaction for external wallet signing (Myriad).",
+    )
+    market_position.add_argument("operation", choices=MYRIAD_POSITION_INTENT_OPERATIONS)
+    market_position.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_position.add_argument("--market-id", dest="position_market_id", default=None, help="Myriad on-chain market id.")
+    market_position.add_argument("--amount", default=None, help="Unsigned collateral/share amount in token base units.")
+    market_position.add_argument("--network-id", default=None, help="Optional Myriad network id.")
+    market_position.add_argument("--event-id", default=None, help="NegRisk bytes32 event id for neg-risk operations.")
+    market_position.add_argument("--outcome-index", default=None, help="NegRisk outcome index (0-255).")
+    market_position.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
+    _add_json_output_args(market_position)
+    market_position.set_defaults(func=run_market_position_intent)
 
     market_orders = markets_sub.add_parser(
         "manage-orders",

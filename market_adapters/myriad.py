@@ -33,6 +33,14 @@ MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_all_orders",
     "batch_modify_orders",
 )
+MYRIAD_POSITION_INTENT_OPERATIONS = (
+    "split",
+    "merge",
+    "redeem",
+    "redeem_voided",
+    "neg_risk_split",
+    "neg_risk_merge",
+)
 MYRIAD_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 MYRIAD_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL MYRIAD ORDERS"
 MYRIAD_ORDER_MANAGEMENT_MAX_BATCH = 200
@@ -49,6 +57,7 @@ class MyriadAdapter(MarketAdapter):
     metadata = get_market_metadata("myriad_markets")
     account_recovery_operations = MYRIAD_ACCOUNT_OPERATIONS
     order_management_operations = MYRIAD_ORDER_MANAGEMENT_OPERATIONS
+    position_intent_operations = MYRIAD_POSITION_INTENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -76,6 +85,15 @@ class MyriadAdapter(MarketAdapter):
                     "GET /users/{address}/markets",
                 ],
                 "order_management_operations": list(self.order_management_operations),
+                "position_intent_operations": list(self.position_intent_operations),
+                "position_intent_endpoints": [
+                    "POST /positions/split",
+                    "POST /positions/merge",
+                    "POST /positions/redeem",
+                    "POST /positions/redeem-voided",
+                    "POST /positions/neg-risk/split",
+                    "POST /positions/neg-risk/merge",
+                ],
                 "order_management_enabled": self.config_bool("myriad_order_management_enabled", False),
                 "authenticated_order_management_endpoints": [
                     "/orders/{orderHash}",
@@ -412,6 +430,56 @@ class MyriadAdapter(MarketAdapter):
                 "body": request_body,
             },
             "response": response,
+        }
+
+    def position_intent(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Build a documented unsigned Myriad position transaction.
+
+        Myriad returns transaction calldata for split/merge/redeem flows; it
+        does not sign or submit the transaction. This boundary deliberately
+        returns a reviewable intent only, so wallet signing and on-chain
+        settlement remain outside the adapter.
+        """
+
+        normalized = self._position_operation(operation)
+        market_id = self._position_id(kwargs.get("market_id", kwargs.get("marketId")))
+        network_id = kwargs.get("network_id", kwargs.get("networkId", self.config.get("myriad_network_id")))
+        request_body: Dict[str, Any] = {"market_id": market_id}
+        if network_id not in (None, ""):
+            request_body["network_id"] = self._position_id(network_id, label="network_id")
+
+        if normalized in {"split", "merge"}:
+            request_body["amount"] = self._uint_string(kwargs.get("amount"), "amount")
+            request_path = f"/positions/{normalized}"
+        elif normalized in {"redeem", "redeem_voided"}:
+            request_path = "/positions/redeem-voided" if normalized == "redeem_voided" else "/positions/redeem"
+        else:
+            event_id = self._bytes32(kwargs.get("event_id", kwargs.get("eventId")), "event_id")
+            outcome_index = self._position_id(
+                kwargs.get("outcome_index", kwargs.get("outcomeIndex")),
+                label="outcome_index",
+                maximum=255,
+            )
+            request_body.update({"event_id": event_id, "outcome_index": outcome_index})
+            if normalized == "neg_risk_split":
+                request_body["amount"] = self._uint_string(kwargs.get("amount"), "amount")
+                request_path = "/positions/neg-risk/split"
+            else:
+                request_path = "/positions/neg-risk/merge"
+
+        payload = self._request_json("POST", request_path, body=request_body, auth=False)
+        transaction = self._position_transaction(payload)
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "endpoint": request_path,
+            "request": request_body,
+            "transaction": transaction,
+            "intent_only": True,
+            "signed": False,
+            "requires_external_signer": True,
+            "references": list(MYRIAD_REFERENCES),
+            "raw": payload,
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
@@ -875,6 +943,72 @@ class MyriadAdapter(MarketAdapter):
                 hashlib.sha256,
             ).hexdigest()
         return headers
+
+    @classmethod
+    def _position_operation(cls, value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_").replace("/", "_")
+        aliases = {
+            "redeem_voided": "redeem_voided",
+            "negrisk_split": "neg_risk_split",
+            "negrisk_merge": "neg_risk_merge",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.position_intent_operations:
+            raise MarketConfigurationError(
+                "Myriad position operation must be one of: "
+                + ", ".join(cls.position_intent_operations)
+                + "."
+            )
+        return normalized
+
+    @staticmethod
+    def _position_id(value: Any, *, label: str = "market_id", maximum: int = 2_147_483_647) -> int:
+        if isinstance(value, bool) or value in (None, ""):
+            raise MarketConfigurationError(f"Myriad position {label} is required.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Myriad position {label} must be an integer.") from exc
+        if parsed < 0 or parsed > maximum:
+            raise MarketConfigurationError(f"Myriad position {label} must be between 0 and {maximum}.")
+        if label != "outcome_index" and parsed == 0:
+            raise MarketConfigurationError(f"Myriad position {label} must be positive.")
+        return parsed
+
+    @staticmethod
+    def _uint_string(value: Any, label: str, *, allow_zero: bool = False) -> str:
+        if isinstance(value, bool) or value in (None, ""):
+            raise MarketConfigurationError(f"Myriad position {label} is required.")
+        text = str(value).strip()
+        if not re.fullmatch(r"[0-9]+", text):
+            raise MarketConfigurationError(f"Myriad position {label} must be an unsigned integer string.")
+        normalized = text.lstrip("0") or "0"
+        if len(normalized) > 78 or int(normalized) > (2**256 - 1):
+            raise MarketConfigurationError(f"Myriad position {label} is outside the uint256 range.")
+        if normalized == "0" and not allow_zero:
+            raise MarketConfigurationError(f"Myriad position {label} must be positive.")
+        return normalized
+
+    @staticmethod
+    def _bytes32(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", text):
+            raise MarketConfigurationError(f"Myriad position {label} must be a 32-byte 0x-prefixed hex value.")
+        return text
+
+    @staticmethod
+    def _position_transaction(payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise MarketHTTPError("Myriad position endpoint returned a non-object transaction payload.")
+        target = str(payload.get("to") or "").strip()
+        calldata = str(payload.get("calldata") or "").strip()
+        value = payload.get("value")
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", target):
+            raise MarketHTTPError("Myriad position transaction target was not a canonical EVM address.")
+        if not re.fullmatch(r"0x[0-9a-fA-F]*", calldata) or len(calldata[2:]) % 2:
+            raise MarketHTTPError("Myriad position transaction calldata was not canonical hex.")
+        normalized_value = MyriadAdapter._uint_string(value, "transaction value", allow_zero=True) if value not in (None, "") else "0"
+        return {"to": target, "calldata": calldata, "value": normalized_value}
 
     @classmethod
     def _order_path_id(cls, value: Any) -> str:

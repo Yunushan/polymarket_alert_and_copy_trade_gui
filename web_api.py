@@ -327,6 +327,7 @@ API_ROUTES = {
         "/api/wallets/poll",
         "/api/copy/preview",
         "/api/live-safety/preflight",
+        "/api/markets/{market_id}/positions",
         "/api/markets/{market_id}/orders/{operation}",
         "/api/paper/quote",
         "/api/paper/quote-limit",
@@ -3905,6 +3906,39 @@ def market_account_payload(
     }
 
 
+def market_position_intent_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Request an unsigned, reviewable position transaction from a venue."""
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "position transaction intent")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    operation = str(payload.get("operation") or "").strip().lower()
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "position_intent_operations", ()))
+    if operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "position_intent",
+            f"{normalized_market_id} does not support position operation {operation or '<empty>'}. "
+            f"Supported operations: {', '.join(supported) or 'none'}.",
+        )
+    kwargs: Dict[str, Any] = {}
+    for key in ("market_id", "marketId", "amount", "network_id", "networkId", "event_id", "eventId", "outcome_index", "outcomeIndex"):
+        if key in payload:
+            kwargs[key] = payload.get(key)
+    data = adapter.position_intent(operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": operation,
+        "parameters": kwargs,
+        "data": data,
+    }
+
+
 def market_order_management_payload(
     cfg: AppConfig,
     registry: AdapterRegistry,
@@ -4842,6 +4876,17 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             cfg = self._load_config()
             if method == "POST":
                 order_route = path.strip("/").split("/")
+                if len(order_route) == 4 and order_route[:2] == ["api", "markets"] and order_route[3] == "positions":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_position_intent_payload(
+                            cfg,
+                            self.app_server.adapter_registry,
+                            unquote(order_route[2]),
+                            payload,
+                        ),
+                    )
+                    return
                 if len(order_route) == 5 and order_route[:2] == ["api", "markets"] and order_route[3] == "orders":
                     self._send_json(
                         HTTPStatus.OK,

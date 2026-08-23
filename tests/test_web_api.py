@@ -60,6 +60,7 @@ from web_api import (
     markets_payload,
     market_candles_payload,
     market_account_payload,
+    market_position_intent_payload,
     market_order_management_payload,
     market_contracts_payload,
     market_events_payload,
@@ -644,6 +645,53 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
         with self.assertRaises(UnsupportedFeatureError):
             market_account_payload(cfg, Registry(), "gemini_titan", "arbitrary", {})
+
+    def test_market_position_intent_payload_forwards_allowlisted_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad",
+            capabilities=MarketCapabilities(live_trading=True),
+        )
+        adapter.position_intent_operations = ("split", "neg_risk_split")  # type: ignore[attr-defined]
+        calls = []
+
+        def position_intent(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"intent_only": True}
+
+        adapter.position_intent = position_intent  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        payload = market_position_intent_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            {
+                "operation": "neg_risk_split",
+                "market_id": "501",
+                "amount": "1000",
+                "network_id": "56",
+                "event_id": "0x" + "ab" * 32,
+                "outcome_index": 2,
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "neg_risk_split")
+        self.assertEqual(calls, [("neg_risk_split", {
+            "market_id": "501",
+            "amount": "1000",
+            "network_id": "56",
+            "event_id": "0x" + "ab" * 32,
+            "outcome_index": 2,
+        })])
+        with self.assertRaises(UnsupportedFeatureError):
+            market_position_intent_payload(cfg, Registry(), "myriad_markets", {"operation": "redeem"})
 
     def test_ibkr_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
         adapter = MarketAdapter({})

@@ -2639,6 +2639,44 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.account_recovery("market_positions", wallet=wallet, topics="bad/topic")
 
+    def test_myriad_position_intents_validate_and_return_unsigned_calldata(self) -> None:
+        adapter = MyriadAdapter({"myriad_network_id": 56})
+        response = load_fixture("myriad_markets", "position_intent")
+        calls = []
+
+        def fake_request(method: str, url: str, **kwargs):
+            calls.append((method, url, kwargs))
+            self.assertEqual(method, "POST")
+            self.assertEqual(kwargs["json"]["network_id"], 56)
+            self.assertNotIn("Authorization", kwargs["headers"])
+            return FakeResponse(response)
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        split = adapter.position_intent("split", market_id="501", amount="1000000000000000000")
+        self.assertEqual(split["endpoint"], "/positions/split")
+        self.assertTrue(split["intent_only"])
+        self.assertFalse(split["signed"])
+        self.assertEqual(split["transaction"]["value"], "0")
+        self.assertEqual(split["request"]["amount"], "1000000000000000000")
+
+        neg = adapter.position_intent(
+            "neg-risk-split",
+            market_id=501,
+            event_id="0x" + "ab" * 32,
+            outcome_index=2,
+            amount="7",
+        )
+        self.assertEqual(neg["endpoint"], "/positions/neg-risk/split")
+        self.assertEqual(neg["request"]["outcome_index"], 2)
+        self.assertEqual(len(calls), 2)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.position_intent("split", market_id=501, amount="0")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.position_intent("neg_risk_merge", market_id=501, event_id="0x" + "ab" * 32)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.position_intent("neg_risk_merge", market_id=501, event_id="0x00", outcome_index=0)
+
     def test_opinion_adapter_requires_key_and_maps_market_data(self) -> None:
         adapter = OpinionAdapter()
         markets = load_fixture("opinion_labs", "markets")

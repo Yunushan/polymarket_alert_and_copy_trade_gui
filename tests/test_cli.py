@@ -575,6 +575,42 @@ class MarketSentinelCliTests(unittest.TestCase):
             },
         ))
 
+    def test_myriad_position_intent_command_forwards_unsigned_request(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        calls = []
+
+        def position_intent(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs, "intent_only": True}
+
+        adapter = SimpleNamespace(
+            position_intent_operations=("split", "merge", "redeem", "redeem_voided", "neg_risk_split", "neg_risk_merge"),
+            position_intent=position_intent,
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets", "position-intent", "neg_risk_split", "--market", "myriad_markets",
+                        "--market-id", "501", "--amount", "1000", "--network-id", "56",
+                        "--event-id", "0x" + "ab" * 32, "--outcome-index", "2", "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls, [("neg_risk_split", {
+            "market_id": "501",
+            "amount": "1000",
+            "network_id": "56",
+            "event_id": "0x" + "ab" * 32,
+            "outcome_index": "2",
+        })])
+
     def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
         cfg = SimpleNamespace(selected_market_id="myriad_markets")
         calls = []

@@ -208,6 +208,21 @@ export interface MarketAccountPayload {
   data: unknown;
 }
 
+export type MarketPositionOperation =
+  | "split"
+  | "merge"
+  | "redeem"
+  | "redeem_voided"
+  | "neg_risk_split"
+  | "neg_risk_merge";
+
+export interface MarketPositionIntentPayload {
+  market_id: string;
+  operation: MarketPositionOperation;
+  parameters: Record<string, unknown>;
+  data: unknown;
+}
+
 export type MarketOrderManagementOperation =
   | "cancel_orders"
   | "cancel_all_orders"
