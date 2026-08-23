@@ -913,6 +913,52 @@ class WebApiTests(unittest.TestCase):
             ],
         )
 
+    def test_myriad_account_activity_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad Markets",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("account_activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "account_activity",
+            {
+                "address": ["0x0000000000000000000000000000000000000001"],
+                "limit": ["10"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "account_activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 10,
+                    },
+                )
+            ],
+        )
+
     def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

@@ -1387,6 +1387,7 @@ IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
 MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
 PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = ("balance", "transactions")
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
+MYRIAD_ACCOUNT_OPERATIONS = ("account_activity",)
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1405,6 +1406,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + MANIFOLD_ACCOUNT_OPERATIONS
         + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
         + AZURO_ACCOUNT_OPERATIONS
+        + MYRIAD_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1662,6 +1664,11 @@ def run_market_account(args: argparse.Namespace) -> int:
             "wallet": str(getattr(args, "wallet", "") or "").strip(),
             "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
             "offset": _cli_clamp_int(getattr(args, "offset", "0"), 0, 0, 1_000_000),
+        }
+    elif market_id == "myriad_markets":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 25, 1, 100),
         }
     elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
         kwargs = {
@@ -2887,7 +2894,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--bet-id", default="", help="Betfair bet id filter.")
     market_account.add_argument("--group-by", default="BET", help="Betfair cleared-order roll-up.")
     market_account.add_argument("--include-item-description", action="store_true")
-    market_account.add_argument("--wallet", default="", help="Betfair account wallet or Predict.fun positions address.")
+    market_account.add_argument("--wallet", default="", help="Betfair account wallet, Predict.fun address, or Myriad activity wallet.")
     market_account.add_argument("--locale", default="en", help="Betfair account-statement locale.")
     market_account.add_argument("--exclude-item", action="store_true", help="Exclude item details from Betfair statements.")
     market_account.add_argument("--from-currency", default="", help="Betfair source currency for currency_rates.")

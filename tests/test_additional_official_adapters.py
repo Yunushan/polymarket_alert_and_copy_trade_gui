@@ -2532,11 +2532,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         adapter = MyriadAdapter({"myriad_network_id": 56})
         events = load_fixture("myriad_markets", "user_events")
+        request_limits = []
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertTrue(url.endswith(f"/users/{wallet}/events"))
             self.assertEqual(params["page"], 1)
-            self.assertEqual(params["limit"], 25)
+            request_limits.append(params["limit"])
             self.assertEqual(params["trading_model"], "all")
             self.assertEqual(params["only_relevant"], "true")
             self.assertEqual(params["network_id"], 56)
@@ -2557,6 +2558,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(sell["size"], 4.0)
         self.assertAlmostEqual(sell["price"], 0.39)
 
+        recovered = adapter.account_recovery("account_activity", wallet=wallet, limit=10)
+        self.assertEqual(adapter.health_check()["account_recovery_operations"], ["account_activity"])
+        self.assertEqual(recovered["source"], "myriad_user_event_feed")
+        self.assertEqual(recovered["wallet"], wallet)
+        self.assertEqual(recovered["limit"], 10)
+        self.assertIs(recovered["raw"], events)
+        self.assertEqual(len(recovered["activities"]), 2)
+        self.assertEqual(request_limits, [25, 10])
+
         result = adapter.copy_trade_from_activity(sell)
         self.assertTrue(result.accepted)
         self.assertEqual(result.raw["request"]["action"], "sell")
@@ -2564,6 +2574,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_activity("not-a-wallet")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("unsupported", wallet=wallet)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("account_activity", wallet=wallet, limit=101)
 
     def test_opinion_adapter_requires_key_and_maps_market_data(self) -> None:
         adapter = OpinionAdapter()

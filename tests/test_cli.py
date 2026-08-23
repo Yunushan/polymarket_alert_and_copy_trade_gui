@@ -453,6 +453,56 @@ class MarketSentinelCliTests(unittest.TestCase):
             ],
         )
 
+    def test_myriad_account_activity_command_forwards_wallet_and_bounds(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("account_activity",),
+            account_recovery=account_recovery,
+        )
+        stdout = io.StringIO()
+        patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "account_activity",
+                        "--market",
+                        "myriad_markets",
+                        "--wallet",
+                        "0x0000000000000000000000000000000000000001",
+                        "--limit",
+                        "10",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 10,
+                    },
+                )
+            ],
+        )
+
     def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
         cfg = SimpleNamespace(selected_market_id="myriad_markets")
         calls = []

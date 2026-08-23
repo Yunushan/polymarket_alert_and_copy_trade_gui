@@ -25,6 +25,7 @@ from .types import (
 
 
 DEFAULT_MYRIAD_BASE_URL = "https://api-v2.myriadprotocol.com"
+MYRIAD_ACCOUNT_OPERATIONS = ("account_activity",)
 MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
     "batch_cancel_orders",
@@ -45,6 +46,7 @@ class MyriadAdapter(MarketAdapter):
     """Myriad Markets adapter using the documented public protocol API."""
 
     metadata = get_market_metadata("myriad_markets")
+    account_recovery_operations = MYRIAD_ACCOUNT_OPERATIONS
     order_management_operations = MYRIAD_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
@@ -66,6 +68,8 @@ class MyriadAdapter(MarketAdapter):
                 "activity_feed_supported": bool(self.capabilities.copy_trading),
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "public_account_endpoints": ["GET /users/{address}/events"],
                 "order_management_operations": list(self.order_management_operations),
                 "order_management_enabled": self.config_bool("myriad_order_management_enabled", False),
                 "authenticated_order_management_endpoints": [
@@ -444,7 +448,43 @@ class MyriadAdapter(MarketAdapter):
 
         self.ensure_capability("copy_trading")
         wallet = require_activity_identity(self.market_id, wallet_address)
-        desired = max(1, min(int(limit or 25), 100))
+        desired = self._bounded_activity_limit(limit)
+        payload = self._fetch_activity_payload(wallet, desired)
+        return self._normalize_activity_payload(wallet, payload, desired)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read Myriad's documented public wallet activity feed.
+
+        This is a public, wallet-scoped activity read rather than an
+        authenticated account endpoint.  The shared account surface still
+        uses an explicit operation allow-list so callers cannot turn a
+        wallet value into an arbitrary upstream path.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "Myriad account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+        self.ensure_capability("copy_trading")
+        wallet = require_activity_identity(
+            self.market_id,
+            kwargs.get("wallet") or kwargs.get("address"),
+        )
+        desired = self._bounded_activity_limit(kwargs.get("limit", 25), strict=True)
+        payload = self._fetch_activity_payload(wallet, desired)
+        return {
+            "source": "myriad_user_event_feed",
+            "endpoint": "/users/{address}/events",
+            "wallet": wallet,
+            "limit": desired,
+            "activities": self._normalize_activity_payload(wallet, payload, desired),
+            "raw": payload,
+        }
+
+    def _fetch_activity_payload(self, wallet: str, desired: int) -> Any:
         params: Dict[str, Any] = {
             "page": 1,
             "limit": desired,
@@ -460,8 +500,16 @@ class MyriadAdapter(MarketAdapter):
         market_slug = str(self.config.get("myriad_activity_market_slug") or "").strip()
         if market_slug:
             params["market_slug"] = market_slug
-        payload = self._get(f"/users/{wallet}/events", params=params)
+        return self._get(f"/users/{wallet}/events", params=params)
+
+    def _normalize_activity_payload(
+        self,
+        wallet: str,
+        payload: Any,
+        desired: int,
+    ) -> List[Dict[str, Any]]:
         activities: List[Dict[str, Any]] = []
+        network_id = self.config.get("myriad_activity_network_id", self.config.get("myriad_network_id"))
         configured_network = str(network_id).strip() if network_id not in (None, "") else ""
         for event in self._activity_rows(payload):
             action = str(event.get("action") or "").strip().lower()
@@ -476,6 +524,18 @@ class MyriadAdapter(MarketAdapter):
                 # A malformed public event must never become an order intent.
                 continue
         return activities[:desired]
+
+    @staticmethod
+    def _bounded_activity_limit(value: Any, *, strict: bool = False) -> int:
+        if value in (None, ""):
+            return 25
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Myriad account activity limit must be an integer.") from exc
+        if strict and (parsed < 1 or parsed > 100):
+            raise MarketConfigurationError("Myriad account activity limit must be between 1 and 100.")
+        return max(1, min(parsed, 100))
 
     def _activity_from_event(self, wallet: str, event: Mapping[str, Any]) -> Dict[str, Any]:
         market_id = str(event.get("marketId") or event.get("market_id") or "").strip()
