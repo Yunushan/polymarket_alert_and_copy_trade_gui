@@ -6,6 +6,7 @@ import hmac
 import json
 import re
 import time
+from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -44,6 +45,7 @@ MYRIAD_POSITION_INTENT_OPERATIONS = (
 MYRIAD_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 MYRIAD_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL MYRIAD ORDERS"
 MYRIAD_ORDER_MANAGEMENT_MAX_BATCH = 200
+MYRIAD_ORDER_SCALE = Decimal(10**18)
 MYRIAD_REFERENCES = (
     "https://docs.myriad.markets/builders/myriad-api-reference",
     "https://docs.myriad.markets/builders/myriad-order-book",
@@ -341,6 +343,7 @@ class MyriadAdapter(MarketAdapter):
         self._validate_order(order)
         preflight = self.preflight_live_order(order)
         payload = self._live_order_payload(order)
+        self._validate_live_order_binding(order, payload)
         response = self._post("/orders", payload)
         return {
             "market_id": self.market_id,
@@ -1403,6 +1406,14 @@ class MyriadAdapter(MarketAdapter):
         return payload
 
     def _live_order_payload(self, order: PaperOrderRequest) -> Dict[str, Any]:
+        expected_network = self._configured_live_network_id()
+        requested_network = order.metadata.get("network_id", order.metadata.get("networkId"))
+        if requested_network not in (None, "") and self._positive_int(
+            requested_network, "live order network_id"
+        ) != expected_network:
+            raise MarketConfigurationError(
+                "Myriad live order network_id does not match the trusted configured network."
+            )
         existing = order.metadata.get("myriad_order_payload") or order.metadata.get("signed_order_payload")
         if isinstance(existing, Mapping):
             return dict(existing)
@@ -1417,10 +1428,78 @@ class MyriadAdapter(MarketAdapter):
             "signature": signature,
             "time_in_force": str(order.metadata.get("time_in_force") or self.config.get("myriad_time_in_force") or "GTC"),
         }
-        network_id = order.metadata.get("network_id", self.config.get("myriad_network_id"))
-        if network_id not in (None, ""):
-            payload["network_id"] = network_id
+        payload["network_id"] = expected_network
         return payload
+
+    def _validate_live_order_binding(
+        self,
+        order: PaperOrderRequest,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Bind the complete EIP-712 order to the preflighted Myriad intent."""
+
+        entry = self._signed_entry(payload, cancel=False)
+        signed_order = entry["order"]
+        expected_network = self._configured_live_network_id()
+        network_values = [
+            payload[key]
+            for key in ("network_id", "networkId")
+            if payload.get(key) not in (None, "")
+        ]
+        if not network_values:
+            raise MarketConfigurationError(
+                "Myriad signed live payload requires network_id matching the trusted configured network."
+            )
+        if any(
+            self._positive_int(value, "signed live payload network_id") != expected_network
+            for value in network_values
+        ):
+            raise MarketConfigurationError(
+                "Myriad signed live payload network_id does not match the trusted configured network."
+            )
+        market_id, outcome_id = self._split_contract_id(order.contract_id)
+        expected_market = self._positive_int(market_id, "contract market id", allow_zero=True)
+        expected_outcome = self._positive_int(outcome_id, "contract outcome id", allow_zero=True)
+        signed_market = self._positive_int(
+            signed_order.get("marketId"), "signed order marketId", allow_zero=True
+        )
+        if signed_market != expected_market:
+            raise MarketConfigurationError(
+                "Myriad signed order marketId does not match the requested contract."
+            )
+        if int(signed_order["outcomeId"]) != expected_outcome:
+            raise MarketConfigurationError(
+                "Myriad signed order outcomeId does not match the requested contract."
+            )
+
+        expected_side = 0 if str(order.side).upper() == "BUY" else 1
+        if int(signed_order["side"]) != expected_side:
+            raise MarketConfigurationError(
+                "Myriad signed order side does not match the requested side."
+            )
+
+        signed_size = Decimal(str(signed_order["amount"])) / MYRIAD_ORDER_SCALE
+        if signed_size != Decimal(str(order.size)):
+            raise MarketConfigurationError(
+                "Myriad signed order amount does not match the requested size."
+            )
+        if order.limit_price is None:
+            raise MarketConfigurationError(
+                "Myriad live orders require a reviewed limit price to bind the signed price."
+            )
+        signed_price = Decimal(str(signed_order["price"])) / MYRIAD_ORDER_SCALE
+        if signed_price != Decimal(str(order.limit_price)):
+            raise MarketConfigurationError(
+                "Myriad signed order price does not match the requested limit price."
+            )
+
+    def _configured_live_network_id(self) -> int:
+        value = self.config.get("myriad_network_id")
+        if value in (None, ""):
+            raise MarketConfigurationError(
+                "Myriad live orders require a trusted myriad_network_id configuration."
+            )
+        return self._positive_int(value, "configured live network_id")
 
     def _validate_order(self, order: PaperOrderRequest) -> None:
         self.ensure_order_market(order)

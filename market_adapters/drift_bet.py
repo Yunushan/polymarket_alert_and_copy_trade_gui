@@ -9,7 +9,15 @@ from urllib.parse import urlsplit
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
-from .types import MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import (
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
+    MarketTrade,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 DEFAULT_DRIFT_BET_API_BASE_URL = "https://data.api.drift.trade"
@@ -54,6 +62,10 @@ class DriftBetAdapter(MarketAdapter):
                     "Configure drift_bet_market_symbols; the public OpenAPI contract exposes per-symbol BET "
                     "records but no stable market-list endpoint."
                 ),
+                "trade_history_source": "public_prediction_fill_records",
+                "history_retention_days": 31,
+                "history_page_limit": 20,
+                "candle_history_derived": True,
                 "live_trading_supported": False,
                 "live_trading_enabled": False,
                 "wallet_transaction_required": True,
@@ -143,6 +155,161 @@ class DriftBetAdapter(MarketAdapter):
             source="drift_data_api_predictions",
             raw={"record": dict(latest), "yes_price": yes_price, "outcome": outcome},
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return bounded public fills from Drift's BET prediction feed.
+
+        The official endpoint is newest-first, returns at most 20 records, and
+        retains the latest 31 days.  ``before``/``after`` are therefore local
+        filters over that bounded page rather than claims of unbounded history.
+        Taker LONG/SHORT direction is expressed as BUY/SELL for YES and
+        inverted for the complementary NO contract.
+        """
+
+        self.ensure_capability("trade_history")
+        symbol, outcome = self._split_contract_id(contract_id)
+        self._spec_for_symbol(symbol)
+        desired = self._history_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Drift BET trade history requires before to be at or after after.")
+
+        canonical = self._contract_id(symbol, outcome)
+        trades: List[MarketTrade] = []
+        for record in self._predictions(symbol):
+            row_symbol = str(record.get("symbol") or "").strip()
+            if row_symbol and row_symbol.lower() != symbol.lower():
+                continue
+            market_type = str(record.get("marketType") or "").strip().lower()
+            # BET contracts are prediction-contract perp markets.  Some older
+            # fixtures/consumers used a prediction-specific label, so accept
+            # those aliases while retaining the protocol's real ``perp`` form.
+            if market_type and market_type not in {"perp", "bet", "prediction"}:
+                continue
+            action = str(record.get("action") or "").strip().lower()
+            if action and action != "fill":
+                continue
+            timestamp = self._timestamp_seconds(record.get("ts"))
+            if timestamp is None:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            yes_price = self._prediction_price(record)
+            size = self._prediction_size(record)
+            trade_id = self._prediction_trade_id(record)
+            yes_side = self._prediction_side(record)
+            if yes_price is None or size is None or not trade_id or yes_side is None:
+                continue
+            side = yes_side if outcome == "YES" else ("SELL" if yes_side == "BUY" else "BUY")
+            price = yes_price if outcome == "YES" else 1.0 - yes_price
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw={
+                        "record": dict(record),
+                        "yes_price": yes_price,
+                        "yes_side": yes_side,
+                        "outcome": outcome,
+                        "source": "drift_data_api_predictions",
+                        "retention_days": 31,
+                    },
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from Drift's documented BET fills."""
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        start_ts = (
+            self._history_timestamp(from_timestamp, "from_timestamp")
+            if from_timestamp is not None
+            else None
+        )
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError(
+                "Drift BET candle history requires to_timestamp to be at or after from_timestamp."
+            )
+
+        trades = self.list_trades(
+            contract_id,
+            limit=self._candle_trade_limit(),
+            before=end_ts,
+            after=start_ts,
+        )
+        buckets: Dict[int, Dict[str, Any]] = {}
+        indexed_trades = list(enumerate(trades))
+        for _source_index, trade in sorted(indexed_trades, key=self._candle_trade_order_key):
+            if trade.timestamp is None:
+                continue
+            bucket_timestamp = int(float(trade.timestamp) // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {
+                    "open": trade.price,
+                    "high": trade.price,
+                    "low": trade.price,
+                    "close": trade.price,
+                    "volume": 0.0,
+                    "trade_ids": [],
+                },
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += max(0.0, float(trade.size))
+            bucket["trade_ids"].append(trade.trade_id)
+
+        symbol, outcome = self._split_contract_id(contract_id)
+        canonical = self._contract_id(symbol, outcome)
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "drift_data_api_predictions",
+                    "derived": True,
+                    "retention_days": 31,
+                    "resolution": str(resolution or "").strip().lower(),
+                    "interval_seconds": interval,
+                    "trade_ids": list(bucket["trade_ids"]),
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
 
     def get_orderbook(self, contract_id: str):
         raise UnsupportedFeatureError(
@@ -293,10 +460,131 @@ class DriftBetAdapter(MarketAdapter):
             return None
         if not math.isfinite(quote) or not math.isfinite(base) or base <= 0:
             return None
-        ratio = quote / base
+        # Drift's protocol records use BASE_PRECISION=1e9 and
+        # QUOTE_PRECISION=1e6.  Apply those units explicitly; magnitude-based
+        # detection is ambiguous for small raw fills and large formatted ones.
+        ratio = (quote / 1_000_000.0) / (base / 1_000_000_000.0)
         if 0 < ratio < 1:
             return ratio
         return None
+
+    @staticmethod
+    def _prediction_size(record: Mapping[str, Any]) -> Optional[float]:
+        try:
+            base = abs(float(record.get("baseAssetAmountFilled")))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(base) or base <= 0:
+            return None
+        size = base / 1_000_000_000.0
+        return size if math.isfinite(size) and size > 0 else None
+
+    @staticmethod
+    def _candle_trade_order_key(item: Tuple[int, MarketTrade]) -> Tuple[float, float, float, int]:
+        """Order newest-first feed rows chronologically for OHLC derivation."""
+
+        source_index, trade = item
+        record = trade.raw.get("record") if isinstance(trade.raw, Mapping) else None
+        row = record if isinstance(record, Mapping) else {}
+
+        def numeric(value: Any) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return -1.0
+            return parsed if math.isfinite(parsed) else -1.0
+
+        # The endpoint is newest-first.  Timestamp, slot, and event index give
+        # chronological ordering when present; reverse source position is the
+        # deterministic fallback for otherwise indistinguishable rows.
+        return (
+            float(trade.timestamp or 0.0),
+            numeric(row.get("slot")),
+            numeric(row.get("txSigIndex")),
+            -source_index,
+        )
+
+    @staticmethod
+    def _prediction_side(record: Mapping[str, Any]) -> Optional[str]:
+        direction = str(record.get("takerOrderDirection") or "").strip().lower()
+        if direction in {"long", "buy"}:
+            return "BUY"
+        if direction in {"short", "sell"}:
+            return "SELL"
+        return None
+
+    @staticmethod
+    def _prediction_trade_id(record: Mapping[str, Any]) -> str:
+        fill_id = str(record.get("fillRecordId") or "").strip()
+        if fill_id:
+            return fill_id
+        signature = str(record.get("txSig") or "").strip()
+        index = record.get("txSigIndex")
+        return f"{signature}:{index}" if signature and index not in (None, "") else ""
+
+    @staticmethod
+    def _history_limit(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Drift BET trade limit must be an integer.") from exc
+        return max(1, min(parsed, 20))
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Drift BET {label} timestamp must be numeric epoch seconds.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(
+                f"Drift BET {label} timestamp must be a finite non-negative epoch second."
+            )
+        return timestamp
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(timestamp) or timestamp < 0:
+            return None
+        return timestamp / 1000.0 if timestamp > 10_000_000_000 else timestamp
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+            "1w": 604800,
+        }
+        normalized = str(resolution or "").strip().lower()
+        try:
+            return intervals[normalized]
+        except KeyError as exc:
+            raise MarketConfigurationError(
+                f"Drift BET candle resolution must be one of: {', '.join(intervals)}."
+            ) from exc
+
+    def _candle_trade_limit(self) -> int:
+        raw_limit = self.config.get("drift_bet_candle_trade_limit", 20)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(
+                "Drift BET candle trade limit must be an integer between 1 and 20."
+            ) from exc
+        if limit < 1 or limit > 20:
+            raise MarketConfigurationError("Drift BET candle trade limit must be between 1 and 20.")
+        return limit
 
     @staticmethod
     def _probability(value: Any) -> Optional[float]:

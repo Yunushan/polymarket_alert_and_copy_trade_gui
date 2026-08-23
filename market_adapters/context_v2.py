@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -403,12 +404,24 @@ class ContextV2Adapter(MarketAdapter):
         if price is None:
             price = 0.5
         size = float(order.size)
+        expected_side = 0 if str(order.side).upper() == "BUY" else 1
+        expected_price = round(price * 1_000_000)
+        expected_size = round(size * 1_000_000)
+        if signed:
+            self._validate_signed_order_binding(
+                payload,
+                market_id=market_id,
+                outcome_index=outcome_index,
+                side=expected_side,
+                price=expected_price,
+                size=expected_size,
+            )
         payload.setdefault("type", "limit")
         payload.setdefault("marketId", market_id)
         payload.setdefault("outcomeIndex", outcome_index)
-        payload.setdefault("side", 0 if str(order.side).upper() == "BUY" else 1)
-        payload.setdefault("price", str(round(price * 1_000_000)))
-        payload.setdefault("size", str(round(size * 1_000_000)))
+        payload.setdefault("side", expected_side)
+        payload.setdefault("price", str(expected_price))
+        payload.setdefault("size", str(expected_size))
         payload.setdefault("expiry", "0")
         payload.setdefault("maxFee", "0")
         payload.setdefault("makerRoleConstraint", 0)
@@ -421,9 +434,87 @@ class ContextV2Adapter(MarketAdapter):
                 raise MarketConfigurationError(
                     "Context live orders require signed payload fields 'trader' and 'signature'."
                 )
+            cls_trader = trader[2:] if trader.startswith("0x") else ""
+            if len(cls_trader) != 40 or any(
+                character not in "0123456789abcdefABCDEF" for character in cls_trader
+            ):
+                raise MarketConfigurationError(
+                    "Context signed order trader must be a 20-byte 0x-prefixed address."
+                )
+            self._validate_hex_signature(signature)
             payload["trader"] = trader
             payload["signature"] = signature
         return payload
+
+    @classmethod
+    def _validate_signed_order_binding(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        market_id: str,
+        outcome_index: int,
+        side: int,
+        price: int,
+        size: int,
+    ) -> None:
+        """Reject a signature whose economic fields differ from preflight."""
+
+        order_type = payload.get("type")
+        if order_type not in (None, "") and str(order_type).strip().lower() != "limit":
+            raise MarketConfigurationError(
+                "Context signed order type does not match the preflighted limit order."
+            )
+        required_fields = ("marketId", "outcomeIndex", "side", "price", "size")
+        missing = [field for field in required_fields if payload.get(field) in (None, "")]
+        if missing:
+            raise MarketConfigurationError(
+                "Context signed order is missing preflight-bound fields: " + ", ".join(missing) + "."
+            )
+        if not cls._identifiers_match(payload["marketId"], market_id):
+            raise MarketConfigurationError(
+                "Context signed order marketId does not match the preflighted contract."
+            )
+        for field, expected, label in (
+            ("outcomeIndex", outcome_index, "outcomeIndex"),
+            ("side", side, "side"),
+            ("price", price, "price"),
+            ("size", size, "size"),
+        ):
+            if cls._wire_integer(payload[field], f"signed order {label}") != expected:
+                raise MarketConfigurationError(
+                    f"Context signed order {label} does not match the preflighted order."
+                )
+
+    @staticmethod
+    def _validate_hex_signature(value: Any) -> None:
+        signature = str(value or "").strip()
+        body = signature[2:] if signature.startswith("0x") else ""
+        if not body or len(body) % 2 or any(
+            character not in "0123456789abcdefABCDEF" for character in body
+        ):
+            raise MarketConfigurationError(
+                "Context signed order signature must be an even-length 0x-prefixed hexadecimal value."
+            )
+
+    @staticmethod
+    def _identifiers_match(value: Any, expected: str) -> bool:
+        actual = str(value or "").strip()
+        canonical = str(expected or "").strip()
+        if actual.lower().startswith("0x") and canonical.lower().startswith("0x"):
+            return actual.lower() == canonical.lower()
+        return actual == canonical
+
+    @staticmethod
+    def _wire_integer(value: Any, label: str) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Context {label} must be an integer.")
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Context {label} must be an integer.") from exc
+        if not number.is_finite() or number != number.to_integral_value():
+            raise MarketConfigurationError(f"Context {label} must be an integer.")
+        return int(number)
 
     @staticmethod
     def _bounded_limit(value: Any, *, maximum: int, label: str) -> int:

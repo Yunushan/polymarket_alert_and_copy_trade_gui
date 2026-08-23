@@ -114,7 +114,7 @@
         "context_api_base_url": "https://api.context.markets/v2",
         "credential_env_vars": ["CONTEXT_API_KEY"],
         "live_trading_enabled": false,
-        "notes": "Official Context v2 market, price, orderbook, alerts, paper-order, and guarded externally signed-order paths are implemented. Live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates."
+        "notes": "Official Context v2 market, price, orderbook, alerts, paper-order, and guarded externally signed-order paths are implemented. Signed market, outcome, side, price, and size fields must match the preflighted request before transport. Live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates."
       }
     },
     "crypto_com_predict": {
@@ -149,7 +149,7 @@
         "drift_bet_market_symbols": [],
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Official Drift Data API BET prediction reads, configured-symbol discovery, alerts, and dry-run orders are implemented. Configure drift_bet_market_symbols or DRIFT_BET_MARKET_SYMBOLS explicitly; the public OpenAPI contract has no stable market-list endpoint. Binary orderbooks, wallet-signed live orders, settlement, and copy trading remain unsupported."
+        "notes": "Official Drift Data API BET prediction reads, public fill history, bounded derived candles, configured-symbol discovery, alerts, and dry-run orders are implemented. Configure drift_bet_market_symbols or DRIFT_BET_MARKET_SYMBOLS explicitly; the public OpenAPI contract has no stable market-list endpoint and retains only the latest 31 days (20 records per page). Binary orderbooks, wallet-signed live orders, settlement, and copy trading remain unsupported."
       }
     },
     "fact_machine": {
@@ -344,6 +344,7 @@
       "settings": {
         "adapter_status": "implemented",
         "myriad_api_base_url": "https://api-v2.myriadprotocol.com",
+        "myriad_network_id": 56,
         "credential_env_vars": [
           "MYRIAD_API_KEY",
           "MYRIAD_API_SECRET",
@@ -355,7 +356,7 @@
         "live_trading_max_notional": 25.0,
         "myriad_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Official grouped event/market discovery via /markets?group_by_event=true and /events/{id}, outcome price reads, orderbooks, alerts, bounded account_activity, portfolio, and market_positions reads from the public wallet endpoints, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded unsigned split/merge/redeem transaction intents, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all/batch-modify mutations are implemented through the official Myriad API. Position intents never sign or submit on-chain; live trading and order management stay disabled by default."
+        "notes": "Official grouped event/market discovery via /markets?group_by_event=true and /events/{id}, outcome price reads, orderbooks, alerts, bounded account_activity, portfolio, and market_positions reads from the public wallet endpoints, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded unsigned split/merge/redeem transaction intents, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all/batch-modify mutations are implemented through the official Myriad API. Signed network, market, outcome, side, 1e18-scaled amount, and price must match shared preflight and the trusted configured network before submission. Position intents never sign or submit on-chain; live trading and order management stay disabled by default."
       }
     },
     "kalshi": {
@@ -538,7 +539,7 @@
         "predict_fun_order_management_enabled": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Market discovery, outcome listing, orderbook-derived prices, public order-match trade history, timeseries point-candles, authenticated account/order/activity/position recovery, local paper orders, and guarded signed order submission are implemented through the official Predict.fun REST API. Relay-only order removal is disabled by default, requires JWT credentials plus the shared live-safety gates and exact operator confirmation, and does not invalidate orders on-chain; copy trading remains unsupported."
+        "notes": "Market discovery, outcome listing, orderbook-derived prices, public order-match trade history, timeseries point-candles, authenticated account/order/activity/position recovery, simulation-first activity copy previews, local paper orders, and guarded signed LIMIT-order submission are implemented through the official Predict.fun REST API. Signed outcome token, side, 1e18-scaled size, and price must match shared preflight; market-order, fill-or-kill, minimum-output, and nonzero-slippage payload semantics fail closed. Relay-only order removal is disabled by default, requires JWT credentials plus the shared live-safety gates and exact operator confirmation, and does not invalidate orders on-chain; automatic or live copy execution remains unsupported."
       }
     },
     "prizepicks": {
@@ -673,8 +674,10 @@
       "settings": {
         "adapter_status": "implemented",
         "credential_env_vars": ["PROB_ADDRESS", "PROB_API_KEY", "PROB_API_SECRET", "PROB_PASSPHRASE"],
+        "probable_chain_id": 56,
+        "probable_amount_decimals": 18,
         "live_trading_enabled": false,
-        "notes": "Official Probable market/CLOB discovery, prices, orderbooks, alerts, paper orders, and guarded externally signed-order submission are implemented. Live execution requires credentials, a signed order, BSC account readiness, and explicit opt-in."
+        "notes": "Official Probable market/CLOB discovery, prices, orderbooks, alerts, paper orders, and guarded externally signed-order submission are implemented. Signed token, side, price, and size must match shared preflight using the trusted collateral precision; BNB mainnet defaults to 18 decimals and other chains require an explicit reviewed scale. Live execution requires credentials, a signed order, BSC account readiness, and explicit opt-in."
       }
     },
     "kalshi_via_robinhood": {

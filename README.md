@@ -570,7 +570,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | BetMGM (`betmgm`) | Implemented | Yes | Yes | Yes | No | No | Required | Account/API token required | Region/KYC limited |
 | PrizePicks (`prizepicks`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Underdog Sports (`underdog_sports`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Drift BET (`drift_bet`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
+| Drift BET (`drift_bet`) | Implemented | Yes | Yes (public fills; bounded derived candles) | Yes | No | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
 | Thales Market (`thales_market`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | Hedgehog Markets (`hedgehog_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | Omen (`omen`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Subgraph endpoint required | Jurisdiction varies |

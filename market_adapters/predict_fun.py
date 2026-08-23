@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -47,6 +48,7 @@ PREDICT_FUN_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDE
 PREDICT_FUN_MAX_ORDER_BATCH = 100
 PREDICT_FUN_STATUS_VALUES = {"OPEN", "FILLED", "CANCELLED", "CANCELED", "EXPIRED", "MATCHED"}
 PREDICT_FUN_POSITION_SORT_VALUES = {"VALUE_DESC", "VALUE_ASC", "UPDATED_DESC", "UPDATED_ASC"}
+PREDICT_FUN_ORDER_SCALE = Decimal(10**18)
 
 
 class PredictFunAdapter(MarketAdapter):
@@ -465,6 +467,7 @@ class PredictFunAdapter(MarketAdapter):
         self._validate_order(order)
         preflight = self.preflight_live_order(order)
         payload = self._live_order_payload(order)
+        self._validate_live_order_binding(order, payload)
         response = self._request_json("POST", "/orders", payload)
         return {
             "market_id": self.market_id,
@@ -966,6 +969,164 @@ class PredictFunAdapter(MarketAdapter):
         elif "slippageBps" in order.metadata:
             data["slippageBps"] = str(order.metadata["slippageBps"])
         return {"data": data}
+
+    def _validate_live_order_binding(
+        self,
+        order: PaperOrderRequest,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Bind an externally signed Predict order to the reviewed order intent.
+
+        Predict's EIP-712 order identifies the selected market outcome through
+        ``tokenId`` and encodes side/quantity/price in the signed maker/taker
+        amounts.  Those signed fields must agree with the outer request that
+        passed the shared live-order preflight; the adapter never rewrites them
+        because doing so would invalidate the external signature.
+        """
+
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise MarketConfigurationError("Predict.fun live payload requires a data object.")
+        signed_order = data.get("order")
+        if not isinstance(signed_order, Mapping):
+            raise MarketConfigurationError("Predict.fun live payload requires data.order with a signed order.")
+
+        strategy = str(data.get("strategy") or "").strip().upper()
+        if strategy != "LIMIT":
+            raise MarketConfigurationError(
+                "Predict.fun live payload strategy must be LIMIT; market-order semantics are not bound by this adapter."
+            )
+        for field in ("isFillOrKill", "isMinAmountOut"):
+            if not self._wire_default_false(data.get(field), field):
+                raise MarketConfigurationError(
+                    f"Predict.fun live payload {field} must remain false for a preflighted limit order."
+                )
+        slippage = data.get("slippageBps")
+        if slippage not in (None, ""):
+            try:
+                slippage_number = Decimal(str(slippage))
+            except (InvalidOperation, ValueError) as exc:
+                raise MarketConfigurationError(
+                    "Predict.fun live payload slippageBps must be numeric."
+                ) from exc
+            if not slippage_number.is_finite() or slippage_number != 0:
+                raise MarketConfigurationError(
+                    "Predict.fun live payload slippageBps must be zero for a preflighted limit order."
+                )
+
+        market_id, outcome = self._split_contract_id(order.contract_id)
+        market = self._get_market(market_id)
+        if self._market_id(market) != market_id:
+            raise MarketConfigurationError(
+                "Predict.fun signed order market does not match the requested contract."
+            )
+        for container in (payload, data, signed_order):
+            explicit_market = container.get("marketId", container.get("market_id"))
+            if explicit_market not in (None, "") and str(explicit_market).strip() != market_id:
+                raise MarketConfigurationError(
+                    "Predict.fun signed order market does not match the requested contract."
+                )
+        expected_token = self._outcome_token_id(market, outcome)
+        signed_token = self._wire_uint(signed_order.get("tokenId"), "tokenId")
+        if signed_token != expected_token:
+            raise MarketConfigurationError(
+                "Predict.fun signed order tokenId does not match the requested outcome."
+            )
+        signature = str(signed_order.get("signature") or "").strip()
+        if not signature.startswith("0x") or len(signature) <= 2 or any(
+            character not in "0123456789abcdefABCDEF" for character in signature[2:]
+        ):
+            raise MarketConfigurationError(
+                "Predict.fun signed order requires a hexadecimal 0x-prefixed signature."
+            )
+
+        signed_side = self._wire_uint(signed_order.get("side"), "side")
+        expected_side = 0 if str(order.side).upper() == "BUY" else 1
+        if signed_side != expected_side:
+            raise MarketConfigurationError(
+                "Predict.fun signed order side does not match the requested side."
+            )
+
+        maker_amount = self._wire_uint(signed_order.get("makerAmount"), "makerAmount")
+        taker_amount = self._wire_uint(signed_order.get("takerAmount"), "takerAmount")
+        if maker_amount <= 0 or taker_amount <= 0:
+            raise MarketConfigurationError("Predict.fun signed order amounts must be positive.")
+        share_amount = taker_amount if signed_side == 0 else maker_amount
+        signed_size = Decimal(share_amount) / PREDICT_FUN_ORDER_SCALE
+        if signed_size != Decimal(str(order.size)):
+            raise MarketConfigurationError(
+                "Predict.fun signed order size does not match the requested size."
+            )
+
+        if order.limit_price is None:
+            raise MarketConfigurationError(
+                "Predict.fun live orders require a reviewed limit price to bind the signed price."
+            )
+        signed_price = (
+            Decimal(maker_amount) / Decimal(taker_amount)
+            if signed_side == 0
+            else Decimal(taker_amount) / Decimal(maker_amount)
+        )
+        wire_price = self._wire_probability(data.get("pricePerShare"), "pricePerShare")
+        requested_price = Decimal(str(order.limit_price))
+        if not self._decimal_close(signed_price, requested_price) or not self._decimal_close(
+            wire_price, requested_price
+        ):
+            raise MarketConfigurationError(
+                "Predict.fun signed order price does not match the requested limit price."
+            )
+
+    @classmethod
+    def _outcome_token_id(cls, market: Mapping[str, Any], requested: str) -> int:
+        for outcome in cls._outcomes_from_market(market):
+            if not cls._outcome_matches(outcome, requested):
+                continue
+            token = outcome.get("onChainId")
+            if token in (None, ""):
+                break
+            return cls._wire_uint(token, "outcome onChainId")
+        raise MarketConfigurationError(
+            "Predict.fun market did not expose an on-chain token for the requested outcome."
+        )
+
+    @staticmethod
+    def _wire_uint(value: Any, label: str) -> int:
+        text = str(value if value is not None else "").strip()
+        if isinstance(value, bool) or not text.isdigit():
+            raise MarketConfigurationError(f"Predict.fun signed order {label} must be an unsigned integer.")
+        return int(text)
+
+    @staticmethod
+    def _wire_probability(value: Any, label: str) -> Decimal:
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise MarketConfigurationError(f"Predict.fun live payload {label} must be numeric.") from exc
+        if not number.is_finite() or number <= 0:
+            raise MarketConfigurationError(f"Predict.fun live payload {label} must be positive and finite.")
+        if number > 1:
+            number /= PREDICT_FUN_ORDER_SCALE
+        if number > 1:
+            raise MarketConfigurationError(f"Predict.fun live payload {label} must represent a probability.")
+        return number
+
+    @staticmethod
+    def _wire_default_false(value: Any, label: str) -> bool:
+        if value in (None, "", False, 0, "0"):
+            return True
+        if isinstance(value, str) and value.strip().lower() == "false":
+            return True
+        if value in (True, 1, "1") or (
+            isinstance(value, str) and value.strip().lower() == "true"
+        ):
+            return False
+        raise MarketConfigurationError(
+            f"Predict.fun live payload {label} must be a boolean."
+        )
+
+    @staticmethod
+    def _decimal_close(left: Decimal, right: Decimal) -> bool:
+        return abs(left - right) <= Decimal("1e-12")
 
     @staticmethod
     def _market_id(market: Mapping[str, Any]) -> str:

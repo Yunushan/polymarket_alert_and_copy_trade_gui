@@ -493,6 +493,8 @@ DRIFT_BET_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     # The public Drift BET data API is read-only.  Live execution still
@@ -839,7 +841,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://www.drift.trade",
         description=(
             "Official Drift Data API adapter for explicitly configured BET market symbols, prediction prices, "
-            "alerts, and dry-run orders; binary orderbooks, wallet-signed live orders, and copy trading remain disabled."
+            "public fills, bounded derived candles, alerts, and dry-run orders; binary orderbooks, wallet-signed "
+            "live orders, and copy trading remain disabled."
         ),
         capabilities=DRIFT_BET_CAPABILITIES,
     ),

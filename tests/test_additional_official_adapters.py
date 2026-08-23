@@ -1369,10 +1369,17 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             return FakeResponse(load_fixture("context_v2", "order_response"))
 
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        live_adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
         signed_order = {
+            "type": "limit",
+            "marketId": market_id,
+            "outcomeIndex": 0,
+            "side": 0,
+            "price": "440000",
+            "size": "5000000",
             "trader": "0x3333333333333333333333333333333333333333",
             "nonce": "0x1",
-            "signature": "0xsignature",
+            "signature": "0x" + "ab" * 65,
         }
         with patch.dict("os.environ", {"CONTEXT_API_KEY": "context-key"}):
             result = live_adapter.place_live_order(
@@ -1880,20 +1887,21 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             return FakeResponse(order_response)
 
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        live_adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
         signed_order = {
             "salt": "1",
             "maker": "0x0000000000000000000000000000000000000001",
             "signer": "0x0000000000000000000000000000000000000001",
             "taker": "0x0000000000000000000000000000000000000000",
             "tokenId": "token-yes",
-            "makerAmount": "220",
-            "takerAmount": "500",
+            "makerAmount": "2200000000000000000",
+            "takerAmount": "5000000000000000000",
             "expiration": "0",
             "nonce": "0",
             "feeRateBps": "0",
             "side": 0,
             "signatureType": 0,
-            "signature": "0xsig",
+            "signature": "0x" + "ab" * 65,
         }
         live_order = PaperOrderRequest(
             "probable",
@@ -2517,8 +2525,18 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     20,
                     0.62,
                     {
-                        "order": {"trader": "0xabc", "marketId": "501", "outcomeId": 1},
-                        "signature": "0xsig",
+                        "order": {
+                            "trader": "0x" + "11" * 20,
+                            "marketId": "501",
+                            "outcomeId": 1,
+                            "side": 0,
+                            "amount": "20000000000000000000",
+                            "price": "620000000000000000",
+                            "minFillAmount": "0",
+                            "nonce": "1",
+                            "expiration": "0",
+                        },
+                        "signature": "0x" + "ab" * 65,
                     },
                 )
             )
@@ -3135,6 +3153,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             calls.append((method, url, json, headers, timeout))
             return FakeResponse(load_fixture("predict_fun", "order_response"))
 
+        market["data"]["outcomes"][0]["onChainId"] = "111"
+        market["data"]["outcomes"][1]["onChainId"] = "222"
+        live_adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
         with patch.dict("os.environ", {"PREDICT_FUN_API_KEY": "predict-key"}):
             result = live_adapter.place_live_order(
@@ -3146,12 +3167,16 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     0.56,
                     {
                         "order": {
-                            "hash": "0xhash",
-                            "maker": "0xmaker",
-                            "tokenId": "token-yes",
-                            "signature": "0xsig",
-                        },
-                        "slippage_bps": 25,
+                            "hash": "0x" + "12" * 32,
+                            "maker": "0x" + "11" * 20,
+                            "signer": "0x" + "11" * 20,
+                            "taker": "0x" + "00" * 20,
+                            "tokenId": "111",
+                            "makerAmount": "2800000000000000000",
+                            "takerAmount": "5000000000000000000",
+                            "side": 0,
+                            "signature": "0x" + "ab" * 65,
+                        }
                     },
                 )
             )

@@ -25,8 +25,53 @@ class BlinqAdapterTests(unittest.TestCase):
         self.assertFalse(health["blinq_wallet_api_supported"])
         self.assertFalse(health["live_trading_supported"])
         self.assertFalse(health["copy_trading_supported"])
+        self.assertFalse(health["capabilities"]["credentials_required"])
+        self.assertEqual(health["account_recovery_operations"], [])
         self.assertEqual(health["order_management_operations"], [])
         self.assertTrue(health["trade_history_requires_l2_auth"])
+        self.assertEqual(
+            health["credential_requirement"],
+            "optional_readonly_l2_trade_history_only",
+        )
+        self.assertEqual(health["authenticated_readonly_market_data_endpoints"], ["GET /trades"])
+        self.assertNotIn("authenticated_account_endpoints", health)
+        self.assertNotIn("clob_auth_readiness", health)
+
+    def test_private_polymarket_account_recovery_does_not_leak_into_alias(self) -> None:
+        adapter = BlinqAdapter()
+
+        self.assertEqual(adapter.account_recovery_operations, ())
+        with patch("market_adapters.polymarket.clob_auth.get_trades") as get_trades:
+            with self.assertRaises(UnsupportedFeatureError) as ctx:
+                adapter.account_recovery("fills", contract_id="blinq-token-yes")
+
+        get_trades.assert_not_called()
+        self.assertEqual(ctx.exception.market_id, "blinq")
+        self.assertEqual(ctx.exception.feature, "account_recovery")
+        self.assertIn("Blinq private account recovery", str(ctx.exception))
+        self.assertIn("trade-history reads", str(ctx.exception))
+
+    def test_direct_private_polymarket_account_getters_fail_closed(self) -> None:
+        adapter = BlinqAdapter()
+
+        with patch("market_adapters.polymarket.clob_auth.get_orders") as get_orders, patch(
+            "market_adapters.polymarket.clob_auth.get_order"
+        ) as get_order, patch("market_adapters.polymarket.clob_auth.get_trades") as get_trades:
+            operations = (
+                ("orders", lambda: adapter.get_account_orders(contract_id="blinq-token-yes")),
+                ("order", lambda: adapter.get_account_order("0x" + "12" * 32)),
+                ("fills", lambda: adapter.get_account_fills(contract_id="blinq-token-yes")),
+            )
+            for label, operation in operations:
+                with self.subTest(operation=label):
+                    with self.assertRaises(UnsupportedFeatureError) as ctx:
+                        operation()
+                    self.assertEqual(ctx.exception.market_id, "blinq")
+                    self.assertEqual(ctx.exception.feature, "account_recovery")
+
+        get_orders.assert_not_called()
+        get_order.assert_not_called()
+        get_trades.assert_not_called()
 
     def test_lists_polymarket_contracts_for_blinq_market(self) -> None:
         adapter = BlinqAdapter()

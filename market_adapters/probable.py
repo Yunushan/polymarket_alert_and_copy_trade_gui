@@ -7,6 +7,7 @@ import json
 import math
 import re
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -881,28 +882,177 @@ class ProbableAdapter(MarketAdapter):
     def _live_order_payload(self, order: PaperOrderRequest) -> Dict[str, Any]:
         existing = order.metadata.get("probable_payload")
         if isinstance(existing, Mapping):
-            return dict(existing)
-        signed_order = order.metadata.get("signed_order") or order.metadata.get("order")
+            payload = dict(existing)
+            signed_order = payload.get("order")
+            if not isinstance(signed_order, Mapping):
+                raise MarketConfigurationError(
+                    "Probable order.metadata['probable_payload'] must contain a signed 'order' object."
+                )
+        else:
+            payload = {}
+            signed_order = order.metadata.get("signed_order") or order.metadata.get("order")
         if not isinstance(signed_order, Mapping):
             raise MarketConfigurationError(
                 "Probable live orders require order.metadata['signed_order'] with an EIP-712 signature."
             )
-        owner = str(order.metadata.get("owner") or signed_order.get("signer") or "").strip()
+        self._validate_live_order_binding(order, payload, signed_order)
+        owner = str(
+            payload.get("owner")
+            or order.metadata.get("owner")
+            or signed_order.get("signer")
+            or ""
+        ).strip()
         if not owner:
             raise MarketConfigurationError("Probable live orders require an owner or signed-order signer address.")
-        order_type = str(order.metadata.get("order_type") or signed_order.get("timeInForce") or "GTC").upper()
+        order_type = str(
+            payload.get("orderType")
+            or order.metadata.get("order_type")
+            or signed_order.get("timeInForce")
+            or "GTC"
+        ).upper()
         if order_type not in {"GTC", "GTD", "IOC", "FOK", "FAK"}:
             raise MarketConfigurationError("Probable order type must be GTC, GTD, IOC, FOK, or FAK.")
-        payload: Dict[str, Any] = {
-            "deferExec": bool(order.metadata.get("defer_exec", True)),
-            "order": dict(signed_order),
-            "owner": owner,
-            "orderType": order_type,
-        }
+        payload.setdefault("deferExec", bool(order.metadata.get("defer_exec", True)))
+        payload.setdefault("order", dict(signed_order))
+        payload.setdefault("owner", owner)
+        payload.setdefault("orderType", order_type)
         slippage = order.metadata.get("slippage_tolerance")
-        if slippage is not None:
+        if slippage is not None and "slippageTolerance" not in payload:
             payload["slippageTolerance"] = {"minPrice": str(slippage)}
         return payload
+
+    def _validate_live_order_binding(
+        self,
+        order: PaperOrderRequest,
+        payload: Mapping[str, Any],
+        signed_order: Mapping[str, Any],
+    ) -> None:
+        """Bind the externally signed CLOB order to the preflighted intent."""
+
+        signature = str(signed_order.get("signature") or "").strip()
+        if not signature:
+            raise MarketConfigurationError("Probable signed order requires an EIP-712 signature.")
+        if re.fullmatch(r"0x[0-9a-fA-F]{130}", signature) is None:
+            raise MarketConfigurationError(
+                "Probable signed order signature must be a 65-byte 0x-prefixed hexadecimal value."
+            )
+
+        market_id, token_ref = self._split_contract_id(order.contract_id)
+        canonical_token_id, canonical_contract_id, market = self._resolve_token_details(
+            market_id,
+            token_ref,
+        )
+        market_token_ids = {
+            self._token_id(token)
+            for token in self._token_rows(market)
+            if self._token_id(token)
+        }
+        if canonical_token_id not in market_token_ids:
+            raise MarketConfigurationError(
+                f"Probable market {market_id!r} does not contain token or outcome {token_ref!r}."
+            )
+        for key in ("marketId", "market_id", "conditionId", "condition_id"):
+            if key in payload and str(payload[key] or "").strip() != market_id:
+                raise MarketConfigurationError(
+                    f"Probable wire payload {key} does not match the preflighted contract."
+                )
+        for key in ("contractId", "contract_id"):
+            if key in payload and str(payload[key] or "").strip() not in {
+                order.contract_id,
+                canonical_contract_id,
+            }:
+                raise MarketConfigurationError(
+                    f"Probable wire payload {key} does not match the preflighted contract."
+                )
+
+        token_id = str(signed_order.get("tokenId") or "").strip()
+        if not token_id:
+            raise MarketConfigurationError("Probable signed order requires tokenId.")
+        if token_id != canonical_token_id:
+            raise MarketConfigurationError(
+                "Probable signed order tokenId does not match the preflighted contract."
+            )
+        for key in ("tokenId", "token_id", "asset", "assetId"):
+            if key in payload and str(payload[key] or "").strip() != canonical_token_id:
+                raise MarketConfigurationError(
+                    f"Probable wire payload {key} does not match the preflighted token."
+                )
+
+        expected_side = 0 if str(order.side).upper() == "BUY" else 1
+        actual_side = self._wire_side(signed_order.get("side"))
+        if actual_side != expected_side:
+            raise MarketConfigurationError(
+                "Probable signed order side does not match the preflighted order."
+            )
+
+        if order.limit_price is None:
+            raise MarketConfigurationError(
+                "Probable live orders require a limit price so the signed amounts can be bound to preflight."
+            )
+        maker_amount = self._wire_amount(signed_order.get("makerAmount"), "makerAmount")
+        taker_amount = self._wire_amount(signed_order.get("takerAmount"), "takerAmount")
+        expected_amounts = self._expected_signed_amounts(order, expected_side)
+        if (maker_amount, taker_amount) not in expected_amounts:
+            raise MarketConfigurationError(
+                "Probable signed order makerAmount/takerAmount do not match the preflighted price and size."
+            )
+
+    def _expected_signed_amounts(self, order: PaperOrderRequest, side: int) -> set[Tuple[int, int]]:
+        size = Decimal(str(order.size))
+        price = Decimal(str(order.limit_price))
+        expected: set[Tuple[int, int]] = set()
+        for decimals in self._amount_decimal_candidates():
+            scale = Decimal(10) ** decimals
+            if side == 0:
+                maker, taker = size * price * scale, size * scale
+            else:
+                maker, taker = size * scale, size * price * scale
+            if maker == maker.to_integral_value() and taker == taker.to_integral_value():
+                expected.add((int(maker), int(taker)))
+        return expected
+
+    def _amount_decimal_candidates(self) -> Tuple[int, ...]:
+        configured = self.config.get("probable_amount_decimals")
+        if configured is not None:
+            try:
+                decimals = int(configured)
+            except (TypeError, ValueError) as exc:
+                raise MarketConfigurationError("Probable amount decimals must be an integer.") from exc
+            if decimals < 0 or decimals > 36:
+                raise MarketConfigurationError("Probable amount decimals must be between 0 and 36.")
+            return (decimals,)
+        if self.chain_id != 56:
+            raise MarketConfigurationError(
+                "Probable amount decimals must be explicitly configured for any chain other than BNB mainnet."
+            )
+        return (18,)
+
+    @staticmethod
+    def _wire_side(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Probable signed order side must be BUY/SELL or 0/1.")
+        text = str(value if value is not None else "").strip().upper()
+        if text in {"0", "BUY"}:
+            return 0
+        if text in {"1", "SELL"}:
+            return 1
+        raise MarketConfigurationError("Probable signed order side must be BUY/SELL or 0/1.")
+
+    @staticmethod
+    def _wire_amount(value: Any, label: str) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Probable signed order {label} must be a positive integer.")
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise MarketConfigurationError(
+                f"Probable signed order {label} must be a positive integer."
+            ) from exc
+        if not amount.is_finite() or amount <= 0 or amount != amount.to_integral_value():
+            raise MarketConfigurationError(
+                f"Probable signed order {label} must be a positive integer."
+            )
+        return int(amount)
 
     def _event_from_payload(self, event: Mapping[str, Any]) -> MarketEvent:
         event_id = self._id(event)
@@ -1036,7 +1186,10 @@ class ProbableAdapter(MarketAdapter):
         market_id, token_ref = raw.rsplit(":", 1)
         if not market_id.strip() or not token_ref.strip():
             raise MarketConfigurationError("Probable contract id must be MARKET_ID:TOKEN_ID or MARKET_ID:YES|NO.")
-        return market_id.strip(), token_ref.strip()
+        return (
+            ProbableAdapter._safe_identifier(market_id, "market"),
+            ProbableAdapter._safe_identifier(token_ref, "token or outcome"),
+        )
 
     @staticmethod
     def _levels(raw: Any, *, descending: bool = False) -> List[OrderBookLevel]:
