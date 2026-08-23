@@ -216,7 +216,7 @@ def run_static_analysis() -> None:
 
 
 def run_adapter_catalog_check() -> None:
-    from market_adapters import MARKET_CATALOG, MARKET_IDS, build_default_registry
+    from market_adapters import MARKET_CATALOG, MARKET_IDS, build_default_registry, capability_contract_issues
 
     if len(MARKET_IDS) != len(set(MARKET_IDS)):
         raise SystemExit("Adapter catalog contains duplicate market ids.")
@@ -230,6 +230,17 @@ def run_adapter_catalog_check() -> None:
         raise SystemExit("Default adapter registry is missing adapters: " + ", ".join(missing_adapters))
     if not registry.has_adapter("polymarket"):
         raise SystemExit("Default adapter registry must include the Polymarket adapter.")
+    capability_issues = {
+        market_id: capability_contract_issues(registry.create(market_id))
+        for market_id in MARKET_IDS
+    }
+    failures = [
+        f"{market_id}: {'; '.join(issues)}"
+        for market_id, issues in capability_issues.items()
+        if issues
+    ]
+    if failures:
+        raise SystemExit("Advertised adapter capabilities are not implementation-backed: " + " | ".join(failures))
     print(f"[ok] adapter catalog ({len(MARKET_CATALOG)} markets)")
 
 

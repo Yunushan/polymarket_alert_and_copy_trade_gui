@@ -70,6 +70,7 @@ from market_adapters import (
     ZeitgeistAdapter,
     ZeitgeistPredictionPoolsAdapter,
     build_default_registry,
+    capability_contract_issues,
     create_stub_adapter,
 )
 from market_adapters.errors import MarketConfigurationError
@@ -404,6 +405,13 @@ class AdapterFoundationTests(unittest.TestCase):
             self.assertEqual(health["market_id"], market_id)
             self.assertIn("ok", health)
             self.assertIn("message", health)
+
+    def test_advertised_capabilities_have_concrete_operations(self) -> None:
+        registry = build_default_registry()
+
+        for market_id in MARKET_IDS:
+            with self.subTest(market_id=market_id):
+                self.assertEqual(capability_contract_issues(registry.create(market_id)), ())
 
     def test_stub_adapters_reject_all_operational_methods(self) -> None:
         registry = build_default_registry()

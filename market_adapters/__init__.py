@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .azuro import AzuroAdapter
 from .base import MarketAdapter
+from .capability_audit import CORE_CAPABILITY_METHODS, capability_contract_issues
 from .betmgm import BetMGMAdapter
 from .betfair import BetfairExchangeAdapter
 from .blinq import BlinqAdapter
@@ -77,6 +78,7 @@ from .types import (
 __all__ = [
     "AdapterRegistry",
     "AdapterRuntime",
+    "CORE_CAPABILITY_METHODS",
     "AugurAdapter",
     "AzuroAdapter",
     "BetMGMAdapter",
@@ -160,6 +162,7 @@ __all__ = [
     "build_default_registry",
     "create_stub_adapter",
     "create_verified_blocked_adapter",
+    "capability_contract_issues",
     "get_market_metadata",
     "load_json_fixture",
     "load_market_fixture",
