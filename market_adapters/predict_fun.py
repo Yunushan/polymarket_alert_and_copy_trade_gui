@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -353,6 +353,34 @@ class PredictFunAdapter(MarketAdapter):
             require_jwt=False,
         )
 
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return matched activity for the authenticated Predict.fun account.
+
+        Predict.fun's account activity endpoint is private and does not accept
+        an arbitrary wallet filter.  The requested identity is therefore
+        checked against the authenticated ``/account`` response before any
+        activity is exposed to the wallet-tracking/copy workflow.  Only match
+        or fill events with a complete market, outcome, side, size, price, and
+        timestamp are returned; creates, cancellations, conversions, and
+        position-management events are deliberately excluded.
+        """
+
+        self.ensure_capability("copy_trading")
+        wallet = self._wallet_address(wallet_address).lower()
+        desired = self._bounded_int(limit, "activity limit", minimum=1, maximum=100, default=25)
+        account_payload = self.account_recovery("account")
+        account_data = account_payload.get("data") if isinstance(account_payload, Mapping) else account_payload
+        if not isinstance(account_data, Mapping):
+            raise MarketConfigurationError("Predict.fun account response did not contain account data.")
+        account_address = self._wallet_address(account_data.get("address"))
+        if account_address.lower() != wallet:
+            raise MarketConfigurationError(
+                "Predict.fun activity identity must match the authenticated account address."
+            )
+        payload = self.account_recovery("account_activity", limit=desired)
+        rows = self._list_from_payload(payload, "data", "activities", "activity")
+        return self._normalize_account_activity(rows, wallet, desired)
+
     def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Remove open orders through Predict.fun's documented REST boundary.
 
@@ -448,11 +476,163 @@ class PredictFunAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Predict.fun copy trading is unsupported because this adapter does not mirror account activity.",
+        """Build a simulation-first paper order from a normalized account fill."""
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Predict.fun activity has no market/outcome contract id.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Predict.fun activity side must be BUY or SELL.")
+        try:
+            size = float(activity.get("size"))
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Predict.fun activity size must be numeric.") from exc
+        if not self._is_positive_number(size):
+            raise MarketConfigurationError("Predict.fun activity size must be positive.")
+        raw_price = activity.get("price")
+        limit_price = None if raw_price in (None, "") else self._safe_probability(raw_price)
+        if raw_price not in (None, "") and limit_price is None:
+            raise MarketConfigurationError("Predict.fun activity reference price must be between 0 and 1.")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata={
+                    "activity": dict(activity),
+                    "source": "predict_fun_account_activity",
+                },
+            )
         )
+
+    @classmethod
+    def _normalize_account_activity(
+        cls,
+        rows: List[Mapping[str, Any]],
+        wallet: str,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for row in rows:
+            event_names = [
+                str(row.get(key) or "").strip().upper()
+                for key in ("name", "eventName", "event_type", "type")
+                if str(row.get(key) or "").strip()
+            ]
+            event_name = next(
+                (
+                    candidate
+                    for candidate in event_names
+                    if "MATCH" in candidate or "FILL" in candidate or candidate == "TRADE"
+                ),
+                "",
+            )
+            if not event_name:
+                continue
+            market_payload = row.get("market") if isinstance(row.get("market"), Mapping) else row
+            market_id = cls._market_id(market_payload)
+            if not market_id:
+                continue
+            outcome_payload = row.get("outcome")
+            contract_id, outcome = cls._activity_contract_id(market_id, outcome_payload, market_payload)
+            if not contract_id:
+                continue
+            order_payload = row.get("order") if isinstance(row.get("order"), Mapping) else {}
+            quote_type = row.get("quoteType") or order_payload.get("quoteType") or row.get("side")
+            side = {"BID": "BUY", "BUY": "BUY", "ASK": "SELL", "SELL": "SELL"}.get(
+                str(quote_type or "").strip().upper()
+            )
+            if side is None:
+                continue
+            price = cls._safe_probability(
+                row.get("priceExecuted")
+                or row.get("executionPrice")
+                or row.get("price")
+                or order_payload.get("price")
+            )
+            try:
+                size = float(
+                    row.get("amountFilled")
+                    or row.get("filledAmount")
+                    or row.get("size")
+                    or row.get("amount")
+                )
+            except (TypeError, ValueError):
+                size = None
+            timestamp = cls._timestamp_value(
+                row.get("executedAt") or row.get("createdAt") or row.get("timestamp") or row.get("time")
+            )
+            if price is None or size is None or not cls._is_positive_number(size) or timestamp is None:
+                continue
+            transaction_hash = str(
+                row.get("transactionHash")
+                or row.get("transaction_hash")
+                or row.get("id")
+                or row.get("orderId")
+                or f"predict_fun_activity:{market_id}:{int(timestamp * 1000)}"
+            ).strip()
+            if not transaction_hash:
+                continue
+            normalized.append(
+                {
+                    "proxyWallet": wallet,
+                    "asset": contract_id,
+                    "side": side,
+                    "size": float(size),
+                    "price": price,
+                    "timestamp": timestamp,
+                    "transactionHash": transaction_hash,
+                    "outcome": outcome,
+                    "slug": str(market_payload.get("categorySlug") or ""),
+                    "pseudonym": str(market_payload.get("title") or market_payload.get("question") or ""),
+                    "activityType": event_name,
+                    "raw": dict(row),
+                }
+            )
+            if len(normalized) >= limit:
+                break
+        return normalized
+
+    @classmethod
+    def _activity_contract_id(
+        cls,
+        market_id: str,
+        outcome_payload: Any,
+        market_payload: Mapping[str, Any],
+    ) -> Tuple[Optional[str], str]:
+        candidate: Any = None
+        if isinstance(outcome_payload, Mapping):
+            for key in ("id", "outcomeId", "name", "label", "side", "onChainId", "indexSet"):
+                if outcome_payload.get(key) not in (None, ""):
+                    candidate = outcome_payload.get(key)
+                    break
+        elif outcome_payload not in (None, ""):
+            candidate = outcome_payload
+        if candidate in (None, "") and isinstance(outcome_payload, Mapping):
+            outcomes = market_payload.get("outcomes")
+            if isinstance(outcomes, list):
+                for item in outcomes:
+                    if not isinstance(item, Mapping):
+                        continue
+                    if any(
+                        outcome_payload.get(key) not in (None, "")
+                        and outcome_payload.get(key) == item.get(key)
+                        for key in ("id", "outcomeId", "onChainId", "indexSet")
+                    ):
+                        candidate = item.get("id") or item.get("name") or item.get("label")
+                        break
+        if candidate in (None, ""):
+            return None, ""
+        outcome = str(candidate).strip()
+        if outcome.upper() in {"Y", "TRUE"}:
+            outcome = "YES"
+        elif outcome.upper() in {"N", "FALSE"}:
+            outcome = "NO"
+        return cls._contract_id(market_id, outcome), outcome
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
         clean = str(market_id or "").strip()

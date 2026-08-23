@@ -64,6 +64,14 @@ the shared local time bounds without inventing a private-account requirement.
 The endpoint, fixture, and parser behavior are covered by the Predict.fun
 adapter tests and the generic market-history API route.
 
+Predict.fun's authenticated `GET /v1/account/activity` feed now also powers
+the wallet/copy workflow for the JWT-authenticated account address.  Only
+matched/fill events with a complete outcome, quote side, filled size,
+execution price, timestamp, and transaction identity are normalized; the copy
+boundary returns a paper intent and never submits a live order automatically.
+Identity matching, field normalization, and simulation behavior are
+fixture-backed in the Predict.fun adapter tests.
+
 Gemini's documented authenticated recovery methods are also available through
 the allow-listed CLI `markets account <operation>` command and the web/API
 route `/api/markets/{market_id}/account/{operation}`. The React Markets view

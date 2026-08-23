@@ -3216,6 +3216,43 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 confirm_order_management="wrong",
             )
 
+    def test_predict_fun_authenticated_activity_supports_account_copy_preview(self) -> None:
+        adapter = PredictFunAdapter()
+        account = load_fixture("predict_fun", "account")
+        activity = load_fixture("predict_fun", "activity")
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params, headers))
+            self.assertEqual(headers["x-api-key"], "predict-key")
+            self.assertEqual(headers["Authorization"], "Bearer jwt-token")
+            if url.endswith("/account"):
+                return account
+            if url.endswith("/account/activity"):
+                self.assertEqual(params, {"first": 10})
+                return activity
+            raise AssertionError(f"unexpected Predict.fun URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        wallet = "0x1111111111111111111111111111111111111111"
+        with patch.dict("os.environ", {"PREDICT_FUN_API_KEY": "predict-key", "PREDICT_FUN_JWT": "jwt-token"}):
+            rows = adapter.list_activity(wallet, limit=10)
+            result = adapter.copy_trade_from_activity(rows[0])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["proxyWallet"], wallet.lower())
+        self.assertEqual(rows[0]["asset"], "9001:YES")
+        self.assertEqual(rows[0]["side"], "BUY")
+        self.assertEqual(rows[0]["size"], 5.0)
+        self.assertEqual(rows[0]["price"], 0.48)
+        self.assertEqual(rows[0]["transactionHash"], "0xpredictactivitybuy")
+        self.assertTrue(result.accepted)
+        self.assertEqual(len(calls), 2)
+
+        with patch.dict("os.environ", {"PREDICT_FUN_API_KEY": "predict-key", "PREDICT_FUN_JWT": "jwt-token"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_activity("0x2222222222222222222222222222222222222222")
+
     def test_xo_adapter_uses_hmac_headers_and_keeps_live_orders_guarded(self) -> None:
         adapter = XOMarketAdapter()
         markets = load_fixture("xo_market", "markets")

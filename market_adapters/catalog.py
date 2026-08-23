@@ -342,7 +342,10 @@ PREDICT_FUN_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The authenticated /account/activity feed contains matched fills with
+    # market, outcome, side, size, price, and timestamp. Copy remains
+    # simulation-first and is restricted to the JWT-authenticated account.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -855,7 +858,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="predict_fun",
         display_name="Predict.fun",
         homepage_url="https://predict.fun",
-        description="Official Predict.fun REST API adapter for market discovery, orderbooks, prices, public match history, timeseries, account recovery, dry-run orders, and guarded signed/relay order operations.",
+        description="Official Predict.fun REST API adapter for market discovery, orderbooks, prices, public match history, timeseries, authenticated account activity, simulation-first account copy intents, dry-run orders, and guarded signed/relay order operations.",
         capabilities=PREDICT_FUN_CAPABILITIES,
     ),
     MarketMetadata(

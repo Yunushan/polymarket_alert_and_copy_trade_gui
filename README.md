@@ -242,7 +242,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 
 ### 8a) Predict.fun adapter support
 - Lists markets and outcomes through Predict.fun's documented REST API, reads orderbooks and derived YES/NO prices, normalizes the public order-match feed as BUY/SELL trades, and normalizes the official point-based market timeseries feed as flat OHLC candles without fabricating volume.
-- Exposes authenticated account, active-order, order-detail, activity, and position recovery through the CLI and `/api/markets/predict_fun/account/{operation}`; wallet-scoped positions validate a 20-byte address and private reads require `PREDICT_FUN_JWT`.
+- Exposes authenticated account, active-order, order-detail, activity, and position recovery through the CLI and `/api/markets/predict_fun/account/{operation}`; wallet-scoped positions validate a 20-byte address and private reads require `PREDICT_FUN_JWT`. The authenticated account activity feed is normalized for matched BUY/SELL fills and supports simulation-first copy previews only for the JWT-authenticated account address; it never submits a live order automatically.
 - Supports guarded signed order submission and opt-in relay-only removal by order id or hash. Removal requires `predict_fun_order_management_enabled`, the shared live-safety gates, JWT credentials, and exact operator confirmation; Predict.fun documents that removal does not invalidate orders on-chain.
 
 ### 8) Manifold adapter support
@@ -576,7 +576,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Azuro (`azuro`) | Implemented | Yes (bettor bet history) | Yes | Yes | Guarded, off by default | No | Required | Live signed orders only | Jurisdiction varies |
 | SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes (public trades plus bounded derived trade-tape candles and API-key account bets/fills/positions) | Guarded, off by default (v3 order/event/all cancellation) | No | Required | API credentials required | Jurisdiction varies |
 | Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded place/cancel/batch/market-cancel, off by default | No | Required | Account/API token required | Jurisdiction varies |
-| Predict.fun (`predict_fun`) | Implemented | Yes (public matches/timeseries) | Yes (account/orders/activity/positions) | Yes | Guarded place/relay-remove, off by default | No | Required | API key; JWT for private reads/removal | Jurisdiction varies |
+| Predict.fun (`predict_fun`) | Implemented | Yes (public matches/timeseries) | Yes (account/orders/activity/positions) | Yes | Guarded place/relay-remove, off by default | Yes (authenticated account activity, simulation-first) | Required | API key; JWT for private reads/removal | Jurisdiction varies |
 | Smarkets (`smarkets`) | Implemented | Yes | Yes (authenticated orders/account) | Yes | Guarded place/cancel, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes (current/cleared account orders, bounded derived execution candles, funds, account details, statements, currency rates) | Yes | Guarded place/cancel/update/replace, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |
