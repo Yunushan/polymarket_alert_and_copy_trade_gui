@@ -1375,6 +1375,14 @@ HYPERLIQUID_ACCOUNT_OPERATIONS = (
     "subaccounts",
 )
 POLYMARKET_ACCOUNT_OPERATIONS = ("active_orders", "order_detail", "fills")
+PREDICT_FUN_ACCOUNT_OPERATIONS = (
+    "account",
+    "active_orders",
+    "order_detail",
+    "account_activity",
+    "positions",
+    "positions_by_address",
+)
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1388,6 +1396,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + MATCHBOOK_ACCOUNT_OPERATIONS
         + HYPERLIQUID_ACCOUNT_OPERATIONS
         + POLYMARKET_ACCOUNT_OPERATIONS
+        + PREDICT_FUN_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1595,6 +1604,31 @@ def run_market_account(args: argparse.Namespace) -> int:
             kwargs["dex"] = str(getattr(args, "dex", "") or "").strip()
         elif operation == "order_history":
             kwargs["limit"] = _cli_clamp_int(args.limit, 2000, 1, 2000)
+    elif market_id == "predict_fun":
+        if operation == "order_detail":
+            kwargs = {"order_id": str(getattr(args, "order_id", "") or "").strip()}
+        elif operation == "positions_by_address":
+            kwargs = {
+                "address": str(getattr(args, "wallet", "") or "").strip(),
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "cursor": str(getattr(args, "cursor", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "is_resolved": getattr(args, "is_resolved", None),
+                "sort": str(getattr(args, "sort", "") or "").strip(),
+            }
+        elif operation == "account":
+            kwargs = {}
+        else:
+            kwargs = {
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "cursor": str(getattr(args, "cursor", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "status": str(getattr(args, "status", "") or "").strip(),
+                "is_resolved": getattr(args, "is_resolved", None),
+                "sort": str(getattr(args, "sort", "") or "").strip(),
+            }
+            if operation == "account_activity":
+                kwargs["event_types"] = str(getattr(args, "event_types", "") or "").strip()
     else:
         if operation in {"active_orders", "order_history"}:
             kwargs.update(
@@ -1690,6 +1724,7 @@ HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
     "batch_modify_orders",
     "schedule_cancel",
 )
+PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS = ("remove_orders", "remove_orders_by_hash")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1703,6 +1738,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + SMARKETS_ORDER_MANAGEMENT_OPERATIONS
         + PROBABLE_ORDER_MANAGEMENT_OPERATIONS
         + HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS
+        + PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -2763,7 +2799,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account = markets_sub.add_parser(
         "account",
         parents=[common],
-        help="Read an explicitly documented authenticated account feed (including Polymarket CLOB orders and fills).",
+        help="Read an explicitly documented authenticated account feed (including Polymarket CLOB and Predict.fun account surfaces).",
     )
     market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
     market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2778,6 +2814,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--trade-id", default=None, help="Optional Polymarket trade id for fill reads.")
     market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
     market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
+    market_account.add_argument("--event-types", default="", help="Predict.fun comma-separated account activity event types.")
     market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
     market_account.add_argument("--event-type-id", default="", help="Betfair event type id filter.")
     market_account.add_argument("--account-event-id", default="", help="Betfair event id filter.")
@@ -2793,7 +2830,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--bet-id", default="", help="Betfair bet id filter.")
     market_account.add_argument("--group-by", default="BET", help="Betfair cleared-order roll-up.")
     market_account.add_argument("--include-item-description", action="store_true")
-    market_account.add_argument("--wallet", default="", help="Betfair account wallet (for funds/statement reads).")
+    market_account.add_argument("--wallet", default="", help="Betfair account wallet or Predict.fun positions address.")
     market_account.add_argument("--locale", default="en", help="Betfair account-statement locale.")
     market_account.add_argument("--exclude-item", action="store_true", help="Exclude item details from Betfair statements.")
     market_account.add_argument("--from-currency", default="", help="Betfair source currency for currency_rates.")
@@ -2808,6 +2845,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--count-filter", default="", help="Kalshi positions filter: position,total_traded.")
     market_account.add_argument("--historical", action="store_true", help="Use the venue's documented historical endpoint.")
     market_account.add_argument("--sort", default=None, help="Documented position sort value.")
+    market_account.add_argument("--is-resolved", default=None, help="Predict.fun positions filter: true or false.")
     market_account.add_argument("--search", default="", help="Settled-position search text.")
     market_account.add_argument("--category", default="", help="Settled-position category.")
     market_account.add_argument("--with-cash-outs", action="store_true")
@@ -2822,7 +2860,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Probable, or Smarkets).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Predict.fun, Probable, or Smarkets).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")

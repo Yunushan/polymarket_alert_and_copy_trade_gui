@@ -2726,6 +2726,104 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][2]["data"]["pricePerShare"], "0.56")
         self.assertEqual(calls[0][3]["x-api-key"], "predict-key")
 
+    def test_predict_fun_account_history_positions_timeseries_and_guarded_removal(self) -> None:
+        adapter = PredictFunAdapter()
+        fixtures = {
+            name: load_fixture("predict_fun", name)
+            for name in ("account", "orders", "order_detail", "activity", "positions", "timeseries")
+        }
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params, headers))
+            self.assertEqual(headers["x-api-key"], "predict-key")
+            if url.endswith("/account"):
+                self.assertEqual(headers["Authorization"], "Bearer jwt-token")
+                return fixtures["account"]
+            if url.endswith("/orders"):
+                self.assertEqual(params, {"first": 25, "after": "next", "status": "OPEN", "marketId": 9001})
+                self.assertEqual(headers["Authorization"], "Bearer jwt-token")
+                return fixtures["orders"]
+            if url.endswith("/orders/0xpredictorder"):
+                return fixtures["order_detail"]
+            if url.endswith("/account/activity"):
+                self.assertEqual(params, {"first": 10, "after": "next-activity", "eventTypes": "ORDER_MATCHED"})
+                return fixtures["activity"]
+            if url.endswith("/positions"):
+                self.assertEqual(params, {"first": 50, "marketId": 9001, "isResolved": "false", "sort": "VALUE_DESC"})
+                return fixtures["positions"]
+            if "/positions/0x1111111111111111111111111111111111111111" in url:
+                return fixtures["positions"]
+            if url.endswith("/markets/9001/timeseries"):
+                self.assertEqual(params, {"resolution": "1h"})
+                return fixtures["timeseries"]
+            raise AssertionError(f"unexpected Predict.fun URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"PREDICT_FUN_API_KEY": "predict-key", "PREDICT_FUN_JWT": "jwt-token"}):
+            account = adapter.account_recovery("account")
+            orders = adapter.account_recovery("active_orders", limit=25, cursor="next", status="OPEN", market_id="9001")
+            detail = adapter.account_recovery("order_detail", order_id="0xpredictorder")
+            activity = adapter.account_recovery("account_activity", limit=10, cursor="next-activity", event_types="ORDER_MATCHED")
+            positions = adapter.account_recovery("positions", market_id="9001", is_resolved=False, sort="VALUE_DESC")
+            public_positions = adapter.account_recovery(
+                "positions_by_address",
+                address="0x1111111111111111111111111111111111111111",
+            )
+            candles = adapter.list_candles("9001:YES", from_timestamp=1733312000, to_timestamp=1733317000)
+
+        self.assertEqual(account["data"]["address"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(orders["data"][0]["id"], "pf_order_123")
+        self.assertEqual(detail["data"]["status"], "OPEN")
+        self.assertEqual(activity["data"][0]["eventName"], "ORDER_MATCHED")
+        self.assertEqual(positions["data"][0]["outcome"], "YES")
+        self.assertEqual(public_positions["data"][0]["id"], "position-1")
+        self.assertEqual([c.close for c in candles], [0.54, 0.57])
+        self.assertEqual(candles[0].timestamp, 1733312400.0)
+
+        live = PredictFunAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "predict_fun_order_management_enabled": True,
+            }
+        )
+        removal_calls = []
+
+        def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
+            removal_calls.append((method, url, json, headers))
+            return FakeResponse(load_fixture("predict_fun", "remove_response"))
+
+        live.runtime.session.request = fake_request  # type: ignore[method-assign]
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        with patch.dict("os.environ", {"PREDICT_FUN_API_KEY": "predict-key", "PREDICT_FUN_JWT": "jwt-token"}):
+            removed = live.manage_orders(
+                "remove_orders",
+                orders=["pf_order_123"],
+                confirm_order_management=confirmation,
+            )
+            removed_by_hash = live.manage_orders(
+                "remove_orders_by_hash",
+                orders=["0xpredictorder"],
+                confirm_order_management=confirmation,
+            )
+
+        self.assertFalse(removed["on_chain_cancellation"])
+        self.assertEqual(removed["response"]["removed"], ["pf_order_123"])
+        self.assertEqual(removed_by_hash["operation"], "remove_orders_by_hash")
+        self.assertTrue(removal_calls[0][1].endswith("/v1/orders/remove"))
+        self.assertTrue(removal_calls[1][1].endswith("/orders/remove-by-hash"))
+        self.assertEqual(removal_calls[0][3]["Authorization"], "Bearer jwt-token")
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_detail", order_id="../outside")
+        with self.assertRaises(MarketConfigurationError):
+            live.manage_orders(
+                "remove_orders",
+                orders=["pf_order_123"],
+                confirm_order_management="wrong",
+            )
+
     def test_xo_adapter_uses_hmac_headers_and_keeps_live_orders_guarded(self) -> None:
         adapter = XOMarketAdapter()
         markets = load_fixture("xo_market", "markets")

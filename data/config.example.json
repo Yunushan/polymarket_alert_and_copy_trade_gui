@@ -513,14 +513,17 @@
         "adapter_status": "implemented",
         "predict_fun_api_base_url": "https://api.predict.fun/v1",
         "credential_env_vars": [
-          "PREDICT_FUN_API_KEY"
+          "PREDICT_FUN_API_KEY",
+          "PREDICT_FUN_JWT",
+          "PREDICT_FUN_ACCESS_TOKEN"
         ],
         "live_trading_enabled": false,
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
+        "predict_fun_order_management_enabled": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Market discovery, outcome listing, orderbook-derived prices, alerts, local paper orders, and guarded signed order submission are implemented through the official Predict.fun REST API. Live trading stays disabled by default; copy trading remains unsupported."
+        "notes": "Market discovery, outcome listing, orderbook-derived prices, timeseries point-candles, authenticated account/order/activity/position recovery, local paper orders, and guarded signed order submission are implemented through the official Predict.fun REST API. Relay-only order removal is disabled by default, requires JWT credentials plus the shared live-safety gates and exact operator confirmation, and does not invalidate orders on-chain; copy trading remains unsupported."
       }
     },
     "prizepicks": {

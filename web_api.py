@@ -3659,6 +3659,31 @@ def market_account_payload(
             kwargs["dex"] = _query_value(query_params, "dex") or ""
         elif normalized_operation == "order_history":
             kwargs["limit"] = _clamp_int(_query_value(query_params, "limit", "2000"), 2000, 1, 2000)
+    elif normalized_market_id == "predict_fun":
+        if normalized_operation == "account":
+            kwargs = {}
+        elif normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "positions_by_address":
+            kwargs = {
+                "address": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "cursor": _query_value(query_params, "cursor"),
+                "market_id": _query_value(query_params, "market_id"),
+                "is_resolved": _query_value(query_params, "is_resolved"),
+                "sort": _query_value(query_params, "sort"),
+            }
+        else:
+            kwargs = {
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "cursor": _query_value(query_params, "cursor"),
+                "market_id": _query_value(query_params, "market_id"),
+                "status": _query_value(query_params, "status"),
+                "is_resolved": _query_value(query_params, "is_resolved"),
+                "sort": _query_value(query_params, "sort"),
+            }
+            if normalized_operation == "account_activity":
+                kwargs["event_types"] = _query_value(query_params, "event_types")
     elif normalized_market_id == "opinion_labs":
         if normalized_operation == "order_detail":
             kwargs = {"order_id": _query_value(query_params, "order_id")}
@@ -3876,6 +3901,7 @@ def market_order_management_payload(
         "reduce_by",
         "reduce_to",
         "order_hash",
+        "order_hashes",
         "trader",
         "timestamp",
         "signature",

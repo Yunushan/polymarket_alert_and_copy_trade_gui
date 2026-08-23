@@ -240,6 +240,11 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Reads signed account orders, fills, positions, settlements, balance, and queue positions through the documented portfolio endpoints; order/fill history can use the documented historical feeds. The CLI and `/api/markets/kalshi/account/{operation}` route expose only this explicit operation allow-list, validate query bounds, and never accept arbitrary authenticated paths. Guarded V2 `cancel_order`, `batch_cancel_orders`, `amend_order`, and `decrease_order` mutations use fixed signed paths and require a separate `kalshi_order_management_enabled` opt-in plus exact operator confirmation.
 - Supports dry-run/paper orders; live orders are opt-in and require signed API credentials
 
+### 8a) Predict.fun adapter support
+- Lists markets and outcomes through Predict.fun's documented REST API, reads orderbooks and derived YES/NO prices, and normalizes the official point-based market timeseries feed as flat OHLC candles without fabricating volume.
+- Exposes authenticated account, active-order, order-detail, activity, and position recovery through the CLI and `/api/markets/predict_fun/account/{operation}`; wallet-scoped positions validate a 20-byte address and private reads require `PREDICT_FUN_JWT`.
+- Supports guarded signed order submission and opt-in relay-only removal by order id or hash. Removal requires `predict_fun_order_management_enabled`, the shared live-safety gates, JWT credentials, and exact operator confirmation; Predict.fun documents that removal does not invalidate orders on-chain.
+
 ### 8) Manifold adapter support
 - Searches and lists Manifold markets through the official API
 - Reads binary and multiple-choice probabilities for alerts
@@ -431,6 +436,7 @@ a commit accidentally.
 For a strict public-data ROI/MDD screen, `--max-mdd-pct 20` filters to successful public-data MDD calculations at or below 20%. Fast MDD is a public historical-equity approximation, not independently verified account-equity MDD: public deposits/withdrawals, unresolved historical marks, fees, and records outside the selected fetch windows can change the true result. Use `--mdd-mode mark_replay --mdd-include-accounting` for deeper sampled reconciliation, inspect the exported `mdd_method`, `mdd_pct_basis`, `mdd_source`, and warnings, and treat results as candidates for manual due diligence.
 
 Useful local API endpoints:
+- Predict.fun account operations are available at `GET /api/markets/predict_fun/account/{operation}` for `account`, `active_orders`, `order_detail`, `account_activity`, `positions`, and validated wallet-scoped `positions_by_address`; relay-only removal is available at `POST /api/markets/predict_fun/orders/{operation}` for `remove_orders` and `remove_orders_by_hash`, with JWT credentials, opt-in safety gates, and explicit non-on-chain-cancellation reporting.
 - `GET /api/state` returns the initial React GUI snapshot: health, config, markets, alerts, wallets, copy, live safety, and paper state.
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
 - `PATCH /api/config` updates shared local config fields such as selected market, theme, and Tkinter UI design.
@@ -563,7 +569,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Azuro (`azuro`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live signed orders only | Jurisdiction varies |
 | SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes (public trades) | Guarded, off by default | No | Required | Live/WebSocket only | Jurisdiction varies |
 | Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded place/cancel/batch/market-cancel, off by default | No | Required | Account/API token required | Jurisdiction varies |
-| Predict.fun (`predict_fun`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
+| Predict.fun (`predict_fun`) | Implemented | Yes (timeseries) | Yes (account/orders/activity/positions) | Yes | Guarded place/relay-remove, off by default | No | Required | API key; JWT for private reads/removal | Jurisdiction varies |
 | Smarkets (`smarkets`) | Implemented | Yes | Yes (authenticated orders/account) | Yes | Guarded place/cancel, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes (current/cleared account orders, funds, account details, statements, currency rates) | Yes | Guarded place/cancel/update/replace, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |

@@ -45,6 +45,7 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Wallet required for trading",
     "Jurisdiction varies",
     "API credentials required",
+    "API key; JWT for private reads/removal",
     "No API key; wallet/collateral required only for future live chain flow",
     "No API key; wallet required only for future live chain flow",
     "No API key; wallet/settlement required only for future live chain flow",

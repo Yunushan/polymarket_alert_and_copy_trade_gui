@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "data": {
+    "id": "pf_order_123",
+    "marketId": 9001,
+    "status": "OPEN",
+    "order": {"hash": "0xpredictorder", "tokenId": "token-yes", "side": 0}
+  }
+}

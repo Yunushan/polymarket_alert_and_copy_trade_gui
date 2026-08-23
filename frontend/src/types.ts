@@ -173,6 +173,8 @@ export interface MarketCandlesPayload {
 
 export type MarketAccountOperation =
   | "active_orders"
+  | "account"
+  | "account_activity"
   | "order_history"
   | "order_detail"
   | "fills"
@@ -189,10 +191,10 @@ export type MarketAccountOperation =
   | "settled_bets"
   | "current_bets"
   | "current_offers"
-  | "account"
   | "portfolio"
   | "subaccounts"
-  | "spot_balances";
+  | "spot_balances"
+  | "positions_by_address";
 
 export interface MarketAccountPayload {
   market_id: string;
@@ -219,7 +221,9 @@ export type MarketOrderManagementOperation =
   | "edit_offer"
   | "edit_offers"
   | "batch_modify_orders"
-  | "schedule_cancel";
+  | "schedule_cancel"
+  | "remove_orders"
+  | "remove_orders_by_hash";
 
 export interface MarketOrderManagementPayload {
   market_id: string;

@@ -166,6 +166,9 @@ interface MarketReadForm {
   account_order_id: string;
   account_trade_id: string;
   account_cursor: string;
+  account_wallet: string;
+  account_event_types: string;
+  account_is_resolved: string;
   account_dex: string;
   account_market_id: string;
   account_chain_id: string;
@@ -426,6 +429,9 @@ function emptyMarketReadForm(): MarketReadForm {
     account_order_id: "",
     account_trade_id: "",
     account_cursor: "",
+    account_wallet: "",
+    account_event_types: "",
+    account_is_resolved: "",
     account_dex: "",
     account_market_id: "",
     account_chain_id: "",
@@ -829,6 +835,10 @@ export default function App() {
       patch.settings = {
         hyperliquid_order_management_enabled: form.get("hyperliquid_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "predict_fun") {
+      patch.settings = {
+        predict_fun_order_management_enabled: form.get("predict_fun_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -937,6 +947,8 @@ export default function App() {
             contract_id: form.contract_id.trim() || undefined,
             ticker: form.account_ticker.trim() || undefined,
             order_id: form.account_order_id.trim() || undefined,
+            wallet: form.account_wallet.trim() || undefined,
+            address: form.account_wallet.trim() || undefined,
             token_id: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
             token_ids: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
             trade_id: form.account_trade_id.trim() || undefined,
@@ -945,6 +957,8 @@ export default function App() {
             market_id: form.account_market_id.trim() || undefined,
             chain_id: form.account_chain_id.trim() || undefined,
             status: form.account_status.trim() || undefined,
+            event_types: form.account_event_types.trim() || undefined,
+            is_resolved: form.account_is_resolved.trim() || undefined,
             event_type_id: form.account_event_type_id.trim() || undefined,
             event_id: form.account_event_id.trim() || undefined,
             runner_id: form.account_runner_id.trim() || undefined,
@@ -1003,10 +1017,12 @@ export default function App() {
     const isSmarkets = marketId === "smarkets";
     const isProbable = marketId === "probable";
     const isHyperliquid = marketId === "hyperliquid";
+    const isPredictFun = marketId === "predict_fun";
     let instructions: unknown = [];
     const needsInstructions =
       isHyperliquid ||
-      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable) ||
+      isPredictFun ||
+      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isPredictFun) ||
       (operation === "cancel_orders" && !isSmarkets && !isProbable) ||
       (isProbable && operation === "cancel_orders") ||
       operation === "batch_cancel_orders" ||
@@ -1156,6 +1172,14 @@ export default function App() {
       setError("Global Probable cancellation requires exact confirmation: CANCEL ALL PROBABLE ORDERS.");
       return;
     }
+    if (isPredictFun && (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("Predict.fun removal requires a non-empty JSON array of order ids or hashes.");
+      return;
+    }
+    if (isPredictFun && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Predict.fun removal requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
     if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isHyperliquid && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
       setError("A Betfair exchange market id is required for update and replace operations.");
       return;
@@ -1172,9 +1196,9 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isPredictFun && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
@@ -1247,6 +1271,11 @@ export default function App() {
             signed_action: hyperliquidInstructionObject,
             confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
             confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : isPredictFun
+        ? {
+            orders: instructions,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
           }
       : isMatchbook
         ? {
@@ -2488,6 +2517,15 @@ function MarketsView({
                 />
                 <span>Enable Hyperliquid order management</span>
               </label>
+            ) : selectedMarket.market_id === "predict_fun" ? (
+              <label className="check-row">
+                <input
+                  name="predict_fun_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Predict.fun relay removal</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -2572,6 +2610,14 @@ function MarketsView({
               />
             </label>
             <label>
+              <span>Account wallet / address</span>
+              <input
+                value={marketReadForm.account_wallet}
+                onChange={(event) => onMarketReadFormChange({ account_wallet: event.target.value })}
+                placeholder="Predict.fun 0x address"
+              />
+            </label>
+            <label>
               <span>Perp DEX</span>
               <input
                 value={marketReadForm.account_dex}
@@ -2601,6 +2647,22 @@ function MarketsView({
                 value={marketReadForm.account_status}
                 onChange={(event) => onMarketReadFormChange({ account_status: event.target.value })}
                 placeholder="Opinion 1,2,3,4,5 / Betfair SETTLED"
+              />
+            </label>
+            <label>
+              <span>Account activity event types</span>
+              <input
+                value={marketReadForm.account_event_types}
+                onChange={(event) => onMarketReadFormChange({ account_event_types: event.target.value })}
+                placeholder="ORDER_MATCHED,ORDER_CREATED"
+              />
+            </label>
+            <label>
+              <span>Predict.fun resolved filter</span>
+              <input
+                value={marketReadForm.account_is_resolved}
+                onChange={(event) => onMarketReadFormChange({ account_is_resolved: event.target.value })}
+                placeholder="true or false"
               />
             </label>
             <label>
@@ -2842,6 +2904,8 @@ function MarketsView({
                                 ? "Smarkets cancellations are disabled by default and require an approved session token, shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : selectedMarket.market_id === "probable"
                                 ? "Probable cancellations are disabled by default and require HMAC L2 credentials, shared live-safety gates, a separate opt-in, and exact operator/global confirmation."
+                              : selectedMarket.market_id === "predict_fun"
+                                ? "Predict.fun relay removal is disabled by default and requires the shared live-safety gates, a separate opt-in, JWT credentials, and exact operator confirmation; it does not invalidate orders on-chain."
                               : selectedMarket.market_id === "hyperliquid"
                                 ? "Hyperliquid signed cancellation, modification, and scheduled-cancel actions are disabled by default and require an externally signed exchange envelope, shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
@@ -3339,6 +3403,28 @@ function MarketsView({
                         />
                       </label>
                     ) : null}
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "predict_fun" ? (
+                  <>
+                    <label className="wide-field">
+                      <span>{marketReadForm.order_management_operation === "remove_orders_by_hash" ? "Order hashes JSON" : "Order ids JSON"}</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder={marketReadForm.order_management_operation === "remove_orders_by_hash" ? '["0x…"]' : '["order-id-1", "order-id-2"]'}
+                      />
+                    </label>
+                    <p className="form-help">Predict.fun removal is relay-only; it does not invalidate orders on-chain.</p>
                     <label className="wide-field">
                       <span>Operator confirmation</span>
                       <input

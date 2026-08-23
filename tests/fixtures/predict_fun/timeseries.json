@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "data": [
+    {"timestamp": 1733312400000, "price": "0.54"},
+    {"timestamp": 1733316000000, "price": "0.57"}
+  ]
+}
