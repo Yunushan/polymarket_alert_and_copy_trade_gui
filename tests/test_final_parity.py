@@ -95,6 +95,7 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("account_with_cash_outs", source)
         self.assertIn("account_before", source)
         self.assertIn("account_after", source)
+        self.assertIn("force: form.account_historical", source)
         self.assertIn('"order_by_client_id"', type_source)
 
     def test_react_analytics_source_exposes_direct_mdd_lookup_and_cached_detail(self) -> None:

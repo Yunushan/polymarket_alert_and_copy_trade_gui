@@ -1119,6 +1119,7 @@ export default function App() {
             group_by_event: form.account_group_by_event,
             on_behalf_of: form.account_on_behalf_of.trim() || undefined,
             historical: form.account_historical,
+            force: form.account_historical,
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
