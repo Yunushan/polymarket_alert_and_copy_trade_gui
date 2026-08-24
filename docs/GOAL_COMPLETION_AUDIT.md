@@ -181,6 +181,14 @@ direction, positive filled quantity, probability price, timestamp, and order
 identity, preserves the raw order, and never calls the live order endpoint from
 copy preview.
 
+### MetaDAO one-level top-of-book
+
+The official MetaDAO `/api/tickers` bid/ask summaries are normalized as a
+fixture-backed one-level `OrderBookSnapshot`. The response marks
+`depth=top_of_book_only` and `size_available=false`, with unknown level sizes
+represented as `0.0`; full depth and live execution remain external or
+unsupported. The regression is covered by the MetaDAO adapter fixture tests.
+
 ## Open External Evidence Gates
 
 These are deliberately not replaced with simulated success:

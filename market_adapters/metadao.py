@@ -9,13 +9,15 @@ from urllib.parse import urlsplit
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .identity import require_activity_identity
 from .types import (
     MarketCandle,
     MarketContract,
     MarketEvent,
     MarketTrade,
+    OrderBookLevel,
+    OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -95,8 +97,8 @@ class MetaDAOAdapter(MarketAdapter):
 
     MetaDAO's current official API is a public CoinGecko-compatible feed of
     DAO/token pairs. It exposes prices, bid/ask summaries, volume, liquidity,
-    and a slot-bounded public spot-swap tape, but not depth or a user-order
-    endpoint. The adapter maps those documented rows to the shared market
+    and a slot-bounded public spot-swap tape, but not depth quantities or a
+    user-order endpoint. The adapter maps those documented rows to the shared market
     model, derives bounded candles from exact swap legs, and keeps paper orders
     local. Swap rows include the documented maker wallet, so bounded wallet
     activity can be filtered locally for simulation-first copy previews.
@@ -426,11 +428,32 @@ class MetaDAOAdapter(MarketAdapter):
             for bucket_timestamp, bucket in sorted(buckets.items())
         ]
 
-    def get_orderbook(self, contract_id: str):
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "orderbook_reading",
-            "MetaDAO's official ticker feed exposes bid/ask summaries, not orderbook depth.",
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        """Return MetaDAO's documented one-level spread-adjusted quote view.
+
+        The official ticker feed publishes bid/ask summaries, but no depth or
+        quote quantities. Unknown sizes are represented as ``0.0`` and the
+        original ticker row remains attached for auditability; this deliberately
+        does not claim a full orderbook.
+        """
+
+        self.ensure_capability("orderbook_reading")
+        ticker_id = self._split_contract_id(contract_id)
+        row = self._find_ticker(ticker_id)
+        if not row:
+            raise MarketConfigurationError(f"MetaDAO ticker {ticker_id!r} was not found.")
+        bid = self._positive_number(self._value(row, "bid", "highest_bid"))
+        ask = self._positive_number(self._value(row, "ask", "lowest_ask"))
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=self._contract_id(ticker_id),
+            bids=[OrderBookLevel(price=bid, size=0.0)] if bid is not None else [],
+            asks=[OrderBookLevel(price=ask, size=0.0)] if ask is not None else [],
+            raw={
+                "ticker": dict(row),
+                "depth": "top_of_book_only",
+                "size_available": False,
+            },
         )
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:

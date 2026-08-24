@@ -72,7 +72,9 @@ METADAO_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
-    orderbook_reading=False,
+    # The official ticker feed publishes spread-adjusted bid/ask quotes but
+    # no depth or quantities; expose an explicit one-level top-of-book view.
+    orderbook_reading=True,
     trade_history=True,
     candle_history=True,
     alerts=True,
@@ -553,7 +555,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
             "bounded recent public spot-swap history, derived OHLCV candles, alerts, local paper orders, and "
             "guarded externally signed Solana router transactions; omitted time bounds return only a bounded recent "
             "slice, explicit out-of-window bounds fail closed, and full-history completeness is not claimed. "
-            "Orderbook depth, wallet signing, approvals, and settlement remain operator-owned or unsupported; wallet copy is bounded and simulation-first."
+            "The official bid/ask summaries are exposed as a one-level top-of-book with unknown sizes; full depth, "
+            "wallet signing, approvals, and settlement remain operator-owned or unsupported; wallet copy is bounded and simulation-first."
         ),
         capabilities=METADAO_CAPABILITIES,
     ),

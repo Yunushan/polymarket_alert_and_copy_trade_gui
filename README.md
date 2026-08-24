@@ -552,7 +552,8 @@ decimal-unsafe `sqrtPrice` reconstruction. Futarchy chart semantics remain
 fail-closed.
 
 MetaDAO recent history and wallet activity are reconstructed only from the official public spot-swap
-event surface. Each call is bounded by a configurable Solana slot window, a
+event surface. The official `/api/tickers` bid/ask summaries are exposed as a
+one-level top-of-book with unknown sizes; full depth is not claimed. Each call is bounded by a configurable Solana slot window, a
 per-call scan/request window cap, a streamed response-byte cap, and a total decoded-row cap. OHLCV candles are
 derived from those validated swaps, retain their source trade ids, and are marked
 as derived. Calls without timestamp bounds intentionally return only that recent
@@ -622,7 +623,7 @@ scan and produces simulation-first paper copy previews only; it requires a canon
 | PRDT Finance (`prdt_finance`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet required only for future live chain flow | Jurisdiction varies |
 | SynStation (`synstation`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
 | Gnosis Prediction Markets (`gnosis_prediction_markets`) | Implemented | Yes | Yes (public FPMM trades; bounded derived candles; creator activity) | Yes | Guarded, off by default | Yes, simulation-first (bounded creator activity) | Required | Subgraph endpoint required | Jurisdiction varies |
-| MetaDAO (`metadao`) | Implemented | Yes | Yes (bounded recent public spot swaps; derived candles) | Yes | Guarded, off by default | Yes, simulation-first (bounded maker activity) | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
+| MetaDAO (`metadao`) | Implemented | Yes | Yes (one-level bid/ask top-of-book; bounded recent swaps; derived candles) | Yes | Guarded, off by default | Yes, simulation-first (bounded maker activity) | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | Levr Bet (`levr_bet`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 | Dexsport (`dexsport`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
 | Lamas Finance (`lamas_finance`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Solana RPC; externally signed wallet transaction required for live orders | Devnet example; production deployment must be reviewed |

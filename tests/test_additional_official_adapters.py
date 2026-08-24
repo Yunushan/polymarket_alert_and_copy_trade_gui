@@ -1112,8 +1112,16 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(paper.accepted)
         self.assertEqual(paper.raw["request"]["ticker_id"], ticker_id)
 
-        with self.assertRaises(UnsupportedFeatureError):
-            adapter.get_orderbook(order.contract_id)
+        orderbook = adapter.get_orderbook(order.contract_id)
+        self.assertEqual(orderbook.contract_id, order.contract_id)
+        self.assertEqual(orderbook.raw["depth"], "top_of_book_only")
+        self.assertFalse(orderbook.raw["size_available"])
+        self.assertEqual(len(orderbook.bids), 1)
+        self.assertEqual(len(orderbook.asks), 1)
+        self.assertAlmostEqual(orderbook.bids[0].price, 0.080934024581)
+        self.assertAlmostEqual(orderbook.asks[0].price, 0.081747431863)
+        self.assertEqual(orderbook.bids[0].size, 0.0)
+        self.assertEqual(orderbook.asks[0].size, 0.0)
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
 
