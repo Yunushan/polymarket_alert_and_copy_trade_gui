@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -562,10 +562,145 @@ class ProphetExchangeAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Prophet Exchange copy trading is unsupported because the official API does not expose account-activity mirroring.",
+        """Build a local copy preview from a complete authenticated fill.
+
+        ProphetX's documented ``get_trades`` feed is account-scoped and its
+        fixed ``get_order/{id}`` enrichment supplies the event, market,
+        outcome, and line identity.  Copying accepts that normalized activity
+        shape (or the same documented field aliases), validates the complete
+        fill, and routes only to the local paper-order path.  It never calls
+        ``submit_order`` and it never infers a SELL/close operation: the
+        documented market-maker feed is BUY-only in this adapter.
+        """
+
+        self.ensure_capability("copy_trading")
+        if not isinstance(activity, Mapping):
+            raise MarketConfigurationError("Prophet Exchange copy activity must be an object.")
+
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if contract_id:
+            event_id, market_id, outcome_id, line_id = self._split_contract_id(contract_id)
+        else:
+            event_id = self._required_id(
+                self._value(activity, "event_id", "eventId", "sport_event_id", "sportEventId"),
+                "event",
+            )
+            market_id = self._required_id(
+                self._value(activity, "market_id", "marketId"),
+                "market",
+            )
+            outcome_id = self._required_id(
+                self._value(activity, "outcome_id", "outcomeId"),
+                "outcome",
+            )
+            line_id = self._line_id(activity)
+            contract_id = self._contract_id(event_id, market_id, outcome_id, line_id)
+
+        nested_order = activity.get("order")
+        if isinstance(nested_order, Mapping):
+            for expected, aliases, label in (
+                (event_id, ("sport_event_id", "event_id", "eventId"), "event"),
+                (market_id, ("market_id", "marketId"), "market"),
+                (outcome_id, ("outcome_id", "outcomeId"), "outcome"),
+                (line_id, ("line_id", "lineId"), "line"),
+            ):
+                observed = self._value(nested_order, *aliases)
+                if observed not in (None, "") and str(observed).strip() != expected:
+                    raise MarketConfigurationError(
+                        f"Prophet Exchange copy activity {label} identity does not match contract_id."
+                    )
+
+        status = str(
+            activity.get("status")
+            or activity.get("state")
+            or (nested_order.get("status") if isinstance(nested_order, Mapping) else "")
+            or ""
+        ).strip().lower()
+        if status not in {"filled", "partial", "partially_filled", "matched", "executed", "complete", "completed", "settled"}:
+            raise MarketConfigurationError(
+                "Prophet Exchange copy activity must represent a filled or partially filled order."
+            )
+
+        side = str(activity.get("side") or activity.get("order_side") or "BUY").strip().upper()
+        if side != "BUY":
+            raise MarketConfigurationError(
+                "Prophet Exchange copy activity side must be BUY; the documented market-maker feed is BUY-only."
+            )
+
+        size = self._positive_float(
+            self._value(
+                activity,
+                "filled_quantity",
+                "filledQuantity",
+                "executed_quantity",
+                "executedQuantity",
+                "quantity",
+                "size",
+            )
+        )
+        if size is None and isinstance(nested_order, Mapping):
+            size = self._positive_float(
+                self._value(
+                    nested_order,
+                    "filled_quantity",
+                    "filledQuantity",
+                    "executed_quantity",
+                    "executedQuantity",
+                    "quantity",
+                    "size",
+                )
+            )
+        if size is None:
+            raise MarketConfigurationError("Prophet Exchange copy activity filled quantity must be positive and finite.")
+
+        raw_price = self._value(
+            activity,
+            "probability",
+            "price",
+            "decimal_price",
+            "decimalPrice",
+            "odds",
+        )
+        if raw_price in (None, "") and isinstance(nested_order, Mapping):
+            raw_price = self._value(nested_order, "probability", "price", "decimal_price", "decimalPrice", "odds")
+        probability = self._probability(raw_price)
+        if probability is None or probability <= 0.0:
+            raise MarketConfigurationError("Prophet Exchange copy activity price must map to a probability in (0, 1].")
+
+        trade_id = self._id(activity, "trade_id", "tradeId", "fill_id", "fillId", "order_id", "orderId")
+        if not trade_id and isinstance(nested_order, Mapping):
+            trade_id = self._id(nested_order, "trade_id", "tradeId", "fill_id", "fillId", "order_id", "orderId")
+        if not trade_id:
+            raise MarketConfigurationError("Prophet Exchange copy activity requires a documented trade or order id.")
+
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side="BUY",
+                size=size,
+                limit_price=probability,
+                metadata={
+                    "activity": dict(activity),
+                    "source": "prophetx_v4_authenticated_trades",
+                    "account_scoped": True,
+                    "trade_id": trade_id,
+                },
+            )
+        )
+        preview.raw["source"] = "prophetx_v4_authenticated_trades"
+        preview.raw["account_scoped"] = True
+        preview.raw["trade_id"] = trade_id
+        preview.raw["copied"] = True
+        preview.raw["activity"] = dict(activity)
+        return PaperOrderResult(
+            market_id=preview.market_id,
+            contract_id=preview.contract_id,
+            accepted=preview.accepted,
+            message=preview.message,
+            filled_size=size,
+            average_price=probability,
+            raw=preview.raw,
         )
 
     def _markets_for_event(self, event_id: str) -> List[Mapping[str, Any]]:

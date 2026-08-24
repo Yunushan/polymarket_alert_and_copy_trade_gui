@@ -246,7 +246,9 @@ PROPHET_EXCHANGE_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The authenticated v4 filled-trade feed is complete enough for local
+    # simulation-first copy previews.  Copying never submits a live order.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -638,8 +640,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.prophetx.co/docs/integration",
         description=(
             "Official ProphetX Market Data and Trading API adapter for tournament/event/market discovery, "
-            "available-quantity quotes, authenticated filled trades with derived candles, local paper orders, "
-            "and guarded authenticated market-maker orders."
+            "available-quantity quotes, authenticated filled trades with derived candles, simulation-first copy "
+            "previews, local paper orders, and guarded authenticated market-maker orders."
         ),
         capabilities=PROPHET_EXCHANGE_CAPABILITIES,
     ),

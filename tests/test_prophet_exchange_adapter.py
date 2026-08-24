@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from market_adapters import PaperOrderRequest, ProphetExchangeAdapter, UnsupportedFeatureError
+from market_adapters import PaperOrderRequest, ProphetExchangeAdapter
 from market_adapters.errors import MarketConfigurationError
 
 
@@ -56,7 +56,7 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertEqual(
             health["account_recovery_operations"],
             ["balance", "transactions", "order_history", "order_detail", "trades"],
@@ -95,8 +95,40 @@ class ProphetExchangeAdapterTests(unittest.TestCase):
         self.assertEqual(paper.raw["request"]["price"], 2.0)
         self.assertGreaterEqual(len(calls), 5)
 
-        with self.assertRaises(UnsupportedFeatureError):
+        with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({})
+
+        activity = {
+            "asset": "101:555:1:line_1",
+            "status": "filled",
+            "side": "BUY",
+            "price": 2.0,
+            "quantity": 5.0,
+            "id": 7001,
+            "order": {
+                "sport_event_id": 101,
+                "market_id": 555,
+                "outcome_id": 1,
+                "line_id": "line_1",
+            },
+        }
+        copied = adapter.copy_trade_from_activity(activity)
+        self.assertTrue(copied.accepted)
+        self.assertEqual(copied.contract_id, "101:555:1:line_1")
+        self.assertEqual(copied.filled_size, 5.0)
+        self.assertAlmostEqual(copied.average_price or 0.0, 0.5)
+        self.assertEqual(copied.raw["trade_id"], "7001")
+        self.assertTrue(copied.raw["account_scoped"])
+        self.assertTrue(copied.raw["copied"])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**activity, "side": "SELL"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**activity, "quantity": 0})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity(
+                {**activity, "order": {**activity["order"], "market_id": 556}}
+            )
 
     def test_authenticated_trades_and_derived_candles_use_fixed_v4_contracts(self) -> None:
         adapter = ProphetExchangeAdapter(
