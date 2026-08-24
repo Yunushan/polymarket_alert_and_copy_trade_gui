@@ -3728,6 +3728,14 @@ def market_account_payload(
             kwargs["dex"] = _query_value(query_params, "dex") or ""
         elif normalized_operation == "order_history":
             kwargs["limit"] = _clamp_int(_query_value(query_params, "limit", "2000"), 2000, 1, 2000)
+    elif normalized_market_id == "dflow":
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "25"), 25, 1, 250),
+            "cursor": _query_value(query_params, "cursor"),
+            "ticker": _query_value(query_params, "ticker") or _query_value(query_params, "market_id"),
+            "mint": _query_value(query_params, "mint") or _query_value(query_params, "token_id"),
+        }
     elif normalized_market_id == "predict_fun":
         if normalized_operation == "account":
             kwargs = {}

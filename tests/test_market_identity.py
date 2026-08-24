@@ -39,6 +39,16 @@ class ActivityIdentityTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             require_activity_identity("metadao", "not-a-wallet")
 
+    def test_dflow_identity_uses_the_same_canonical_solana_boundary(self) -> None:
+        wallet = "11111111111111111111111111111111"
+        self.assertEqual(
+            normalize_activity_identity("dflow", f"SOLANA:{wallet}"),
+            f"solana:{wallet}",
+        )
+        self.assertIsNone(normalize_activity_identity("dflow", "0x" + "11" * 20))
+        with self.assertRaises(MarketConfigurationError):
+            require_activity_identity("dflow", "not-a-wallet")
+
 
 if __name__ == "__main__":
     unittest.main()

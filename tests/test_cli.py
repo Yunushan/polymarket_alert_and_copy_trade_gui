@@ -1950,6 +1950,61 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(params["scan_retry_attempts"], ["5"])
         self.assertEqual(params["scan_retry_delay_seconds"], ["30"])
 
+    def test_dflow_account_activity_command_forwards_wallet_and_bounds(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="dflow")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("account_activity",),
+            account_recovery=account_recovery,
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), \
+             patch("market_sentinel_cli._registry", return_value=SimpleNamespace()), \
+             patch("market_sentinel_cli.adapter_for_market", return_value=adapter), \
+             patch("market_sentinel_cli.require_market_enabled"), \
+             patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "account_activity",
+                        "--market",
+                        "dflow",
+                        "--wallet",
+                        "11111111111111111111111111111111",
+                        "--limit",
+                        "12",
+                        "--ticker",
+                        "KXBTC-26DEC31-100K",
+                        "--token-id",
+                        "mint-yes",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                        "cursor": None,
+                        "ticker": "KXBTC-26DEC31-100K",
+                        "mint": "mint-yes",
+                    },
+                )
+            ],
+        )
+
     def test_polymarket_leaderboard_cli_runs_headless_json_output(self) -> None:
         payload = {
             "rows": [{"rank": 1, "display_name": "alpha", "wallet": "0xabc", "roi_pct": 12.5}],

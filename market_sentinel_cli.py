@@ -1406,6 +1406,7 @@ AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
 THALES_ACCOUNT_OPERATIONS = ("positions", "transactions")
 METADAO_ACCOUNT_OPERATIONS = ("activity",)
 OMEN_ACCOUNT_OPERATIONS = ("activity",)
+DFLOW_ACCOUNT_OPERATIONS = ("account_activity",)
 METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
 GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS = ("me", "prediction_sets", "scores")
 MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
@@ -1448,6 +1449,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + THALES_ACCOUNT_OPERATIONS
         + METADAO_ACCOUNT_OPERATIONS
         + OMEN_ACCOUNT_OPERATIONS
+        + DFLOW_ACCOUNT_OPERATIONS
         + METACULUS_ACCOUNT_OPERATIONS
         + GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS
         + MYRIAD_ACCOUNT_OPERATIONS
@@ -1799,6 +1801,14 @@ def run_market_account(args: argparse.Namespace) -> int:
                         "market_ids": str(getattr(args, "market_ids", "") or "").strip() or None,
                     }
                 )
+    elif market_id == "dflow":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 25, 1, 250),
+            "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+            "ticker": str(getattr(args, "ticker", "") or "").strip() or None,
+            "mint": str(getattr(args, "token_id", "") or "").strip() or None,
+        }
     elif market_id == "xo_market":
         if operation in {"account", "positions", "orders"}:
             kwargs = {}

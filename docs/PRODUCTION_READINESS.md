@@ -41,10 +41,10 @@ check does not receive local test or security points.
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
 The latest local audit on 2026-08-24 is **83/100 (not ready)** when no external
-evidence manifests are supplied. Local verification passed all 869 tests (7
+evidence manifests are supplied. Local verification passed all 872 tests (7
 intentionally skipped), Ruff, the adapter catalog (68 markets, 57 implemented
-and 11 explicitly blocked), 342 offline fixtures, documentation, workflow,
-secret-hygiene, and packaging checks; branch coverage was 76% overall.
+and 11 explicitly blocked), 343 offline fixtures, documentation, workflow,
+secret-hygiene, and packaging checks; branch coverage was 73% overall.
 Metaculus now supports fixture-backed local forecast
 previews and guarded official forecast submission for binary, multiple-choice,
 and numeric/date question shapes; the web form forwards validated metadata JSON.

@@ -7,7 +7,8 @@ from urllib.parse import quote
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError
+from .identity import require_activity_identity
 from .types import (
     MarketCandle,
     MarketContract,
@@ -29,6 +30,7 @@ DFLOW_REFERENCES = (
     "https://dflow.mintlify.app/build/metadata-api/markets/market-by-mint",
     "https://dflow.mintlify.app/build/metadata-api/orderbook/orderbook-by-mint",
     "https://dflow.mintlify.app/build/metadata-api/trades/trades-by-mint",
+    "https://dflow.mintlify.app/build/metadata-api/trades/onchain-trades",
     "https://dflow.mintlify.app/build/recipes/prediction-markets/decrease-position",
 )
 
@@ -43,6 +45,7 @@ class DFlowAdapter(MarketAdapter):
 
     metadata = get_market_metadata("dflow")
     live_order_sides = ("BUY", "SELL")
+    account_recovery_operations = ("account_activity",)
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, *, runtime=None) -> None:
         super().__init__(config, runtime=runtime)
@@ -253,6 +256,83 @@ class DFlowAdapter(MarketAdapter):
             )
         return trades
 
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return bounded wallet-filtered DFlow on-chain fills.
+
+        DFlow's documented ``onchain-trades`` endpoint is the only official
+        wallet-scoped fill feed.  It includes the input/output mints, outcome
+        ticker, contract count, probability price, wallet, and transaction
+        signature needed for a simulation-first copy preview.  Rows that
+        cannot be mapped to a configured YES/NO mint are skipped rather than
+        guessed.
+        """
+
+        self.ensure_capability("copy_trading")
+        identity = require_activity_identity(self.market_id, wallet_address)
+        wallet = identity.split(":", 1)[1] if identity.lower().startswith("solana:") else identity
+        desired = self._activity_limit(limit)
+        self.resolve_credential("dflow_api_key", ("DFLOW_API_KEY",), required=True, label="DFLOW_API_KEY")
+        payload = self._metadata_get(
+            "/api/v1/onchain-trades",
+            params={"wallet": wallet, "limit": desired, "sortBy": "createdAt", "sortOrder": "desc"},
+        )
+        activities: List[Dict[str, Any]] = []
+        for raw in self._rows(payload, "trades", "data"):
+            activity = self._normalize_onchain_activity(identity, raw)
+            if activity is not None:
+                activities.append(activity)
+            if len(activities) >= desired:
+                break
+        return activities
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read DFlow's documented wallet-filtered on-chain fill feed."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "DFlow account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+        wallet = kwargs.get("wallet") or kwargs.get("address") or kwargs.get("trader")
+        identity = require_activity_identity(self.market_id, wallet)
+        desired = self._activity_limit(kwargs.get("limit", 25))
+        self.resolve_credential("dflow_api_key", ("DFLOW_API_KEY",), required=True, label="DFLOW_API_KEY")
+        raw_wallet = identity.split(":", 1)[1] if identity.lower().startswith("solana:") else identity
+        params: Dict[str, Any] = {
+            "wallet": raw_wallet,
+            "limit": desired,
+            "sortBy": "createdAt",
+            "sortOrder": "desc",
+        }
+        ticker = str(kwargs.get("ticker") or kwargs.get("market_id") or "").strip()
+        if ticker:
+            params["ticker"] = ticker
+        mint = str(kwargs.get("mint") or kwargs.get("token_id") or "").strip()
+        if mint:
+            params["mint"] = mint
+        cursor = self._activity_cursor(kwargs.get("cursor"))
+        if cursor:
+            params["cursor"] = cursor
+        payload = self._metadata_get("/api/v1/onchain-trades", params=params)
+        activities = [
+            activity
+            for raw in self._rows(payload, "trades", "data")
+            if (activity := self._normalize_onchain_activity(identity, raw)) is not None
+        ]
+        return {
+            "source": "dflow_onchain_trades",
+            "endpoint": "/api/v1/onchain-trades",
+            "wallet": identity,
+            "limit": desired,
+            "ticker": ticker or None,
+            "mint": mint or None,
+            "coverage": "bounded_wallet_filtered",
+            "activity": activities[:desired],
+            "raw": payload,
+        }
+
     def list_candles(
         self,
         contract_id: str,
@@ -330,6 +410,7 @@ class DFlowAdapter(MarketAdapter):
                 f"DRY RUN: would request DFlow {str(order.side).upper()} {side} order for {float(order.size):g} contracts"
                 + (f" at limit {float(order.limit_price):.4f}" if order.limit_price is not None else "")
             ),
+            average_price=self._safe_probability(order.limit_price),
             raw={"trade_request": request, "outcome_side": side},
         )
 
@@ -370,11 +451,101 @@ class DFlowAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "DFlow copy trading is unsupported because wallet activity mirroring is outside the official API contract.",
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("DFlow activity has no outcome-mint contract id.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in self.live_order_sides:
+            raise MarketConfigurationError("DFlow activity side must be BUY or SELL.")
+        size = self._positive_number(activity.get("size") or activity.get("contracts"))
+        if size is None:
+            raise MarketConfigurationError("DFlow activity contracts must be positive and numeric.")
+        raw_price = activity.get("price")
+        limit_price = self._safe_probability(raw_price)
+        if limit_price is None:
+            raise MarketConfigurationError("DFlow activity price must be between 0 and 1.")
+        # Resolve the canonical mint before constructing the paper order so a
+        # copied row cannot redirect execution to an unlisted outcome.
+        _market, _mint, _outcome, canonical = self._resolve_contract(contract_id)
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=canonical,
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata={"activity": dict(activity), "source": "dflow_onchain_trades"},
+            )
         )
+
+    def _normalize_onchain_activity(
+        self, identity: str, raw: Mapping[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        ticker = str(raw.get("marketTicker") or raw.get("market_ticker") or raw.get("ticker") or "").strip()
+        if not ticker:
+            return None
+        input_mint = str(raw.get("inputMint") or raw.get("input_mint") or "").strip()
+        output_mint = str(raw.get("outputMint") or raw.get("output_mint") or "").strip()
+        if not input_mint or not output_mint:
+            return None
+        market = self._market_cache.get(ticker)
+        if market is None:
+            try:
+                payload = self._metadata_get("/api/v1/markets", params={"ticker": ticker, "limit": 1})
+            except Exception:
+                return None
+            rows = self._rows(payload, "markets", "data")
+            market = rows[0] if rows else None
+            if market is not None:
+                self._cache_market(market)
+        if not market:
+            return None
+        account, settlement = self._account_for_market(market)
+        yes_mint = self._mint(account, "yesMint", market.get("yesMint"))
+        no_mint = self._mint(account, "noMint", market.get("noMint"))
+        outcome_mint = ""
+        order_side = ""
+        if input_mint == settlement and output_mint in {yes_mint, no_mint}:
+            outcome_mint, order_side = output_mint, "BUY"
+        elif output_mint == settlement and input_mint in {yes_mint, no_mint}:
+            outcome_mint, order_side = input_mint, "SELL"
+        if not outcome_mint:
+            return None
+        outcome = "YES" if outcome_mint == yes_mint else "NO"
+        size = self._positive_number(raw.get("contracts") or raw.get("count") or raw.get("quantity"))
+        price = self._safe_probability(
+            raw.get("usdPricePerContract")
+            or raw.get("usd_price_per_contract")
+            or raw.get("price")
+            or raw.get("priceDollars")
+        )
+        timestamp = self._timestamp_seconds(raw.get("createdAt") or raw.get("created_at") or raw.get("timestamp"))
+        transaction = str(
+            raw.get("transactionSignature") or raw.get("transaction_signature") or raw.get("signature") or ""
+        ).strip()
+        activity_id = str(raw.get("id") or transaction).strip()
+        if size is None or price is None or timestamp is None or not activity_id:
+            return None
+        contract_id = f"{ticker}:{outcome_mint}"
+        return {
+            "activityId": f"dflow:{activity_id}",
+            "proxyWallet": identity,
+            "asset": contract_id,
+            "contract_id": contract_id,
+            "market_id": self.market_id,
+            "side": order_side,
+            "size": size,
+            "price": price,
+            "timestamp": int(timestamp),
+            "transactionHash": transaction,
+            "slug": ticker,
+            "outcome": outcome,
+            "source": "dflow_onchain_trades",
+            "wallet": identity,
+            "trade_id": activity_id,
+            "raw": dict(raw),
+        }
 
     def _metadata_get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(
@@ -616,6 +787,25 @@ class DFlowAdapter(MarketAdapter):
         if parsed < 1 or parsed > 1000:
             raise MarketConfigurationError("DFlow history limit must be between 1 and 1000.")
         return parsed
+
+    @staticmethod
+    def _activity_limit(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("DFlow activity limit must be an integer between 1 and 250.") from exc
+        if parsed < 1 or parsed > 250:
+            raise MarketConfigurationError("DFlow activity limit must be between 1 and 250.")
+        return parsed
+
+    @staticmethod
+    def _activity_cursor(value: Any) -> str:
+        """Validate the opaque pagination token without interpreting it."""
+
+        cursor = str(value or "").strip()
+        if len(cursor) > 256 or any(ord(char) < 0x20 or ord(char) == 0x7F for char in cursor):
+            raise MarketConfigurationError("DFlow activity cursor must be a printable token up to 256 characters.")
+        return cursor
 
     @staticmethod
     def _history_timestamp(value: Any, label: str) -> int:

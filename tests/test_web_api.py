@@ -575,7 +575,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(len(payload["support_matrix"]), payload["counts"]["total"])
         self.assertEqual(payload["support_summary"]["total_markets"], payload["counts"]["total"])
         self.assertEqual(payload["support_summary"]["implementation"]["implemented"], 57)
-        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 25)
+        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 26)
         self.assertEqual(kalshi["support"]["operations"]["paper_trading"]["status"], "supported")
         self.assertEqual(kalshi["support"]["operations"]["live_trading"]["status"], "guarded")
 
@@ -1205,6 +1205,57 @@ class WebApiTests(unittest.TestCase):
                     {
                         "wallet": "11111111111111111111111111111111",
                         "limit": 12,
+                    },
+                )
+            ],
+        )
+
+    def test_dflow_account_activity_payload_forwards_wallet_filters_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="dflow",
+            display_name="DFlow",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("account_activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["dflow"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "dflow",
+            "account_activity",
+            {
+                "wallet": ["11111111111111111111111111111111"],
+                "limit": ["12"],
+                "ticker": ["KXBTC-26DEC31-100K"],
+                "mint": ["mint-yes"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "account_activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                        "cursor": "",
+                        "ticker": "KXBTC-26DEC31-100K",
+                        "mint": "mint-yes",
                     },
                 )
             ],

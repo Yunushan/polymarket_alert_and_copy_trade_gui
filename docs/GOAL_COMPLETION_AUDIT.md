@@ -4,6 +4,12 @@ This document records the current evidence for the multi-market support goal in
 [`GOAL.md`](../GOAL.md). It is an evidence index, not a claim that external
 account, jurisdiction, or platform-runner checks have occurred.
 
+DFlow's wallet-filtered on-chain fill feed is now exposed through the bounded
+account activity surface and simulation-first copy preview path. The adapter
+requires a canonical Solana identity, API key, complete outcome-mint mapping,
+side, size, price, timestamp, and transaction identity; no live order is
+submitted by copy processing.
+
 Good Judgment Open's documented authenticated recovery surface is also
 covered: `/api/v1/me`, `/api/v1/prediction_sets`, and `/api/v1/scores` are
 exposed as bounded account operations and preserve forecast/score semantics.

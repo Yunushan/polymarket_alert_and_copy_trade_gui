@@ -266,7 +266,10 @@ DFLOW_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # DFlow's documented on-chain trade feed is wallet-filtered and includes
+    # complete mint, side, size, price, and transaction fields for local,
+    # simulation-first copy previews.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,

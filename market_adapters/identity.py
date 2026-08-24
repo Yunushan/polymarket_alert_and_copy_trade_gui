@@ -54,7 +54,7 @@ def normalize_activity_identity(market_id: str, raw: object) -> Optional[str]:
         if not _MANIFOLD_USERNAME_RE.fullmatch(username):
             return None
         return f"{prefix}{username}"
-    if market == "metadao":
+    if market in {"metadao", "dflow"}:
         return _normalize_solana_identity(value)
     return normalize_wallet(value)
 
@@ -70,9 +70,10 @@ def require_activity_identity(market_id: str, raw: object) -> str:
         raise MarketConfigurationError(
             "Manifold activity identity must use the safe manifold:<username> format."
         )
-    if market == "metadao":
+    if market in {"metadao", "dflow"}:
         raise MarketConfigurationError(
-            "MetaDAO activity identity must use a canonical Solana wallet address (optionally prefixed solana:)."
+            f"{market.title()} activity identity must use a canonical Solana wallet address "
+            "(optionally prefixed solana:)."
         )
     raise MarketConfigurationError("Activity identity must be a valid 0x wallet/proxyWallet address.")
 
@@ -83,6 +84,6 @@ def activity_identity_hint(market_id: str) -> str:
     market = str(market_id or "").strip().lower()
     if market == "manifold":
         return "manifold:<username>"
-    if market == "metadao":
+    if market in {"metadao", "dflow"}:
         return "solana:<base58 wallet address>"
     return "0x wallet address"

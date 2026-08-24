@@ -726,7 +726,7 @@
         "adapter_status": "implemented",
         "credential_env_vars": ["DFLOW_API_KEY", "DFLOW_WALLET_ADDRESS", "DFLOW_USER_PUBLIC_KEY", "DFLOW_SOLANA_RPC_URL"],
         "live_trading_enabled": false,
-        "notes": "Official DFlow nested event/market discovery, outcome mints, prices, orderbooks, alerts, paper trade requests, and guarded wallet-signed Solana transaction submission are implemented. Credentials, Proof/KYC, wallet, balance, redemption, and order-status evidence remain external gates."
+        "notes": "Official DFlow nested event/market discovery, outcome mints, prices, orderbooks, alerts, wallet-filtered on-chain fills, simulation-first copy previews, paper trade requests, and guarded wallet-signed Solana transaction submission are implemented. Credentials, Proof/KYC, wallet, balance, redemption, and order-status evidence remain external gates."
       }
     },
     "space": {

@@ -2184,6 +2184,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         events = load_fixture("dflow", "events")
         orderbook = load_fixture("dflow", "orderbook")
         trades = load_fixture("dflow", "trades")
+        onchain_trades = load_fixture("dflow", "onchain_trades")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/api/v1/events"):
@@ -2251,6 +2252,41 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(candles[0].raw["derived"])
         self.assertEqual(candles[0].raw["source"], "dflow_public_trade_feed")
 
+        activity_adapter = DFlowAdapter({"dflow_api_key": "dflow-key"})
+        activity_adapter._market_cache = adapter._market_cache
+
+        def fake_activity_get_json(url: str, *, params=None, headers=None):
+            self.assertTrue(url.endswith("/api/v1/onchain-trades"))
+            self.assertEqual(
+                params,
+                {
+                    "wallet": "11111111111111111111111111111111",
+                    "limit": 2,
+                    "sortBy": "createdAt",
+                    "sortOrder": "desc",
+                },
+            )
+            self.assertEqual(headers, {"x-api-key": "dflow-key"})
+            return onchain_trades
+
+        activity_adapter.runtime.get_json = fake_activity_get_json  # type: ignore[method-assign]
+        activities = activity_adapter.list_activity("solana:11111111111111111111111111111111", limit=2)
+        self.assertEqual([item["side"] for item in activities], ["BUY", "SELL"])
+        self.assertEqual([item["outcome"] for item in activities], ["YES", "NO"])
+        self.assertEqual(activities[0]["asset"], "KXBTC-26DEC31-100K:mint-yes")
+        self.assertEqual(activities[0]["transactionHash"], "dflow-signature-1")
+        self.assertEqual(activities[0]["proxyWallet"], "solana:11111111111111111111111111111111")
+        copy_preview = activity_adapter.copy_trade_from_activity(activities[0])
+        self.assertTrue(copy_preview.accepted)
+        self.assertAlmostEqual(copy_preview.average_price or 0.0, 0.44)
+        recovered = activity_adapter.account_recovery(
+            "account_activity",
+            wallet="11111111111111111111111111111111",
+            limit=2,
+        )
+        self.assertEqual(recovered["source"], "dflow_onchain_trades")
+        self.assertEqual(len(recovered["activity"]), 2)
+
         with self.assertRaises(MarketConfigurationError):
             candle_adapter.list_candles(order.contract_id, resolution="2h")
         with self.assertRaises(MarketConfigurationError):
@@ -2291,7 +2327,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][1], "https://rpc.example")
         self.assertEqual(calls[0][3]["method"], "sendTransaction")
 
-        with self.assertRaises(UnsupportedFeatureError):
+        with self.assertRaises(MarketConfigurationError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})
 
     def test_matchbook_adapter_maps_events_markets_odds_paper_orders_and_guarded_offers(self) -> None:
