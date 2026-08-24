@@ -503,6 +503,7 @@ class SmarketsAdapter(MarketAdapter):
         preview.raw["source"] = "smarkets_authenticated_executed_orders"
         preview.raw["trade_id"] = trade_id
         preview.raw["copied"] = True
+        preview.raw["activity"] = dict(activity)
         return PaperOrderResult(
             market_id=preview.market_id,
             contract_id=preview.contract_id,

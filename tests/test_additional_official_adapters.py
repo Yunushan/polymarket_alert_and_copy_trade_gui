@@ -1921,6 +1921,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(copy_preview.raw["source"], "smarkets_authenticated_executed_orders")
         self.assertEqual(copy_preview.raw["trade_id"], "order-filled-1")
         self.assertTrue(copy_preview.raw["copied"])
+        self.assertEqual(copy_preview.raw["activity"]["id"], "order-filled-1")
         self.assertAlmostEqual(copy_preview.average_price or 0.0, 0.45)
         self.assertEqual(copy_preview.raw["request"]["quantity"], "25000")
         self.assertEqual(copy_preview.raw["request"]["price"], "4500")
