@@ -423,11 +423,12 @@
       "settings": {
         "adapter_status": "implemented",
         "metaculus_api_base_url": "https://www.metaculus.com/api",
+        "metaculus_forecaster_id": "",
         "credential_env_vars": [
           "METACULUS_API_TOKEN"
         ],
         "live_trading_enabled": false,
-        "notes": "Authenticated read-only post/question discovery and probability reads are implemented through the official Metaculus API. Community Prediction data is access-limited by Metaculus API policy. No trading support exists."
+        "notes": "Authenticated post/question discovery, probability reads, and forecast-owned post recovery are implemented through the official Metaculus API. Set metaculus_forecaster_id (or pass it to the account feed) for GET /api/posts/?forecaster_id=...; Community Prediction data is access-limited by Metaculus API policy. Forecast submission is a guarded forecast update, not exchange execution."
       }
     },
     "scicast": {

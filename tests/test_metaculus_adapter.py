@@ -54,6 +54,8 @@ class MetaculusAdapterTests(unittest.TestCase):
         self.assertTrue(health["trading_supported"])
         self.assertTrue(health["forecast_submission_supported"])
         self.assertEqual(health["trading_semantics"], "forecast_submission_not_exchange_execution")
+        self.assertEqual(health["account_recovery_operations"], ["forecast_posts"])
+        self.assertEqual(health["authenticated_account_endpoints"], ["/posts/?forecaster_id=..."])
         self.assertIn("metaculus.com/api", health["api_base_url"])
 
     def test_missing_api_token_is_clear(self) -> None:
@@ -75,6 +77,56 @@ class MetaculusAdapterTests(unittest.TestCase):
         self.assertEqual(events[0].event_id, "1001")
         self.assertEqual(events[0].status, "open")
         self.assertIn("demo launch", events[0].title)
+
+    def test_account_recovery_reads_documented_forecaster_posts(self) -> None:
+        adapter = MetaculusAdapter()
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params, headers))
+            self.assertEqual(headers["Authorization"], "Token unit-test-token")
+            return load_fixture("forecast_posts")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"METACULUS_API_TOKEN": "unit-test-token"}):
+            response = adapter.account_recovery(
+                "forecast_posts",
+                forecaster_id="123",
+                limit=10,
+                offset=20,
+                with_cp=True,
+                include_cp_history=True,
+                include_descriptions=True,
+            )
+
+        self.assertEqual(response["results"][0]["id"], 1101)
+        self.assertEqual(calls[0][0], "https://www.metaculus.com/api/posts/")
+        self.assertEqual(
+            calls[0][1],
+            {
+                "forecaster_id": 123,
+                "limit": 10,
+                "offset": 20,
+                "with_cp": True,
+                "include_cp_history": True,
+                "include_descriptions": True,
+            },
+        )
+
+    def test_account_recovery_requires_bounded_forecaster_identity(self) -> None:
+        adapter = MetaculusAdapter()
+        for invalid in (None, "", "0", "1.5", "../outside", True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(MarketConfigurationError):
+                    adapter.account_recovery("forecast_posts", forecaster_id=invalid)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("unsupported", forecaster_id=123)
+
+        configured = MetaculusAdapter({"metaculus_forecaster_id": 321})
+        configured.runtime.get_json = lambda url, *, params=None, headers=None: load_fixture("posts")  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"METACULUS_API_TOKEN": "unit-test-token"}):
+            configured.account_recovery("forecast_posts")
 
     def test_list_contracts_maps_binary_multiple_choice_and_numeric_questions(self) -> None:
         adapter = self.make_adapter()

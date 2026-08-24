@@ -680,6 +680,55 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             market_account_payload(cfg, Registry(), "gemini_titan", "arbitrary", {})
 
+    def test_metaculus_account_payload_forwards_forecast_recovery_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="metaculus",
+            display_name="Metaculus",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("forecast_posts",)  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"results": [{"id": 1101}]}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["metaculus"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "metaculus",
+            "forecast_posts",
+            {
+                "forecaster_id": ["123"],
+                "limit": ["10"],
+                "offset": ["20"],
+                "with_cp": ["true"],
+                "include_cp_history": ["true"],
+                "include_descriptions": ["true"],
+            },
+        )
+        self.assertEqual(payload["data"]["results"][0]["id"], 1101)
+        self.assertEqual(
+            calls,
+            [("forecast_posts", {
+                "forecaster_id": "123",
+                "limit": 10,
+                "offset": 20,
+                "with_cp": True,
+                "include_cp_history": True,
+                "include_descriptions": True,
+            })],
+        )
+
     def test_market_position_intent_payload_forwards_allowlisted_fields(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

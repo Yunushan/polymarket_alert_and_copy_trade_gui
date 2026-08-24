@@ -3804,6 +3804,15 @@ def market_account_payload(
             "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
             "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 1_000_000),
         }
+    elif normalized_market_id == "metaculus":
+        kwargs = {
+            "forecaster_id": _query_value(query_params, "forecaster_id") or None,
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+            "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100_000),
+            "with_cp": _query_bool(query_params, "with_cp", False),
+            "include_cp_history": _query_bool(query_params, "include_cp_history", False),
+            "include_descriptions": _query_bool(query_params, "include_descriptions", False),
+        }
     elif normalized_market_id == "myriad_markets":
         kwargs = {
             "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),

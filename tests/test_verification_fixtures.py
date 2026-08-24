@@ -117,11 +117,15 @@ class VerificationFixtureTests(unittest.TestCase):
 
     def test_metaculus_fixtures_cover_core_payload_shapes(self) -> None:
         posts = json.loads((FIXTURE_ROOT / "metaculus" / "posts.json").read_text(encoding="utf-8"))
+        forecast_posts = json.loads((FIXTURE_ROOT / "metaculus" / "forecast_posts.json").read_text(encoding="utf-8"))
         binary = json.loads((FIXTURE_ROOT / "metaculus" / "post_binary.json").read_text(encoding="utf-8"))
         multiple = json.loads((FIXTURE_ROOT / "metaculus" / "post_multiple.json").read_text(encoding="utf-8"))
         numeric = json.loads((FIXTURE_ROOT / "metaculus" / "post_numeric.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(posts.get("results"), list)
+        self.assertIsInstance(forecast_posts.get("results"), list)
+        self.assertEqual(forecast_posts["results"][0].get("user_permission"), "forecaster")
+        self.assertIn("user_forecast", forecast_posts["results"][0]["question"])
         self.assertIn("question", binary)
         self.assertIn("aggregations", binary["question"])
         self.assertIsInstance(binary["question"]["aggregations"].get("recency_weighted", {}).get("history"), list)

@@ -1403,6 +1403,7 @@ PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = (
     "trades",
 )
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
+METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
 MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
 XO_ACCOUNT_OPERATIONS = (
     "account",
@@ -1440,6 +1441,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + MANIFOLD_ACCOUNT_OPERATIONS
         + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
         + AZURO_ACCOUNT_OPERATIONS
+        + METACULUS_ACCOUNT_OPERATIONS
         + MYRIAD_ACCOUNT_OPERATIONS
         + XO_ACCOUNT_OPERATIONS
         + SX_BET_ACCOUNT_OPERATIONS
@@ -1720,6 +1722,15 @@ def run_market_account(args: argparse.Namespace) -> int:
             "wallet": str(getattr(args, "wallet", "") or "").strip(),
             "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
             "offset": _cli_clamp_int(getattr(args, "offset", "0"), 0, 0, 1_000_000),
+        }
+    elif market_id == "metaculus":
+        kwargs = {
+            "forecaster_id": str(getattr(args, "account_forecaster_id", "") or "").strip() or None,
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+            "offset": _cli_clamp_int(getattr(args, "offset", "0"), 0, 0, 100_000),
+            "with_cp": bool(getattr(args, "include_cp", False)),
+            "include_cp_history": bool(getattr(args, "include_cp_history", False)),
+            "include_descriptions": bool(getattr(args, "include_descriptions", False)),
         }
     elif market_id == "myriad_markets":
         kwargs = {
@@ -3110,6 +3121,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
     market_account.add_argument("--event-type-id", default="", help="Betfair event type id filter.")
     market_account.add_argument("--account-event-id", default="", help="Betfair event id filter.")
+    market_account.add_argument("--account-forecaster-id", default="", help="Metaculus forecaster id for forecast_posts.")
     market_account.add_argument("--account-sport-id", default="", help="Matchbook sport id filter.")
     market_account.add_argument("--account-side", default="", help="Matchbook offer side filter (back/lay/win/lose).")
     market_account.add_argument("--account-offer-status", default="", help="Matchbook offer status filter.")
@@ -3142,6 +3154,9 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--search", default="", help="Settled-position search text.")
     market_account.add_argument("--category", default="", help="Settled-position category.")
     market_account.add_argument("--with-cash-outs", action="store_true")
+    market_account.add_argument("--include-cp", action="store_true", help="Metaculus: include Community Prediction data.")
+    market_account.add_argument("--include-cp-history", action="store_true", help="Metaculus: include full aggregation history.")
+    market_account.add_argument("--include-descriptions", action="store_true", help="Metaculus: include question descriptions.")
     market_account.add_argument("--dex", default="", help="Optional Hyperliquid perpetual DEX name.")
     market_account.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
     market_account.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")

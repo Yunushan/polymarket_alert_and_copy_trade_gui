@@ -1,0 +1,21 @@
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": 1101,
+      "title": "Forecast-owned post",
+      "status": "open",
+      "user_permission": "forecaster",
+      "question": {
+        "id": 5101,
+        "type": "binary",
+        "user_forecast": {
+          "probability_yes": 0.63,
+          "start_time": "2026-08-24T09:00:00Z"
+        }
+      }
+    }
+  ]
+}

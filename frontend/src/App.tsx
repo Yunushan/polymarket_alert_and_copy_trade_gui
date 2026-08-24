@@ -169,6 +169,10 @@ interface MarketReadForm {
   account_ticker: string;
   account_order_id: string;
   account_trade_id: string;
+  account_forecaster_id: string;
+  account_include_cp: boolean;
+  account_include_cp_history: boolean;
+  account_include_descriptions: boolean;
   account_cursor: string;
   account_limit: string;
   account_offset: string;
@@ -486,6 +490,10 @@ function emptyMarketReadForm(): MarketReadForm {
     account_ticker: "",
     account_order_id: "",
     account_trade_id: "",
+    account_forecaster_id: "",
+    account_include_cp: false,
+    account_include_cp_history: false,
+    account_include_descriptions: false,
     account_cursor: "",
     account_limit: "",
     account_offset: "",
@@ -1074,6 +1082,10 @@ export default function App() {
             contract_id: form.contract_id.trim() || undefined,
             ticker: form.account_ticker.trim() || undefined,
             order_id: form.account_order_id.trim() || undefined,
+            forecaster_id: form.account_forecaster_id.trim() || undefined,
+            with_cp: form.account_include_cp,
+            include_cp_history: form.account_include_cp_history,
+            include_descriptions: form.account_include_descriptions,
             wallet: form.account_wallet.trim() || undefined,
             address: form.account_wallet.trim() || undefined,
             token_id: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
@@ -3021,6 +3033,42 @@ function MarketsView({
                 placeholder="Optional"
               />
             </label>
+            {selectedMarket.market_id === "metaculus" ? (
+              <>
+                <label>
+                  <span>Metaculus forecaster id</span>
+                  <input
+                    value={marketReadForm.account_forecaster_id}
+                    onChange={(event) => onMarketReadFormChange({ account_forecaster_id: event.target.value })}
+                    placeholder="Required unless configured"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_cp}
+                    onChange={(event) => onMarketReadFormChange({ account_include_cp: event.target.checked })}
+                  />
+                  <span>Include Community Prediction data</span>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_cp_history}
+                    onChange={(event) => onMarketReadFormChange({ account_include_cp_history: event.target.checked })}
+                  />
+                  <span>Include full aggregation history</span>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_descriptions}
+                    onChange={(event) => onMarketReadFormChange({ account_include_descriptions: event.target.checked })}
+                  />
+                  <span>Include question descriptions</span>
+                </label>
+              </>
+            ) : null}
             <label>
               <span>Account client order id</span>
               <input

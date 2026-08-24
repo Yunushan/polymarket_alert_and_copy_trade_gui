@@ -255,6 +255,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Lists authenticated Metaculus posts/questions through the official API
 - Reads accessible binary, multiple-choice, and numeric forecast values for alerts
 - Reads accessible Community Prediction aggregation history through `list_candles`; official irregular snapshots are normalized as point candles (no fabricated OHLCV or resampling)
+- Reads authenticated forecast-owned posts/questions through the official `/api/posts/?forecaster_id=...` account feed, preserving the raw paginated response and optional Community Prediction/history/description fields; this is forecast recovery, not exchange trade or position history
 - Supports local forecast previews and guarded authenticated forecast submission through the official `/api/questions/forecast/` contract; binary forecasts use `probability_yes`, multiple-choice forecasts use a complete category distribution, and numeric/date forecasts use a 201-point `continuous_cdf`
 - Forecast submission is explicitly labeled as a forecast update, not exchange execution; live submission remains disabled by default behind the shared safety gates
 
@@ -583,7 +584,7 @@ scan and produces simulation-first paper copy previews only; it requires a canon
 | Frenzy Finance (`frenzy_finance`) | Implemented | Yes | Yes | Yes | No (oracle/wallet gate) | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
 | XO Market (`xo_market`) | Implemented | Yes | Yes (public/account trades, candles, positions, orders, settlement, audit) | Yes | Guarded, off by default (cancel also guarded) | Yes, simulation-first | Required | API credentials required | Region/KYC limited |
 | Manifold Markets (`manifold`) | Implemented | Yes | Yes (probabilities/trades, bounded derived candles, account reads) | Yes | Guarded, off by default (bet placement/cancel) | Yes, simulation-first | Required | Optional API key | Not KYC limited |
-| Metaculus (`metaculus`) | Implemented | Yes | Yes (forecast snapshots) | No | No | No | Required | Account/API token required | Not trading/KYC limited |
+| Metaculus (`metaculus`) | Implemented | Yes | Yes (forecast snapshots and authenticated forecast-owned posts) | No | No | No | Required | Account/API token required | Not trading/KYC limited |
 | SciCast (`scicast`) | Implemented | Yes | Yes (archive snapshots/trades) | Yes (local dry-run) | No | No | Required | API key required | Not trading/KYC limited |
 | Good Judgment Open (`good_judgment_open`) | Implemented | Yes | Yes (forecast probabilities/history) | Yes (local preview) | Guarded, off by default | No | Required | Account/API token required | Region/account limited |
 | Hypermind (`hypermind`) | Implemented | Yes | Yes (official trade export/history) | Yes (local dry-run) | No | No | Required | Not required | Not trading/KYC limited |

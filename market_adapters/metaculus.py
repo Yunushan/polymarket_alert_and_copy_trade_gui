@@ -12,6 +12,7 @@ from .types import MarketCandle, MarketContract, MarketEvent, PaperOrderRequest,
 
 
 DEFAULT_METACULUS_BASE_URL = "https://www.metaculus.com/api"
+METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
 
 
 class MetaculusAdapter(MarketAdapter):
@@ -26,6 +27,7 @@ class MetaculusAdapter(MarketAdapter):
 
     metadata = get_market_metadata("metaculus")
     live_order_sides = ("BUY",)
+    account_recovery_operations = METACULUS_ACCOUNT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -46,6 +48,8 @@ class MetaculusAdapter(MarketAdapter):
                 "trading_supported": True,
                 "forecast_submission_supported": True,
                 "trading_semantics": "forecast_submission_not_exchange_execution",
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": ["/posts/?forecaster_id=..."],
             }
         )
         return health
@@ -194,6 +198,54 @@ class MetaculusAdapter(MarketAdapter):
             )
         candles.sort(key=lambda candle: candle.timestamp)
         return candles
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read posts/questions on which a Metaculus user has forecast.
+
+        Metaculus' documented ``GET /api/posts/`` feed accepts a
+        ``forecaster_id`` filter.  The endpoint is authenticated and returns
+        the official post/question payload, so this operation deliberately
+        preserves the upstream response rather than pretending forecasts are
+        exchange fills or positions.  A forecaster id must be supplied either
+        per call or as ``metaculus_forecaster_id`` in the market settings.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            supported = ", ".join(self.account_recovery_operations)
+            raise MarketConfigurationError(
+                f"Metaculus account operation must be one of: {supported}."
+            )
+
+        raw_forecaster_id = kwargs.get("forecaster_id")
+        if raw_forecaster_id in (None, ""):
+            raw_forecaster_id = self.config.get("metaculus_forecaster_id")
+        forecaster_id = self._bounded_account_int(
+            raw_forecaster_id,
+            "forecaster_id",
+            minimum=1,
+            maximum=2_147_483_647,
+            required=True,
+        )
+        limit = self._bounded_account_int(
+            kwargs.get("limit", 50), "limit", minimum=1, maximum=100, required=True
+        )
+        offset = self._bounded_account_int(
+            kwargs.get("offset", 0), "offset", minimum=0, maximum=100_000, required=True
+        )
+        params: Dict[str, Any] = {
+            "forecaster_id": forecaster_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        for key in ("with_cp", "include_cp_history", "include_descriptions"):
+            if key in kwargs and kwargs[key] is not None:
+                params[key] = self._account_bool(kwargs[key], key)
+
+        response = self._get("/posts/", params=params)
+        if not isinstance(response, (Mapping, list)):
+            raise MarketConfigurationError("Metaculus forecast_posts returned an invalid posts response.")
+        return response
 
     def get_orderbook(self, contract_id: str):
         raise UnsupportedFeatureError(
@@ -489,6 +541,44 @@ class MetaculusAdapter(MarketAdapter):
         if not math.isfinite(timestamp):
             raise MarketConfigurationError(f"Metaculus {label} must be finite.")
         return timestamp
+
+    @staticmethod
+    def _bounded_account_int(
+        value: Any,
+        label: str,
+        *,
+        minimum: int,
+        maximum: int,
+        required: bool = False,
+    ) -> Optional[int]:
+        if value in (None, ""):
+            if required:
+                raise MarketConfigurationError(f"Metaculus account {label} is required.")
+            return None
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Metaculus account {label} must be an integer.")
+        text = str(value).strip()
+        if not text or (text.startswith("+") and not text[1:].isdigit()) or (
+            text.startswith("-") and not text[1:].isdigit()
+        ) or (not text.lstrip("+-").isdigit()):
+            raise MarketConfigurationError(f"Metaculus account {label} must be an integer.")
+        parsed = int(text)
+        if parsed < minimum or parsed > maximum:
+            raise MarketConfigurationError(
+                f"Metaculus account {label} must be between {minimum} and {maximum}."
+            )
+        return parsed
+
+    @staticmethod
+    def _account_bool(value: Any, label: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise MarketConfigurationError(f"Metaculus account {label} must be a boolean.")
 
     @staticmethod
     def _history_timestamp(entry: Mapping[str, Any]) -> Optional[float]:

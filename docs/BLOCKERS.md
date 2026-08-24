@@ -6,6 +6,13 @@ This file documents why each market is either implemented, guarded, or stubbed. 
 
 ## Summary
 
+Metaculus account recovery now uses the documented authenticated
+`GET /api/posts/?forecaster_id=...` feed. It returns the upstream paginated
+post/question payload (and optional Community Prediction/history/description
+fields) without relabeling forecast records as exchange trades or positions;
+callers must provide a positive `forecaster_id` or configure
+`metaculus_forecaster_id`.
+
 - Polymarket, Kalshi, PredictIt, Crypto.com Predict/CDNA, Nadex/CDNA, Fanatics Markets/CDNA, FanDuel Predicts/OG, Blinq/Polymarket, Manifold, Metaculus, Good Judgment Open, Hypermind archive, SciCast archive, Myriad, Opinion, Gemini, Predict.fun, XO, Betfair, Limitless Exchange, SX Bet, Azuro, Augur, Omen, Gnosis Prediction Markets, Zeitgeist, Zeitgeist SDK / Markets, Zeitgeist Prediction Pools, Reality.eth Markets, Xmarket, Probable, Matchbook, DFlow, Context V2, Smarkets, Thales Market, MetaDAO, Seer, Hyperliquid, Trueo, Frenzy Finance, Hedgehog Markets, IBKR ForecastTrader, ForecastEx, CME event contracts, Prophet Exchange, PRDT Finance, Zetarium World, Lamas Finance, and BetMGM's partner Sports API are implemented adapters today.
 - All other markets are present in config and GUI through verified-blocked adapters with exact blocker reasons.
 - Live trading remains disabled by default for every market.
