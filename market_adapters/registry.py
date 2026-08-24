@@ -12,12 +12,14 @@ from .types import MarketMetadata
 VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     "fact_machine": {
         "reason": (
-            "Verified 2026-05-26: Fact Machine does not publish a public documented API/SDK or stable "
+            "Verified 2026-08-24: Fact Machine's public domains still do not publish a documented API/SDK or stable "
             "protocol integration contract suitable for discovery, pricing, or order automation in this app."
         ),
         "references": [
             "https://factmachine.io",
+            "https://factmachine.com",
         ],
+        "last_reviewed": "2026-08-24",
     },
     "infer": {
         "reason": (

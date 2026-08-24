@@ -699,8 +699,9 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     "synstation": _blocker(
         "SynStation's official whitepaper describes a conceptual CLMM prediction protocol, but no stable market-data endpoint, deployment inventory, or order contract has been validated.",
         "https://synstation.ai",
+        "https://www.synstation.org/",
         "https://synstation.notion.site/SynStation-Whitepaper-12dd359ec74180789fd2cef45609fa93",
-        last_reviewed="2026-08-23",
+        last_reviewed="2026-08-24",
     ),
     "levr_bet": _blocker(
         "No stable official API, contract schema, and settlement fixtures have been validated for Levr Bet.",
@@ -708,10 +709,11 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         last_reviewed="2026-08-21",
     ),
     "dexsport": _blocker(
-        "Dexsport documents prediction markets and smart-contract betting, but its official docs publish no stable market-data API, deployment inventory, or reviewed contract schema for this app; the current web interface cannot substitute for an integration contract.",
+        "Dexsport documents prediction markets and smart-contract betting, but its official docs and terms publish no stable market-data API, deployment inventory, or reviewed prediction-contract ABI for this app; the current web interface cannot substitute for an integration contract.",
         "https://dexsport.io/docs-home/",
+        "https://dexsport.io/docs-general-terms/",
         "https://dexsport.io/prediction-markets/all/",
-        last_reviewed="2026-08-21",
+        last_reviewed="2026-08-24",
     ),
     "sportstrade": _blocker(
         "Sporttrade officially ceased all wagering on 2026-05-25; no active production market or order integration is available.",
@@ -726,5 +728,6 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     "meta_arena": _blocker(
         "Meta Arena is a game platform and does not expose a validated prediction-market API for this adapter model.",
         "https://docs.metaarena.world/",
+        last_reviewed="2026-08-24",
     ),
 }
