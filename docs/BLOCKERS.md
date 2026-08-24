@@ -16,8 +16,13 @@ read-only `orders.list` feed with `trader`, `status`, and bounded `limit`
 filters. The adapter now uses `status=filled` to normalize complete binary
 wallet orders into simulation-first copy previews, validating the wallet,
 outcome, BUY/SELL side, 1e6-scaled filled size, probability price, nonce, and
-timestamp. Polling never submits a live order; API-key, wallet setup, chain,
-region, and funded-account eligibility remain external gates.
+timestamp. It also exposes guarded externally signed `cancel_order` and
+`batch_cancel_orders` mutations through the SDK's fixed `/orders/cancel` and
+`/orders/bulk/cancel` paths; each request requires the shared live gates,
+Context-specific opt-in, exact operator confirmation, one verified trader
+wallet, and bounded signed envelopes. Polling never submits a live order;
+API-key, wallet setup, chain, region, and funded-account eligibility remain
+external gates.
 
 ## 2026-05-26 Re-Audit Notes
 
@@ -25,7 +30,7 @@ Article 35 re-checked verified-blocked markets against current official pages an
 
 Notable re-audit outcomes:
 
-- `context_v2`: current Context v2 API documentation now publishes market, price, orderbook, activity, price-history, and signed-order endpoints. The adapter also normalizes activity trades and binary price-history points from offline fixtures. Activity preserves the upstream outcome label rather than inventing a BUY/SELL direction; history uses flat OHLC points with no fabricated volume. The adapter is guarded because API keys, wallet setup, chain eligibility, and current account/product availability remain external evidence gates.
+- `context_v2`: current Context v2 API documentation now publishes market, price, orderbook, activity, price-history, signed-order, and signed-cancellation endpoints. The adapter also normalizes activity trades and binary price-history points from offline fixtures, and exposes fixed-path single/batch cancellation through the official SDK contract. Activity preserves the upstream outcome label rather than inventing a BUY/SELL direction; history uses flat OHLC points with no fabricated volume. The adapter is guarded because API keys, wallet setup, chain eligibility, and current account/product availability remain external evidence gates.
 - Historical review note (2026-05-26): `hyperliquid` documentation then described outcome asset IDs and `outcomeMeta` as testnet-only. The current HIP-4 review has promoted it to implemented with fixture-backed public metadata/orderbook coverage; live settlement and funded execution remain external gates.
 - `thales_market`: official Thales docs describe API endpoints and contract integration. The adapter now covers public AMM reads, quote-backed paper orders, and a guarded externally signed transaction boundary; chain-specific AMM selection, collateral approval, wallet signing, and settlement remain operator-owned evidence gates.
 - Historical note (superseded by the 2026-08-17 promotion): official Smarkets API terms still require account verification, application approval, a setup fee, pre-approved markets/limits, and written approval before platform data can be shared or distributed. Those are external eligibility/data-use gates for the implemented, fixture-backed adapter; they no longer make the repository-controlled read/order contract itself a verified blocker.
@@ -50,7 +55,7 @@ FanDuel Predicts was promoted on 2026-08-21 as a read-only alias over the offici
 
 PRDT Finance's official legacy `Prediction` and `PredictionFactory` Solidity interfaces are represented by a fixture-backed, explicit-configuration adapter. It reads the configured Prediction contracts over EVM JSON-RPC, exposes the current bull/bear round and pool-share prices, and permits local paper intents only before the round lock timestamp. PRDT still does not publish a stable current factory/indexer inventory, so operators must supply and verify each deployed Prediction address; the adapter never guesses deployments or scrapes the consumer app. CLOB depth, wallet signing, live execution, settlement, and copy trading remain unsupported.
 
-Context V2 was promoted from verified blocked after its current API reference was rechecked. The adapter covers market discovery, outcome-token contracts, price summaries, outcome-specific orderbooks, documented activity trades, binary price history, dry-run order payloads, and guarded submission of an externally signed order using a Context API key. Activity keeps Context's outcome-side semantics (YES/NO) and price history is represented as flat OHLC snapshots without synthetic volume. API-key, wallet approval/deposit, chain eligibility, settlement, and funded execution evidence remain external gates.
+Context V2 was promoted from verified blocked after its current API reference was rechecked. The adapter covers market discovery, outcome-token contracts, price summaries, outcome-specific orderbooks, documented activity trades, binary price history, dry-run order payloads, guarded submission of externally signed orders, and guarded single/batch signed cancellation using the official SDK endpoints. Activity keeps Context's outcome-side semantics (YES/NO) and price history is represented as flat OHLC snapshots without synthetic volume. API-key, wallet approval/deposit, chain eligibility, settlement, and funded execution evidence remain external gates.
 
 Prophet Exchange was promoted from verified blocked on 2026-08-17 after its official Market Data and Trading API references were rechecked. The adapter covers tournament/event/market discovery, nested and flat selection payloads, decimal-odds probability normalization, available-quantity quote books, local paper orders, authenticated v4 filled-trade history with fixed order-detail enrichment and derived candles, bounded wallet/order-history recovery, and guarded authenticated `submit_order` requests using the documented market-maker shape. Partner approval, account/KYC/region eligibility, credentials, and funded execution remain external gates; the documented order path is BUY-only in this adapter.
 

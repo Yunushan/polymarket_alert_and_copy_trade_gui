@@ -930,6 +930,10 @@ export default function App() {
       patch.settings = {
         smarkets_order_management_enabled: form.get("smarkets_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "context_v2") {
+      patch.settings = {
+        context_order_management_enabled: form.get("context_order_management_enabled") === "on"
+      };
     } else if (selectedMarket.market_id === "probable") {
       patch.settings = {
         probable_order_management_enabled: form.get("probable_order_management_enabled") === "on"
@@ -1219,6 +1223,7 @@ export default function App() {
     const isOpinion = marketId === "opinion_labs";
     const isLimitless = marketId === "limitless_exchange";
     const isSmarkets = marketId === "smarkets";
+    const isContext = marketId === "context_v2";
     const isProbable = marketId === "probable";
     const isHyperliquid = marketId === "hyperliquid";
     const isPredictFun = marketId === "predict_fun";
@@ -1235,6 +1240,7 @@ export default function App() {
       (isIbkr && operation === "modify_order") ||
       (isProphet && operation === "cancel_orders") ||
       (isSxBet && operation === "cancel_orders") ||
+      isContext ||
       (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet) ||
       (operation === "cancel_orders" && !isSmarkets && !isProbable && !isProphet) ||
       (isProbable && operation === "cancel_orders") ||
@@ -1243,13 +1249,13 @@ export default function App() {
       (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders"));
     if (needsInstructions) {
       try {
-        const defaultJson = (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders")) || isHyperliquid ? "{}" : "[]";
+        const defaultJson = (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders")) || isHyperliquid || (isContext && operation === "cancel_order") ? "{}" : "[]";
         instructions = JSON.parse(marketReadForm.order_management_instructions || defaultJson);
       } catch (exc) {
         setError(exc instanceof Error ? `Instructions JSON is invalid: ${exc.message}` : "Instructions JSON is invalid.");
         return;
       }
-      const allowsObject = (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders")) || isHyperliquid || (isIbkr && operation === "modify_order");
+      const allowsObject = (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders")) || isHyperliquid || (isIbkr && operation === "modify_order") || (isContext && operation === "cancel_order");
       if (!Array.isArray(instructions) && !(allowsObject && instructions && typeof instructions === "object")) {
         setError(allowsObject ? "Instructions must be a JSON array or object." : "Instructions must be a JSON array.");
         return;
@@ -1370,6 +1376,18 @@ export default function App() {
       setError("A Smarkets market id is required for market-scoped cancel_orders.");
       return;
     }
+    if (isContext && operation === "cancel_order" && (!instructions || Array.isArray(instructions) || typeof instructions !== "object")) {
+      setError("Context cancel_order requires one signed cancellation JSON object.");
+      return;
+    }
+    if (isContext && operation === "batch_cancel_orders" && (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("Context batch_cancel_orders requires a non-empty signed cancellation JSON array.");
+      return;
+    }
+    if (isContext && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Context order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
     if (isProbable && operation === "cancel_order" &&
       (!marketReadForm.order_management_order_id.trim() || !marketReadForm.order_management_market_id.trim())) {
       setError("Probable cancel_order requires an order id and token id.");
@@ -1471,9 +1489,9 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isContext && !isProbable && !isHyperliquid && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : isXmarket ? "Xmarket" : isIbkr ? "IBKR event-contract" : isManifold ? "Manifold" : isProphet ? "Prophet Exchange" : isSxBet ? "SX Bet" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isContext ? "Context" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : isXmarket ? "Xmarket" : isIbkr ? "IBKR event-contract" : isManifold ? "Manifold" : isProphet ? "Prophet Exchange" : isSxBet ? "SX Bet" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
@@ -1531,6 +1549,11 @@ export default function App() {
         ? {
             market_id: marketReadForm.order_management_market_id.trim() || undefined,
             order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isContext
+        ? {
+            signed_cancel: instructions,
             confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
           }
       : isProbable
@@ -1608,7 +1631,7 @@ export default function App() {
           customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
           confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
         };
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && marketReadForm.order_management_market_version.trim()) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isContext && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -1616,7 +1639,7 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && marketReadForm.order_management_async) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isContext && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && marketReadForm.order_management_async) {
       payload.async_request = true;
     }
     if (isKalshi) {
@@ -2812,6 +2835,15 @@ function MarketsView({
                 />
                 <span>Enable Smarkets order management</span>
               </label>
+            ) : selectedMarket.market_id === "context_v2" ? (
+              <label className="check-row">
+                <input
+                  name="context_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Context order management</span>
+              </label>
             ) : selectedMarket.market_id === "probable" ? (
               <label className="check-row">
                 <input
@@ -3684,6 +3716,8 @@ function MarketsView({
                                 ? "Limitless cancellations are disabled by default and require HMAC token credentials, shared live-safety gates, a separate opt-in, and exact operator/global confirmation."
                               : selectedMarket.market_id === "smarkets"
                                 ? "Smarkets cancellations are disabled by default and require an approved session token, shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "context_v2"
+                                ? "Context signed cancellations are disabled by default and require an externally signed trader/nonce/signature envelope, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : selectedMarket.market_id === "probable"
                                 ? "Probable cancellations are disabled by default and require HMAC L2 credentials, shared live-safety gates, a separate opt-in, and exact operator/global confirmation."
                               : selectedMarket.market_id === "predict_fun"
@@ -4119,6 +4153,30 @@ function MarketsView({
                         placeholder="Required for cancel_orders"
                       />
                     </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "context_v2" ? (
+                  <>
+                    <label className="wide-field">
+                      <span>{marketReadForm.order_management_operation === "cancel_order" ? "Signed cancellation JSON" : "Signed cancellations JSON"}</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={6}
+                        spellCheck={false}
+                        placeholder={marketReadForm.order_management_operation === "cancel_order"
+                          ? '{"trader":"0x…40 hex chars…","nonce":"0x…","signature":"0x…"}'
+                          : '[{"trader":"0x…40 hex chars…","nonce":"0x…","signature":"0x…"}]'}
+                      />
+                    </label>
+                    <p className="form-help">The wallet signs the cancellation externally. The app sends only the fixed official Context cancellation body and never handles a private key.</p>
                     <label className="wide-field">
                       <span>Operator confirmation</span>
                       <input

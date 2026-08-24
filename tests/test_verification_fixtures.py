@@ -564,6 +564,8 @@ class VerificationFixtureTests(unittest.TestCase):
         prices = json.loads((FIXTURE_ROOT / "context_v2" / "prices.json").read_text(encoding="utf-8"))
         order = json.loads((FIXTURE_ROOT / "context_v2" / "order_response.json").read_text(encoding="utf-8"))
         orders = json.loads((FIXTURE_ROOT / "context_v2" / "orders.json").read_text(encoding="utf-8"))
+        cancellation = json.loads((FIXTURE_ROOT / "context_v2" / "cancel_response.json").read_text(encoding="utf-8"))
+        batch_cancellation = json.loads((FIXTURE_ROOT / "context_v2" / "bulk_cancel_response.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(markets.get("markets"), list)
         self.assertEqual(market["outcomeTokens"][0].startswith("0x"), True)
@@ -572,6 +574,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(activity["activity"][0]["type"], "trade")
         self.assertIsInstance(prices.get("prices"), list)
         self.assertEqual(order.get("success"), True)
+        self.assertEqual(cancellation.get("success"), True)
+        self.assertEqual(batch_cancellation.get("success"), True)
         self.assertIsInstance(orders.get("orders"), list)
         self.assertEqual(orders["orders"][0]["status"], "filled")
         self.assertIn("filledSize", orders["orders"][0])

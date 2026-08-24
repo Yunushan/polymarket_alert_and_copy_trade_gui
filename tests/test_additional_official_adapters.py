@@ -1928,6 +1928,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         market_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         wallet = "0x3333333333333333333333333333333333333333"
 
+        self.assertEqual(
+            adapter.health_check()["order_management_operations"],
+            ["cancel_order", "batch_cancel_orders"],
+        )
+
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers, {"Authorization": "Bearer context-key"})
             if url.endswith("/markets"):
@@ -1985,11 +1990,21 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
 
-        live_adapter = ContextV2Adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        live_adapter = ContextV2Adapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "context_order_management_enabled": True,
+            }
+        )
         calls = []
 
         def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
             calls.append((method, url, json, headers, timeout))
+            if url.endswith("/orders/cancel"):
+                return FakeResponse(load_fixture("context_v2", "cancel_response"))
+            if url.endswith("/orders/bulk/cancel"):
+                return FakeResponse(load_fixture("context_v2", "bulk_cancel_response"))
             return FakeResponse(load_fixture("context_v2", "order_response"))
 
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
@@ -2022,6 +2037,46 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(calls[0][1].endswith("/orders"))
         self.assertEqual(calls[0][3]["Authorization"], "Bearer context-key")
         self.assertEqual(calls[0][2]["outcomeIndex"], 0)
+
+        signed_cancel = {
+            "trader": wallet,
+            "nonce": "0xabc1",
+            "signature": "0x" + "cd" * 65,
+        }
+        signed_cancel_2 = {
+            "trader": wallet,
+            "nonce": "0xabc2",
+            "signature": "0x" + "ef" * 65,
+        }
+        with patch.dict("os.environ", {"CONTEXT_API_KEY": "context-key"}):
+            cancelled = live_adapter.manage_orders(
+                "cancel_order",
+                signed_cancel=signed_cancel,
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+            batch_cancelled = live_adapter.manage_orders(
+                "batch_cancel_orders",
+                signed_cancel=[signed_cancel, signed_cancel_2],
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+        self.assertTrue(cancelled["response"]["success"])
+        self.assertTrue(batch_cancelled["response"]["success"])
+        self.assertTrue(calls[1][1].endswith("/orders/cancel"))
+        self.assertEqual(calls[1][2], signed_cancel)
+        self.assertTrue(calls[2][1].endswith("/orders/bulk/cancel"))
+        self.assertEqual(calls[2][2]["cancels"], [signed_cancel, signed_cancel_2])
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.manage_orders(
+                "cancel_order",
+                signed_cancel={**signed_cancel, "trader": "0x1"},
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.manage_orders(
+                "batch_cancel_orders",
+                signed_cancel=[signed_cancel, {**signed_cancel, "trader": "0x4444444444444444444444444444444444444444"}],
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
 
         copy_preview = live_adapter.copy_trade_from_activity(activities[0])
         self.assertTrue(copy_preview.accepted)

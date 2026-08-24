@@ -30,9 +30,14 @@ CONTEXT_REFERENCES = (
     "https://docs.context.markets/api-reference/markets/get-market-price-history",
     "https://docs.context.markets/api-reference/orders/create-order",
     "https://docs.context.markets/api-reference/orders/cancel-order",
+    "https://github.com/contextwtf/context-sdk/blob/main/src/modules/orders.ts",
+    "https://github.com/contextwtf/context-sdk/blob/main/src/generated/endpoints.ts",
     "https://github.com/contextwtf/context-sdk/blob/main/skills/api-reference.md",
     "https://docs.context.markets/agents/react-sdk/index",
 )
+CONTEXT_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
+CONTEXT_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+CONTEXT_ORDER_MANAGEMENT_MAX_BATCH = 20
 
 
 class ContextV2Adapter(MarketAdapter):
@@ -48,6 +53,7 @@ class ContextV2Adapter(MarketAdapter):
     metadata = get_market_metadata("context_v2")
     live_order_sides = ("BUY", "SELL")
     account_recovery_operations = ("orders",)
+    order_management_operations = CONTEXT_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -65,6 +71,13 @@ class ContextV2Adapter(MarketAdapter):
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "signed_order_required": True,
                 "private_key_handling": "external_wallet_only",
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("context_order_management_enabled", False),
+                "order_management_max_batch": CONTEXT_ORDER_MANAGEMENT_MAX_BATCH,
+                "authenticated_order_management_endpoints": [
+                    "POST /orders/cancel",
+                    "POST /orders/bulk/cancel",
+                ],
             }
         )
         return health
@@ -375,6 +388,102 @@ class ContextV2Adapter(MarketAdapter):
             "response": response,
         }
 
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Cancel Context orders through the official signed REST mutations.
+
+        Context's SDK signs cancellation requests outside the application and
+        sends only ``trader``, ``nonce``, and ``signature`` to fixed endpoints.
+        The adapter intentionally accepts that signed envelope, never a private
+        key or caller-controlled path, and keeps the mutation disabled unless
+        the operator enables the venue-specific opt-in and shared live gates.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            raise MarketConfigurationError(
+                "Context order-management operation must be one of: "
+                + ", ".join(self.order_management_operations)
+                + "."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("context_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Context order management is disabled by adapter config. "
+                "Set context_order_management_enabled=true only after reviewing live-order risk controls."
+            )
+        self.ensure_live_trading_enabled("Context order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != CONTEXT_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Context order management requires exact confirmation text "
+                f"{CONTEXT_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Context order-management requests are synchronous.")
+
+        signed = kwargs.get("signed_cancel")
+        if signed is None:
+            signed = kwargs.get("signed_action")
+        if signed is None:
+            signed = kwargs.get("instructions")
+        if signed is None and any(kwargs.get(key) not in (None, "") for key in ("trader", "nonce", "signature")):
+            signed = {
+                "trader": kwargs.get("trader"),
+                "nonce": kwargs.get("nonce"),
+                "signature": kwargs.get("signature"),
+            }
+
+        if normalized == "cancel_order":
+            if isinstance(signed, list):
+                if len(signed) != 1:
+                    raise MarketConfigurationError("Context cancel_order requires one signed cancellation object.")
+                signed = signed[0]
+            if isinstance(signed, Mapping) and isinstance(signed.get("cancel"), Mapping):
+                signed = signed["cancel"]
+            request = self._validate_cancel_entry(signed, "Context cancellation")
+            endpoint = "/orders/cancel"
+            body: Dict[str, Any] = request
+        else:
+            entries = signed
+            if isinstance(entries, Mapping) and isinstance(entries.get("cancels"), list):
+                entries = entries["cancels"]
+            if not isinstance(entries, list) or not entries:
+                raise MarketConfigurationError("Context batch_cancel_orders requires a non-empty signed cancellation array.")
+            if len(entries) > CONTEXT_ORDER_MANAGEMENT_MAX_BATCH:
+                raise MarketConfigurationError(
+                    "Context batch_cancel_orders supports at most "
+                    f"{CONTEXT_ORDER_MANAGEMENT_MAX_BATCH} cancellations per request."
+                )
+            cancels = [self._validate_cancel_entry(entry, f"Context cancellation {index + 1}") for index, entry in enumerate(entries)]
+            identities = {(entry["trader"].lower(), entry["nonce"]) for entry in cancels}
+            if len(identities) != len(cancels):
+                raise MarketConfigurationError("Context batch_cancel_orders cannot contain duplicate trader/nonce pairs.")
+            traders = {entry["trader"].lower() for entry in cancels}
+            if len(traders) != 1:
+                raise MarketConfigurationError("Context batch_cancel_orders must use one externally verified trader wallet.")
+            endpoint = "/orders/bulk/cancel"
+            body = {"cancels": cancels}
+
+        response = self._request_json("POST", endpoint, body, auth=True)
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "external_wallet_only": True,
+                "references": list(CONTEXT_REFERENCES),
+            },
+            "request": body,
+            "response": response,
+        }
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         """Build a simulation-first paper order from a filled Context order."""
 
@@ -665,6 +774,22 @@ class ContextV2Adapter(MarketAdapter):
             raise MarketConfigurationError(
                 "Context signed order signature must be an even-length 0x-prefixed hexadecimal value."
             )
+
+    @classmethod
+    def _validate_cancel_entry(cls, value: Any, label: str) -> Dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise MarketConfigurationError(f"{label} must be a JSON object with trader, nonce, and signature.")
+        trader = str(value.get("trader") or "").strip()
+        trader_body = trader[2:] if trader.startswith("0x") else ""
+        if len(trader_body) != 40 or any(character not in "0123456789abcdefABCDEF" for character in trader_body):
+            raise MarketConfigurationError(f"{label} trader must be a 20-byte 0x-prefixed address.")
+        nonce = str(value.get("nonce") or "").strip()
+        nonce_body = nonce[2:] if nonce.startswith("0x") else ""
+        if not nonce_body or any(character not in "0123456789abcdefABCDEF" for character in nonce_body):
+            raise MarketConfigurationError(f"{label} nonce must be a non-empty 0x-prefixed hexadecimal value.")
+        signature = str(value.get("signature") or "").strip()
+        cls._validate_hex_signature(signature)
+        return {"trader": trader, "nonce": nonce, "signature": signature}
 
     @staticmethod
     def _identifiers_match(value: Any, expected: str) -> bool:

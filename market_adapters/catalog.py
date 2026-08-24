@@ -731,7 +731,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         description=(
             "Official Context Markets v2 API adapter for market discovery, outcome prices, orderbooks, "
             "market activity trades, binary price history, filled wallet-order activity, simulation-first copy "
-            "previews, paper orders, and guarded wallet-signed order submission."
+            "previews, paper orders, guarded wallet-signed order submission, and signed order cancellation."
         ),
         capabilities=CONTEXT_V2_CAPABILITIES,
     ),

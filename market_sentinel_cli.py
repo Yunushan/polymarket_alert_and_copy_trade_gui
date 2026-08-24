@@ -1971,6 +1971,7 @@ SX_BET_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_event_orders",
     "cancel_all_orders",
 )
+CONTEXT_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1990,6 +1991,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + MANIFOLD_ORDER_MANAGEMENT_OPERATIONS
         + PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS
         + SX_BET_ORDER_MANAGEMENT_OPERATIONS
+        + CONTEXT_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -2019,10 +2021,14 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         parsed = json.loads(raw)
         if not isinstance(parsed, list) and not (
             market_id == "myriad_markets" and operation in {"cancel_order", "batch_modify_orders"}
-        ) and not (market_id == "hyperliquid" and isinstance(parsed, dict)):
+        ) and not (market_id == "hyperliquid" and isinstance(parsed, dict)) and not (
+            market_id == "context_v2" and operation == "cancel_order" and isinstance(parsed, dict)
+        ):
             if not (market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"} and operation == "modify_order" and isinstance(parsed, dict)):
-                raise ValueError("--instructions must contain a JSON array (or a Myriad/Hyperliquid/IBKR JSON object).")
-        if operation in {"batch_create_orders", "batch_cancel_orders"} or (market_id == "polymarket" and operation == "cancel_orders") or (market_id == "prophet_exchange" and operation == "cancel_orders"):
+                raise ValueError("--instructions must contain a JSON array (or a Myriad/Hyperliquid/Context/IBKR JSON object).")
+        if market_id == "context_v2":
+            payload["signed_cancel"] = parsed
+        elif operation in {"batch_create_orders", "batch_cancel_orders"} or (market_id == "polymarket" and operation == "cancel_orders") or (market_id == "prophet_exchange" and operation == "cancel_orders"):
             payload["orders"] = parsed
         elif market_id == "myriad_markets" and operation == "batch_modify_orders":
             if not isinstance(parsed, dict):
@@ -2076,6 +2082,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         ("order_hash", "order_hash"),
         ("trader", "trader"),
         ("timestamp", "timestamp"),
+        ("nonce", "nonce"),
         ("signature", "signature"),
         ("signature_type", "signature_type"),
         ("network_id", "network_id"),
@@ -2086,6 +2093,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         ("exchange_index", "exchange_index"),
         ("confirm_order_management", "confirm_order_management"),
         ("signed_action", "signed_action"),
+        ("signed_cancel", "signed_cancel"),
         ("manual_indicator", "manual_indicator"),
         ("external_operator", "external_operator"),
     ):

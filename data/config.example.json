@@ -114,7 +114,8 @@
         "context_api_base_url": "https://api.context.markets/v2",
         "credential_env_vars": ["CONTEXT_API_KEY"],
         "live_trading_enabled": false,
-        "notes": "Official Context v2 market, price, orderbook, alerts, paper-order, and guarded externally signed-order paths are implemented. Signed market, outcome, side, price, and size fields must match the preflighted request before transport. Live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates."
+        "context_order_management_enabled": false,
+        "notes": "Official Context v2 market, price, orderbook, alerts, paper-order, guarded externally signed-order, and guarded signed cancellation paths are implemented. Signed market, outcome, side, price, and size fields must match the preflighted request before transport; cancellation sends only externally signed trader/nonce/signature envelopes to fixed official endpoints. Live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates."
       }
     },
     "crypto_com_predict": {
