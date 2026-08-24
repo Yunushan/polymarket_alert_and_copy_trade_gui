@@ -616,7 +616,7 @@ scan and produces simulation-first paper copy previews only; it requires a canon
 | Seer (`seer`) | Implemented | Yes | Yes (official Generic-market DEX-pool chart points) | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | DFlow (`dflow`) | Implemented | Yes | Yes (public trades plus bounded derived trade-feed candles) | Yes | Guarded, off by default | No | Required | Wallet required for trading | Region limited |
 | Space (`space`) | Implemented | Yes | Yes (including public trades/candles) | Yes | No | No | Required | No API key; wallet/settlement required only for future live chain flow | Jurisdiction varies |
-| Xmarket (`xmarket`) | Implemented | Yes (positions/orders; account fills) | Yes | Yes | Guarded, off by default (single and batch create; batch cancel) | No | Required | API credentials required | Jurisdiction varies |
+| Xmarket (`xmarket`) | Implemented | Yes (positions/orders; account fills) | Yes | Yes | Guarded, off by default (single and batch create; batch cancel) | Yes (authenticated-fill simulation previews) | Required | API credentials required | Jurisdiction varies |
 | Trueo (`trueo`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | PRDT Finance (`prdt_finance`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet required only for future live chain flow | Jurisdiction varies |
 | SynStation (`synstation`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |

@@ -2752,6 +2752,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             )
             trade_history = adapter.list_trades("market-1:outcome-yes", limit=10)
             candle_history = adapter.list_candles("market-1:outcome-yes", resolution="1h")
+            copy_preview = adapter.copy_trade_from_activity(user_orders["items"][1])
             with self.assertRaises(MarketConfigurationError):
                 adapter.place_live_order(order)
 
@@ -2774,6 +2775,22 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(candle_history[0].close, 0.45)
         self.assertAlmostEqual(candle_history[0].volume or 0.0, 4.0)
         self.assertTrue(candle_history[0].raw["derived"])
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, "market-1:outcome-yes")
+        self.assertEqual(copy_preview.raw["request"]["quantity"], 4.0)
+        self.assertAlmostEqual(copy_preview.raw["request"]["price"], 0.45)
+        self.assertEqual(copy_preview.raw["source"], "xmarket_authenticated_my_orders")
+        self.assertTrue(copy_preview.raw["account_scoped"])
+
+        for invalid_activity in (
+            {**user_orders["items"][1], "status": "open"},
+            {**user_orders["items"][1], "side": "unknown"},
+            {**user_orders["items"][1], "filledQuantity": 0},
+            {**user_orders["items"][1], "averagePrice": 1.0},
+            {**user_orders["items"][1], "id": ""},
+        ):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.copy_trade_from_activity(invalid_activity)
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_trades("market-1:outcome-yes", limit=101)

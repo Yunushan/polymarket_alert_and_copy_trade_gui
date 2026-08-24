@@ -575,7 +575,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(len(payload["support_matrix"]), payload["counts"]["total"])
         self.assertEqual(payload["support_summary"]["total_markets"], payload["counts"]["total"])
         self.assertEqual(payload["support_summary"]["implementation"]["implemented"], 57)
-        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 22)
+        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 23)
         self.assertEqual(kalshi["support"]["operations"]["paper_trading"]["status"], "supported")
         self.assertEqual(kalshi["support"]["operations"]["live_trading"]["status"], "guarded")
 

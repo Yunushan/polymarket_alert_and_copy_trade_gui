@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -64,6 +64,8 @@ class XMarketAdapter(MarketAdapter):
                 "trade_history_account_scoped": True,
                 "candle_history_source": "bounded_derived_account_fills",
                 "candle_history_derived": True,
+                "copy_trading_source": "authenticated_my_orders_filled",
+                "copy_trading_simulation_only": True,
                 "history_page_limit": XMARKET_HISTORY_MAX_LIMIT,
                 "references": list(XMARKET_REFERENCES),
                 "order_management_operations": list(self.order_management_operations),
@@ -467,11 +469,90 @@ class XMarketAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Xmarket copy trading is unsupported because the official API does not provide an account-activity mirroring contract.",
+        """Build a local copy preview from an authenticated filled order.
+
+        Xmarket's documented ``GET /order/my-orders`` response contains the
+        account's filled/partially-filled order rows.  Copying is deliberately
+        simulation-first: this validates one complete fill and forwards it to
+        ``place_paper_order``; it never calls a live order endpoint.
+        """
+
+        self.ensure_capability("copy_trading")
+        status = str(activity.get("status") or "").strip().lower()
+        if status not in {"filled", "partially_filled"}:
+            raise MarketConfigurationError(
+                "Xmarket copy activity must have filled or partially_filled status."
+            )
+
+        market_id = str(activity.get("market_id") or activity.get("marketId") or "").strip()
+        outcome_id = str(activity.get("outcome_id") or activity.get("outcomeId") or "").strip()
+        contract_id = str(activity.get("contract_id") or activity.get("asset") or "").strip()
+        if contract_id:
+            parsed_market, parsed_outcome = self._split_contract_id(contract_id)
+            if market_id and parsed_market != market_id:
+                raise MarketConfigurationError("Xmarket activity market_id does not match contract_id.")
+            if outcome_id and parsed_outcome != outcome_id:
+                raise MarketConfigurationError("Xmarket activity outcome_id does not match contract_id.")
+            market_id, outcome_id = parsed_market, parsed_outcome
+        elif market_id and outcome_id:
+            contract_id = self._contract_id(market_id, outcome_id)
+        else:
+            raise MarketConfigurationError(
+                "Xmarket activity requires contract_id or both market_id and outcome_id."
+            )
+
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Xmarket activity side must be BUY or SELL.")
+        filled_quantity = self._value_at(
+            activity,
+            "filledQuantity",
+            "filled_quantity",
+            "executedQuantity",
+            "executed_quantity",
         )
+        if filled_quantity is None and status == "filled":
+            filled_quantity = self._value_at(activity, "quantity", "size")
+        size = self._positive_number(filled_quantity)
+        if size is None:
+            raise MarketConfigurationError("Xmarket activity filled quantity must be positive and finite.")
+        raw_price = self._value_at(
+            activity,
+            "averagePrice",
+            "average_price",
+            "averageFillPrice",
+            "average_fill_price",
+            "filledPrice",
+            "fillPrice",
+            "price",
+        )
+        price = self._safe_probability(raw_price)
+        if price is None or price <= 0.0 or price >= 1.0:
+            raise MarketConfigurationError("Xmarket activity fill price must be between 0 and 1.")
+        trade_id = str(
+            self._value_at(activity, "tradeId", "trade_id", "fillId", "fill_id", "id") or ""
+        ).strip()
+        if not trade_id:
+            raise MarketConfigurationError("Xmarket activity requires a documented order or fill id.")
+
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=price,
+                metadata={
+                    "activity": dict(activity),
+                    "source": "xmarket_authenticated_my_orders",
+                    "account_scoped": True,
+                },
+            )
+        )
+        preview.raw["source"] = "xmarket_authenticated_my_orders"
+        preview.raw["account_scoped"] = True
+        preview.raw["activity"] = dict(activity)
+        return preview
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
         clean = self._safe_path_segment(market_id, "Xmarket market id")

@@ -22,7 +22,9 @@ XMARKET_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated Get My Orders rows expose complete fills for local
+    # simulation-first copy previews; copy never submits a live order.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -485,7 +487,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         description=(
             "Official Xmarket API adapter for market discovery, outcome prices, orderbooks, paper orders, "
             "guarded API-key order submission, and bounded account-scoped filled-order history with "
-            "derived candles; public trade history and copy trading remain unsupported."
+            "derived candles. Authenticated filled-order rows also support simulation-first copy previews; "
+            "public trade history remains unsupported."
         ),
         capabilities=XMARKET_CAPABILITIES,
     ),
