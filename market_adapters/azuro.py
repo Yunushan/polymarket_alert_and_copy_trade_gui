@@ -9,8 +9,10 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .identity import require_activity_identity
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
+    MarketTrade,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -167,6 +169,9 @@ class AzuroAdapter(MarketAdapter):
                 "graph_api_url": self.graph_api_url,
                 "account_recovery_operations": list(self.account_recovery_operations),
                 "authenticated_account_endpoints": ["POST Azuro client subgraph GraphQL v3Bets/liveBets"],
+                "trade_history_account_scoped": True,
+                "candle_history_derived": True,
+                "candle_history_account_scoped": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
             }
@@ -267,6 +272,176 @@ class AzuroAdapter(MarketAdapter):
         desired = self._bounded_bet_history_int(limit, "limit", default=25)
         payload = self.account_recovery("bet_history", wallet=wallet, limit=desired, offset=0)
         return self._normalize_activity_payload(wallet, payload, desired)
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return bounded, account-scoped single-selection Azuro bets.
+
+        Azuro's documented subgraph exposes bettor bets rather than a public
+        exchange fill tape.  A normalized ``MarketTrade`` therefore represents
+        one ordinary single-selection bet, with the stake as ``size`` and the
+        implied probability as ``price``.  Combo/express bets are excluded
+        because they cannot map to one canonical contract id.
+        """
+
+        self.ensure_capability("trade_history")
+        canonical = self._contract_id(*self._split_contract_id(contract_id))
+        desired = self._bounded_bet_history_int(limit, "limit", default=50)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Azuro trade history requires before to be at or after after.")
+
+        wallet = self._bettor_wallet()
+        payload = self.account_recovery("bet_history", wallet=wallet, limit=desired, offset=0)
+        activities = self._normalize_activity_payload(wallet, payload, desired)
+        trades: List[MarketTrade] = []
+        for activity in activities:
+            if str(activity.get("contract_id") or "").strip() != canonical:
+                continue
+            timestamp = self._activity_timestamp(activity.get("timestamp"))
+            if timestamp is None:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            trade_id = str(activity.get("betId") or activity.get("transactionHash") or "").strip()
+            try:
+                price = float(activity.get("price"))
+                size = float(activity.get("size"))
+            except (TypeError, ValueError):
+                continue
+            if not trade_id or not math.isfinite(price) or not 0 < price <= 1:
+                continue
+            if not math.isfinite(size) or size <= 0:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=f"azuro:{trade_id}",
+                    side="BUY",
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw={
+                        "activity": dict(activity),
+                        "source": "azuro_bettor_bet_history",
+                        "account_scoped": True,
+                        "derived_probability": True,
+                    },
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded account-scoped candles from bettor bet history."""
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError("Azuro candle history requires to_timestamp to be at or after from_timestamp.")
+
+        trades = self.list_trades(contract_id, limit=AZURO_BET_HISTORY_PAGE_MAX, before=end_ts, after=start_ts)
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in sorted(
+            (trade for trade in trades if trade.timestamp is not None),
+            key=lambda item: (float(item.timestamp or 0), item.trade_id),
+        ):
+            timestamp = float(trade.timestamp or 0)
+            bucket_timestamp = int(timestamp // interval * interval)
+            bucket = buckets.setdefault(
+                bucket_timestamp,
+                {
+                    "open": trade.price,
+                    "high": trade.price,
+                    "low": trade.price,
+                    "close": trade.price,
+                    "volume": 0.0,
+                    "trade_ids": [],
+                },
+            )
+            bucket["high"] = max(float(bucket["high"]), trade.price)
+            bucket["low"] = min(float(bucket["low"]), trade.price)
+            bucket["close"] = trade.price
+            bucket["volume"] += float(trade.size)
+            bucket["trade_ids"].append(trade.trade_id)
+
+        canonical = self._contract_id(*self._split_contract_id(contract_id))
+        return [
+            MarketCandle(
+                market_id=self.market_id,
+                contract_id=canonical,
+                timestamp=float(bucket_timestamp),
+                open=float(bucket["open"]),
+                high=float(bucket["high"]),
+                low=float(bucket["low"]),
+                close=float(bucket["close"]),
+                volume=float(bucket["volume"]),
+                raw={
+                    "source": "azuro_bettor_bet_history",
+                    "derived": True,
+                    "account_scoped": True,
+                    "trade_ids": list(bucket["trade_ids"]),
+                },
+            )
+            for bucket_timestamp, bucket in sorted(buckets.items())
+        ]
+
+    def _bettor_wallet(self) -> str:
+        credential = self.resolve_credential(
+            "azuro_bettor_address",
+            ("AZURO_BETTOR_ADDRESS",),
+            required=True,
+            label="AZURO_BETTOR_ADDRESS",
+        )
+        wallet = str(credential.value).strip()
+        if not AZURO_BETTOR_ADDRESS_RE.fullmatch(wallet):
+            raise MarketConfigurationError("Azuro bettor wallet must be a canonical 0x-prefixed 40-hex address.")
+        return wallet
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Azuro {label} timestamp must be finite and non-negative.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"Azuro {label} timestamp must be finite and non-negative.")
+        return timestamp
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+        }
+        key = str(resolution or "").strip().lower()
+        if key not in intervals:
+            raise MarketConfigurationError("Azuro candle resolution must be one of 1m, 5m, 15m, 1h, 4h, or 1d.")
+        return intervals[key]
 
     @staticmethod
     def _bounded_bet_history_int(value: Any, label: str, *, default: int) -> int:

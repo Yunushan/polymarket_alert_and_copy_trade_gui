@@ -57,6 +57,8 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
+        self.assertTrue(adapter.capabilities.trade_history)
+        self.assertTrue(adapter.capabilities.candle_history)
         self.assertFalse(adapter.capabilities.orderbook_reading)
         self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("api.onchainfeed.org", health["api_base_url"])
@@ -195,6 +197,53 @@ class AzuroAdapterTests(unittest.TestCase):
             adapter.copy_trade_from_activity({"asset": "x", "side": "SELL", "size": 1, "odds": 1.5})
         with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({"asset": "x", "side": "BUY", "size": 1, "odds": 0})
+
+    def test_account_scoped_trade_history_and_derived_candles(self) -> None:
+        wallet = "0x0000000000000000000000000000000000000001"
+        adapter = AzuroAdapter(
+            {
+                "azuro_graph_api_url": "https://graph.fixture.test/query",
+                "azuro_bettor_address": wallet,
+            }
+        )
+        response = load_fixture("bet_history")
+        adapter.runtime.request_json = lambda *args, **kwargs: response  # type: ignore[method-assign]
+
+        trades = adapter.list_trades(f"{GAME_ID}:{CONDITION_ID}:29", limit=10)
+        candles = adapter.list_candles(
+            f"{GAME_ID}:{CONDITION_ID}:29",
+            resolution="1h",
+            from_timestamp=1773510000,
+            to_timestamp=1773513600,
+        )
+
+        self.assertEqual([trade.trade_id for trade in trades], ["azuro:8", "azuro:7"])
+        self.assertEqual([trade.side for trade in trades], ["BUY", "BUY"])
+        self.assertAlmostEqual(trades[0].price, 1 / 1.85)
+        self.assertAlmostEqual(trades[0].size, 10.0)
+        self.assertTrue(trades[0].raw["account_scoped"])
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].timestamp, 1773511200.0)
+        self.assertAlmostEqual(candles[0].open, 1 / 1.85)
+        self.assertAlmostEqual(candles[0].close, 1 / 1.85)
+        self.assertAlmostEqual(candles[0].volume or 0.0, 20.0)
+        self.assertTrue(candles[0].raw["derived"])
+
+    def test_account_scoped_history_validates_identity_and_bounds(self) -> None:
+        adapter = AzuroAdapter({"azuro_bettor_address": "not-a-wallet"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{GAME_ID}:{CONDITION_ID}:29")
+        adapter = AzuroAdapter(
+            {
+                "azuro_bettor_address": "0x0000000000000000000000000000000000000001",
+            }
+        )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{GAME_ID}:{CONDITION_ID}:29", limit=1001)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(f"{GAME_ID}:{CONDITION_ID}:29", resolution="30m")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{GAME_ID}:{CONDITION_ID}:29", before=10, after=20)
 
     def test_paper_order_returns_official_calculation_request_shape(self) -> None:
         adapter = self.make_adapter()
