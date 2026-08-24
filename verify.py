@@ -66,8 +66,8 @@ WORKFLOW_ACTION_PINS = {
         "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
         "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
         "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-        "github/codeql-action/init": (4, "ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd"),
-        "github/codeql-action/analyze": (4, "ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd"),
+        "github/codeql-action/init": (4, "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28"),
+        "github/codeql-action/analyze": (4, "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28"),
     },
 }
 WORKFLOW_ACTION_REF_RE = re.compile(
