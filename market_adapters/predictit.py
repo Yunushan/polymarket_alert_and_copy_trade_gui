@@ -9,6 +9,8 @@ from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatur
 from .types import (
     MarketContract,
     MarketEvent,
+    OrderBookLevel,
+    OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -34,7 +36,8 @@ class PredictItAdapter(MarketAdapter):
             {
                 "api_base_url": self.api_base_url,
                 "references": list(PREDICTIT_REFERENCES),
-                "orderbook_supported": False,
+                "orderbook_supported": True,
+                "orderbook_depth_supported": False,
                 "live_trading_supported": False,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
             }
@@ -84,11 +87,37 @@ class PredictItAdapter(MarketAdapter):
             raw={"market": dict(market), "contract": dict(contract), "outcome": outcome},
         )
 
-    def get_orderbook(self, contract_id: str):
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "orderbook_reading",
-            "PredictIt's public market-data API exposes current prices and top-of-book fields, not full orderbook depth.",
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        """Return the documented one-level quote snapshot.
+
+        PredictIt's public feed publishes best buy/sell costs but no depth or
+        quantities.  The canonical orderbook therefore exposes each available
+        quote with an explicit unknown size (``0.0``) and preserves the raw
+        contract payload.  Full depth remains intentionally unsupported.
+        """
+        self.ensure_capability("orderbook_reading")
+        market_id, predictit_contract_id, outcome = self._split_contract_id(contract_id)
+        market = self._get_market(market_id)
+        contract = self._find_contract(market, predictit_contract_id)
+        if not contract:
+            raise MarketConfigurationError(
+                f"PredictIt contract {predictit_contract_id!r} was not found in market {market_id!r}."
+            )
+        bid, ask, _ = self._prices_from_contract(contract, outcome)
+        bids = [OrderBookLevel(price=bid, size=0.0)] if bid is not None else []
+        asks = [OrderBookLevel(price=ask, size=0.0)] if ask is not None else []
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=self._contract_id(market_id, predictit_contract_id, outcome),
+            bids=bids,
+            asks=asks,
+            raw={
+                "market": dict(market),
+                "contract": dict(contract),
+                "outcome": outcome,
+                "depth": "top_of_book_only",
+                "size_available": False,
+            },
         )
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:

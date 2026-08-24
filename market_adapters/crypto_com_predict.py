@@ -8,7 +8,15 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .runtime import AdapterRuntime
-from .types import MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import (
+    MarketContract,
+    MarketEvent,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 DEFAULT_CRYPTO_COM_PREDICT_BASE_URL = "https://data-api.crypto.com/api/v1/predictions"
@@ -62,7 +70,8 @@ class CryptoComPredictAdapter(MarketAdapter):
                     "Personal non-commercial reads are anonymous; redistribution, commercial use, "
                     "or model training requires a Crypto.com Market Data License."
                 ),
-                "orderbook_supported": False,
+                "orderbook_supported": True,
+                "orderbook_depth_supported": False,
                 "live_trading_supported": False,
                 "copy_trading_supported": False,
             }
@@ -124,11 +133,27 @@ class CryptoComPredictAdapter(MarketAdapter):
             raw=dict(payload),
         )
 
-    def get_orderbook(self, contract_id: str):
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "orderbook_reading",
-            f"{self.provider_label}'s Predictions Market Data API exposes bid, ask, midpoint, and probability, not depth or size.",
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        """Return the official bid/ask quote as a one-level book.
+
+        The market-data contract does not publish quote depth or quantities,
+        so sizes are explicitly represented as unknown ``0.0`` values and the
+        raw response marks this as a top-of-book-only snapshot.
+        """
+        self.ensure_capability("orderbook_reading")
+        price = self.get_price(contract_id)
+        bids = [OrderBookLevel(price=price.bid, size=0.0)] if price.bid is not None else []
+        asks = [OrderBookLevel(price=price.ask, size=0.0)] if price.ask is not None else []
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=price.contract_id,
+            bids=bids,
+            asks=asks,
+            raw={
+                "price": dict(price.raw),
+                "depth": "top_of_book_only",
+                "size_available": False,
+            },
         )
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:

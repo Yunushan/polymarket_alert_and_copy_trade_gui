@@ -569,15 +569,15 @@ scan and produces simulation-first paper copy previews only; it requires a canon
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, dry-run default | Yes | Live trading only | Trading may be region/KYC limited |
 | Kalshi (`kalshi`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation-first | Required | Exchange account/API keys | Region/KYC limited |
-| PredictIt (`predictit`) | Implemented | Yes | Yes | Yes | No | No | Required | No | Region/account limited |
+| PredictIt (`predictit`) | Implemented | Yes | Yes (prices and one-level top-of-book; depth sizes unavailable) | Yes | No | No | Required | No | Region/account limited |
 | Robinhood Prediction Markets (`robinhood_prediction_markets`) | Implemented | Yes | Yes (including trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
-| Fanatics Markets (`fanatics_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
-| DraftKings Predictions (`draftkings_predictions`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
+| Fanatics Markets (`fanatics_markets`) | Implemented | Yes | Yes (prices and one-level top-of-book; depth sizes unavailable) | Yes | No | No | Required | Optional API key | Region/KYC limited |
+| DraftKings Predictions (`draftkings_predictions`) | Implemented | Yes | Yes (prices and one-level top-of-book; depth sizes unavailable) | Yes | No | No | Required | Optional API key | Region/KYC limited |
 | Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Implemented | Yes | Yes (executions/OHLC/account order reads) | Yes | Guarded, off by default (cancel/modify also guarded) | Yes, simulation-first account executions | Required | IBKR account required | Region/KYC limited |
 | ForecastEx (`forecastex`) | Implemented | Yes | Yes (executions/OHLC/account order reads) | Yes | Guarded, off by default (cancel/modify also guarded) | Yes, simulation-first account executions | Required | IBKR account required | Region/KYC limited |
 | CME Group Prediction Markets (`cme_prediction_markets`) | Implemented | Yes | Yes (executions/OHLC/account order reads) | Yes | Guarded, off by default (cancel/modify also guarded) | Yes, simulation-first account executions | Required | IBKR account required | Region/KYC limited |
-| Nadex (`nadex`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
-| Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
+| Nadex (`nadex`) | Implemented | Yes | Yes (prices and one-level top-of-book; depth sizes unavailable) | Yes | No | No | Required | Optional API key | Region/KYC limited |
+| Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes (prices and one-level top-of-book; depth sizes unavailable) | Yes | No | No | Required | Optional API key | Not KYC limited |
 | Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes (HIP-4 wallet fills/candles) | Yes | Guarded, off by default; signed cancel/cancel-by-cloid/modify/batch-modify/schedule-cancel also guarded | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes (trades/candles/account activity/portfolio/market positions) | Yes | Guarded, off by default; signed cancel/batch-cancel/cancel-all/batch-modify also guarded | Yes, simulation-first | Required | API credentials required | Jurisdiction varies |
 | Context V2 (`context_v2`) | Implemented | Yes | Yes (activity trades/price history; filled account orders) | Yes | Guarded, off by default (signed cancel/batch-cancel also guarded) | Yes, simulation-first | Required | API credentials required | Region/KYC limited |
@@ -613,7 +613,7 @@ scan and produces simulation-first paper copy previews only; it requires a canon
 | Coinbase Prediction Markets (`coinbase_prediction_markets`) | Implemented | Yes | Yes (including public trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
 | Probable (`probable`) | Implemented | Yes | Yes (activity/price history; authenticated open-order reads) | Yes | Guarded, off by default | Yes (simulation-first wallet activity) | Required | API credentials required | Jurisdiction varies |
 | Kalshi via Robinhood (`kalshi_via_robinhood`) | Implemented | Yes | Yes (including trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
-| FanDuel Predicts (`fanduel_predicts`) | Implemented | Yes | Yes | Yes | No | No | Required | Account required for trading | Region/KYC limited |
+| FanDuel Predicts (`fanduel_predicts`) | Implemented | Yes | Yes (prices and one-level top-of-book; depth sizes unavailable) | Yes | No | No | Required | Account required for trading | Region/KYC limited |
 | Seer (`seer`) | Implemented | Yes | Yes (official Generic-market DEX-pool chart points) | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | DFlow (`dflow`) | Implemented | Yes | Yes (public trades plus bounded derived trade-feed candles) | Yes | Guarded, off by default | No | Required | Wallet required for trading | Region limited |
 | Space (`space`) | Implemented | Yes | Yes (including public trades/candles) | Yes | No | No | Required | No API key; wallet/settlement required only for future live chain flow | Jurisdiction varies |

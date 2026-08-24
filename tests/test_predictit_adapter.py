@@ -41,11 +41,12 @@ class PredictItAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
-        self.assertFalse(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.orderbook_reading)
         self.assertFalse(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
         self.assertIn("predictit.org/api/marketdata", health["api_base_url"])
-        self.assertFalse(health["orderbook_supported"])
+        self.assertTrue(health["orderbook_supported"])
+        self.assertFalse(health["orderbook_depth_supported"])
 
     def test_list_events_uses_public_marketdata_feed_and_filters_query(self) -> None:
         adapter = self.make_adapter()
@@ -84,13 +85,21 @@ class PredictItAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(no.last or 0, 0.58)
         self.assertAlmostEqual(no.midpoint or 0, 0.58)
 
-    def test_orderbook_and_live_copy_trading_are_unsupported(self) -> None:
+    def test_orderbook_exposes_documented_top_of_book_quotes_without_depth(self) -> None:
         adapter = self.make_adapter()
 
-        with self.assertRaises(UnsupportedFeatureError) as orderbook_ctx:
-            adapter.get_orderbook("7053:24680:YES")
-        self.assertEqual(orderbook_ctx.exception.feature, "orderbook_reading")
-        self.assertIn("not full orderbook depth", str(orderbook_ctx.exception))
+        yes = adapter.get_orderbook("7053:24680:YES")
+        no = adapter.get_orderbook("7053:24680:NO")
+
+        self.assertEqual([(level.price, level.size) for level in yes.bids], [(0.41, 0.0)])
+        self.assertEqual([(level.price, level.size) for level in yes.asks], [(0.43, 0.0)])
+        self.assertEqual([(level.price, level.size) for level in no.bids], [(0.57, 0.0)])
+        self.assertEqual([(level.price, level.size) for level in no.asks], [(0.59, 0.0)])
+        self.assertEqual(yes.raw["depth"], "top_of_book_only")
+        self.assertFalse(yes.raw["size_available"])
+
+    def test_live_and_copy_trading_are_unsupported(self) -> None:
+        adapter = self.make_adapter()
 
         with self.assertRaises(UnsupportedFeatureError) as live_ctx:
             adapter.place_live_order(

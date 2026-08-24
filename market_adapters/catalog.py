@@ -99,7 +99,9 @@ PREDICTIT_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
-    orderbook_reading=False,
+    # PredictIt publishes best-buy/best-sell quote fields, but not depth or
+    # quote quantities.  The adapter advertises a one-level top-of-book view.
+    orderbook_reading=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -129,7 +131,8 @@ CRYPTO_COM_PREDICT_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
-    orderbook_reading=False,
+    # The public API exposes bid/ask quotes but no depth or quote quantities.
+    orderbook_reading=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -144,7 +147,7 @@ DRAFTKINGS_PREDICTIONS_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
-    orderbook_reading=False,
+    orderbook_reading=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -159,7 +162,7 @@ FANATICS_MARKETS_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
-    orderbook_reading=False,
+    orderbook_reading=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -174,7 +177,9 @@ NADEX_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
-    orderbook_reading=False,
+    # CDNA's quote endpoint is available for Nadex-listed prediction events;
+    # DCM/FIX depth and quote quantities remain outside this alias.
+    orderbook_reading=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -638,7 +643,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://fanaticsmarkets.com",
         description=(
             "Read-only Fanatics Markets/CDNA alias using the official Crypto.com Predictions API for "
-            "event discovery, contracts, prices, alerts, and local dry-run orders; Fanatics order APIs "
+            "event discovery, contracts, prices, one-level top-of-book quotes, alerts, and local dry-run orders; Fanatics order APIs "
             "are not published and live/copy trading remain unsupported."
         ),
         capabilities=FANATICS_MARKETS_CAPABILITIES,
@@ -649,7 +654,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://www.draftkings.com",
         description=(
             "Read-only DraftKings Predictions/CDNA alias using the official Crypto.com Predictions API for "
-            "event discovery, contracts, prices, alerts, and local dry-run orders; CME-listed contracts "
+            "event discovery, contracts, prices, one-level top-of-book quotes, alerts, and local dry-run orders; CME-listed contracts "
             "remain available through cme_prediction_markets. DraftKings account execution and copy trading "
             "are not automated."
         ),
@@ -691,7 +696,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://www.nadex.com",
         description=(
             "Read-only Nadex/CDNA prediction-event alias backed by the official Crypto.com Predictions "
-            "Market Data API for event discovery, contracts, prices, alerts, and local dry-run orders. "
+            "Market Data API for event discovery, contracts, prices, one-level top-of-book quotes, alerts, and local dry-run orders. "
             "Nadex account trading, DCM/FIX depth, knock-out products, and copy trading remain unsupported."
         ),
         capabilities=NADEX_CAPABILITIES,
@@ -702,7 +707,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://crypto.com",
         description=(
             "Official Crypto.com Predictions Market Data API adapter for anonymous event discovery, "
-            "contracts, prices, alerts, and dry-run orders."
+            "contracts, prices, one-level top-of-book quotes, alerts, and dry-run orders."
         ),
         capabilities=CRYPTO_COM_PREDICT_CAPABILITIES,
     ),

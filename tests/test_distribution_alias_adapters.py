@@ -116,7 +116,7 @@ class DraftKingsPredictionsAliasTests(unittest.TestCase):
         self.assertEqual(health["underlying_market_data_provider"], "Crypto.com Derivatives North America (CDNA)")
         self.assertFalse(health["draftkings_order_api_supported"])
         self.assertTrue(adapter.capabilities.event_listing)
-        self.assertFalse(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.orderbook_reading)
         self.assertFalse(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
 
@@ -140,8 +140,10 @@ class DraftKingsPredictionsAliasTests(unittest.TestCase):
             PaperOrderRequest("draftkings_predictions", DRAFTKINGS_CONTRACT, "BUY", 2, 0.5)
         )
         self.assertTrue(paper.accepted)
-        with self.assertRaises(UnsupportedFeatureError):
-            adapter.get_orderbook(DRAFTKINGS_CONTRACT)
+        book = adapter.get_orderbook(DRAFTKINGS_CONTRACT)
+        self.assertEqual([(level.price, level.size) for level in book.bids], [(0.46, 0.0)])
+        self.assertEqual([(level.price, level.size) for level in book.asks], [(0.54, 0.0)])
+        self.assertEqual(book.raw["depth"], "top_of_book_only")
         with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(PaperOrderRequest("draftkings_predictions", DRAFTKINGS_CONTRACT, "BUY", 1, 0.5))
         with self.assertRaises(UnsupportedFeatureError):

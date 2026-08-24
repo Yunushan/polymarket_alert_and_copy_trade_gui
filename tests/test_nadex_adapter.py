@@ -46,7 +46,7 @@ class NadexAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.kyc_required)
         self.assertTrue(adapter.capabilities.region_limited)
-        self.assertFalse(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.orderbook_reading)
         self.assertFalse(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
         self.assertEqual(health["alias_of"], "crypto_com_predict")
@@ -89,11 +89,13 @@ class NadexAdapterTests(unittest.TestCase):
         self.assertIn("Nadex/CDNA Predictions", result.message)
         self.assertEqual(result.filled_size, 0.0)
 
-    def test_orderbook_live_and_copy_remain_explicitly_unsupported(self) -> None:
+    def test_top_of_book_is_available_but_live_and_copy_remain_unsupported(self) -> None:
         adapter, _ = self.make_adapter()
 
-        with self.assertRaises(UnsupportedFeatureError):
-            adapter.get_orderbook(CONTRACT_SYMBOL)
+        book = adapter.get_orderbook(CONTRACT_SYMBOL)
+        self.assertEqual([(level.price, level.size) for level in book.bids], [(0.41, 0.0)])
+        self.assertEqual([(level.price, level.size) for level in book.asks], [(0.59, 0.0)])
+        self.assertEqual(book.raw["depth"], "top_of_book_only")
         with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(PaperOrderRequest("nadex", CONTRACT_SYMBOL, "BUY", 1, 0.5))
         with self.assertRaises(UnsupportedFeatureError):

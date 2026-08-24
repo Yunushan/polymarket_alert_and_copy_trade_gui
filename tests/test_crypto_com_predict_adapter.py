@@ -45,7 +45,7 @@ class CryptoComPredictAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
-        self.assertFalse(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.orderbook_reading)
         self.assertFalse(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
         self.assertTrue(health["anonymous_read_access"])
@@ -54,6 +54,8 @@ class CryptoComPredictAdapterTests(unittest.TestCase):
         self.assertEqual(health["runtime"]["min_request_interval_seconds"], 0.6)
         self.assertIn("data-api.crypto.com", health["api_base_url"])
         self.assertIn("Market Data License", health["license_notice"])
+        self.assertTrue(health["orderbook_supported"])
+        self.assertFalse(health["orderbook_depth_supported"])
 
     def test_list_and_search_events_use_documented_endpoints(self) -> None:
         adapter, calls = self.make_adapter()
@@ -128,13 +130,14 @@ class CryptoComPredictAdapterTests(unittest.TestCase):
                 with self.assertRaises(MarketConfigurationError):
                     adapter.place_paper_order(order)
 
-    def test_unsupported_operations_and_malformed_price_fail_clearly(self) -> None:
+    def test_top_of_book_and_unsupported_execution_fail_clearly(self) -> None:
         adapter, _ = self.make_adapter()
 
-        with self.assertRaises(UnsupportedFeatureError) as orderbook_ctx:
-            adapter.get_orderbook(CONTRACT_SYMBOL)
-        self.assertEqual(orderbook_ctx.exception.feature, "orderbook_reading")
-        self.assertIn("not depth or size", str(orderbook_ctx.exception))
+        book = adapter.get_orderbook(CONTRACT_SYMBOL)
+        self.assertEqual([(level.price, level.size) for level in book.bids], [(0.43, 0.0)])
+        self.assertEqual([(level.price, level.size) for level in book.asks], [(0.63, 0.0)])
+        self.assertEqual(book.raw["depth"], "top_of_book_only")
+        self.assertFalse(book.raw["size_available"])
 
         with self.assertRaises(UnsupportedFeatureError) as live_ctx:
             adapter.place_live_order(

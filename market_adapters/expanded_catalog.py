@@ -54,7 +54,9 @@ FANDUEL_PREDICTS_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
-    orderbook_reading=False,
+    # The underlying OG/CDNA feed exposes bid/ask quotes but no depth or
+    # quantities; the adapter returns a one-level top-of-book view.
+    orderbook_reading=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -441,7 +443,7 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://www.fanduel.com/predicts",
         description=(
             "Read-only FanDuel Predicts/OG alias using the official Crypto.com Predictions API for "
-            "OG/CDNA event discovery, contracts, prices, alerts, and local dry-run orders. CME-listed "
+            "OG/CDNA event discovery, contracts, prices, one-level top-of-book quotes, alerts, and local dry-run orders. CME-listed "
             "contracts remain available through cme_prediction_markets; FanDuel account execution and "
             "copy trading are not automated."
         ),
