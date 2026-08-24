@@ -40,11 +40,12 @@ check does not receive local test or security points.
 | Platform evidence | 10 | 5 | Reviewed platform CI and platform JSON evidence |
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
-The latest local audit on 2026-08-24 is **83/100 (not ready)**. Local
-verification passed all 859 tests (7 intentionally skipped), Ruff, the adapter
-catalog (68 markets, 57 implemented and 11 explicitly blocked), 340 offline
-fixtures, documentation, workflow, secret-hygiene, and packaging checks; branch
-coverage was 76% overall. Metaculus now supports fixture-backed local forecast
+The latest local audit on 2026-08-24 is **83/100 (not ready)** when no external
+evidence manifests are supplied. Local verification passed all 867 tests (7
+intentionally skipped), Ruff, the adapter catalog (68 markets, 57 implemented
+and 11 explicitly blocked), 342 offline fixtures, documentation, workflow,
+secret-hygiene, and packaging checks; branch coverage was 76% overall.
+Metaculus now supports fixture-backed local forecast
 previews and guarded official forecast submission for binary, multiple-choice,
 and numeric/date question shapes; the web form forwards validated metadata JSON.
 Large HTTP responses are written in bounded chunks so the support matrix and
@@ -57,6 +58,13 @@ the connection from this environment; credentialed and funded checks remain
 blocked. No live evidence is invented to compensate for that gap. The score
 therefore reflects repeatable repository proof plus explicitly supplied
 evidence, not a production certification.
+
+The repository also contains reviewed historical manifests under `evidence/`.
+Passing those manifests explicitly to the scorer raises the arithmetic result
+to **91/100**, but that number includes the manifests' recorded external runs
+and must not be read as a current release or live-market certification. The
+remaining points require a current release artifact, deployment proof, a
+reachable public probe, and real credentialed/funded acceptance evidence.
 
 The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from app import tkinter_smoke_payload
 from core.models import AppConfig
 from market_adapters import MARKET_IDS
+from market_adapters.registry import build_default_registry
 from scripts import verify_live_validation_report_smoke as live_smoke
 from web_api import app_state_payload
 
@@ -16,6 +18,22 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class FinalParityTests(unittest.TestCase):
+    def test_react_account_operation_union_covers_registry_allow_list(self) -> None:
+        """Prevent a newly exposed adapter account operation from becoming UI-only dynamic data."""
+
+        source = (ROOT / "frontend" / "src" / "types.ts").read_text(encoding="utf-8")
+        block = source.split("export type MarketAccountOperation =", 1)[1].split(
+            "export interface MarketAccountPayload", 1
+        )[0]
+        declared = set(re.findall(r'^\s*\|\s*"([^"\\]+)"', block, flags=re.MULTILINE))
+        registry = build_default_registry()
+        expected = {
+            str(operation).strip().lower()
+            for metadata in registry.list_metadata()
+            for operation in getattr(registry.create(metadata.market_id), "account_recovery_operations", ())
+        }
+        self.assertTrue(expected <= declared, f"Frontend account operation union is missing: {sorted(expected - declared)}")
+
     def test_tkinter_smoke_payload_proves_fallback_gui_contract(self) -> None:
         payload = tkinter_smoke_payload()
 

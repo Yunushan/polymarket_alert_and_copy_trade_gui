@@ -221,6 +221,7 @@ export interface MarketCandlesPayload {
 
 export type MarketAccountOperation =
   | "me"
+  | "forecast_posts"
   | "prediction_sets"
   | "scores"
   | "orders"
