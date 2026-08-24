@@ -599,6 +599,7 @@ class OmenAdapter(_GraphQLAdapter):
     metadata = get_market_metadata("omen")
     graphql_config_key = "omen_subgraph_url"
     graphql_env_vars = ("OMEN_SUBGRAPH_URL",)
+    account_recovery_operations = ("activity",)
 
     FPMMS_QUERY = """
     query OmenMarkets($first: Int!) {
@@ -763,6 +764,10 @@ class OmenAdapter(_GraphQLAdapter):
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "copy_trading_source": "omen_fpmm_creator_trades",
                 "copy_trading_coverage": "bounded wallet-filtered public creator rows; simulation-first only",
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "public_account_endpoints": [
+                    "POST <subgraph> fpmmTrades(creator=...)",
+                ],
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "signed_transaction_submission_enabled": self.config_bool(
@@ -992,6 +997,38 @@ class OmenAdapter(_GraphQLAdapter):
             reverse=True,
         )
         return activities[:desired]
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read the bounded public FPMM creator-activity feed.
+
+        Omen and the Gnosis alias expose the same official ``FPMMTrade``
+        schema.  This operation is deliberately framed as public activity,
+        not a claim of complete authenticated account history.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                f"{self.display_name} account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+        self.ensure_capability("copy_trading")
+        identity = require_activity_identity(
+            self.market_id,
+            kwargs.get("wallet") or kwargs.get("address"),
+        )
+        desired = self._activity_limit(kwargs.get("limit", 25))
+        activities = self.list_activity(identity, limit=desired)
+        return {
+            "source": "omen_fpmm_creator_trades",
+            "endpoint": "fpmmTrades(creator=...)",
+            "wallet": identity,
+            "limit": desired,
+            "coverage": "bounded_public_creator_rows",
+            "activity": activities,
+            "raw": activities,
+        }
 
     def list_candles(
         self,

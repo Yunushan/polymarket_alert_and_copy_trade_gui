@@ -3818,6 +3818,11 @@ def market_account_payload(
         }
         if raw_contract_id:
             kwargs["contract_id"] = raw_contract_id
+    elif normalized_market_id in {"metadao", "omen", "gnosis_prediction_markets"}:
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "25"), 25, 1, 100),
+        }
     elif normalized_market_id == "metaculus":
         kwargs = {
             "forecaster_id": _query_value(query_params, "forecaster_id") or None,

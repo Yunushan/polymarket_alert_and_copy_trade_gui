@@ -228,6 +228,7 @@ export type MarketAccountOperation =
   | "active_orders"
   | "account"
   | "account_activity"
+  | "activity"
   | "funds"
   | "statement"
   | "currency_rates"

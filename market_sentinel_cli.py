@@ -1404,6 +1404,8 @@ PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = (
 )
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
 THALES_ACCOUNT_OPERATIONS = ("positions", "transactions")
+METADAO_ACCOUNT_OPERATIONS = ("activity",)
+OMEN_ACCOUNT_OPERATIONS = ("activity",)
 METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
 GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS = ("me", "prediction_sets", "scores")
 MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
@@ -1444,6 +1446,8 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
         + AZURO_ACCOUNT_OPERATIONS
         + THALES_ACCOUNT_OPERATIONS
+        + METADAO_ACCOUNT_OPERATIONS
+        + OMEN_ACCOUNT_OPERATIONS
         + METACULUS_ACCOUNT_OPERATIONS
         + GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS
         + MYRIAD_ACCOUNT_OPERATIONS
@@ -1734,6 +1738,11 @@ def run_market_account(args: argparse.Namespace) -> int:
             "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
             "from_timestamp": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
             "to_timestamp": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
+        }
+    elif market_id in {"metadao", "omen", "gnosis_prediction_markets"}:
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 25, 1, 100),
         }
     elif market_id == "metaculus":
         kwargs = {
@@ -3171,7 +3180,11 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--bet-id", default="", help="Betfair bet id filter.")
     market_account.add_argument("--group-by", default="BET", help="Betfair cleared-order roll-up.")
     market_account.add_argument("--include-item-description", action="store_true")
-    market_account.add_argument("--wallet", default="", help="Betfair account wallet, Predict.fun address, or Myriad activity wallet.")
+    market_account.add_argument(
+        "--wallet",
+        default="",
+        help="Wallet or activity identity (Betfair, MetaDAO Solana, Omen/Gnosis EVM, Predict.fun, or Myriad).",
+    )
     market_account.add_argument("--locale", default="en", help="Betfair account-statement locale.")
     market_account.add_argument("--exclude-item", action="store_true", help="Exclude item details from Betfair statements.")
     market_account.add_argument("--from-currency", default="", help="Betfair source currency for currency_rates.")

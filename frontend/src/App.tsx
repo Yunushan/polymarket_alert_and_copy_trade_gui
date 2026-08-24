@@ -3249,7 +3249,7 @@ function MarketsView({
               <input
                 value={marketReadForm.account_wallet}
                 onChange={(event) => onMarketReadFormChange({ account_wallet: event.target.value })}
-                placeholder="Predict.fun 0x address"
+                placeholder="Wallet / activity identity"
               />
             </label>
             <label>

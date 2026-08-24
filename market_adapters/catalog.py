@@ -897,7 +897,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="omen",
         display_name="Omen",
         homepage_url="https://omen.eth.limo",
-        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, public FPMM trades, bounded derived candles, creator-scoped simulation-first copy previews, alerts, paper orders, and guarded externally signed live transactions.",
+        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, public FPMM trades, the bounded `activity` account operation for creator-scoped wallet rows, bounded derived candles, simulation-first copy previews, alerts, paper orders, and guarded externally signed live transactions.",
         capabilities=OMEN_CAPABILITIES,
     ),
     MarketMetadata(

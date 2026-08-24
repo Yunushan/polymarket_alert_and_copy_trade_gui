@@ -1164,6 +1164,52 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(account_calls[-1][1]["market_id"], "0x1111111111111111111111111111111111111111")
         self.assertEqual(account_calls[-1][1]["contract_id"], "0x1111111111111111111111111111111111111111:1")
 
+    def test_metadao_activity_account_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="metadao",
+            display_name="MetaDAO",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["metadao"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "metadao",
+            "activity",
+            {
+                "wallet": ["11111111111111111111111111111111"],
+                "limit": ["12"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                    },
+                )
+            ],
+        )
+
     def test_myriad_account_activity_payload_forwards_wallet_and_bounds(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

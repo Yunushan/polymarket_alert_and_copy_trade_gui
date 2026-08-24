@@ -110,6 +110,7 @@ class MetaDAOAdapter(MarketAdapter):
 
     metadata = get_market_metadata("metadao")
     live_order_sides = ("BUY", "SELL")
+    account_recovery_operations = ("activity",)
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -138,6 +139,10 @@ class MetaDAOAdapter(MarketAdapter):
                 "copy_trading_supported": True,
                 "copy_activity_source": "public_futarchyamm_spot_swaps",
                 "copy_activity_coverage": "bounded_recent",
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "public_account_endpoints": [
+                    "GET /dexscreener/events (bounded slot scans; local maker filter)",
+                ],
                 "activity_ticker_limit": self._activity_ticker_limit(),
                 "activity_trade_scan_limit": self._activity_trade_scan_limit(),
                 "history_slot_window": history_slot_window,
@@ -282,6 +287,39 @@ class MetaDAOAdapter(MarketAdapter):
 
         activities.sort(key=lambda row: (int(row.get("timestamp") or 0), str(row.get("activityId") or "")), reverse=True)
         return activities[:desired]
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read MetaDAO's bounded public maker-activity feed.
+
+        The shared account surface uses an explicit allow-list even though
+        this is a public wallet-scoped read.  The upstream endpoint is a
+        slot-ranged global tape, so the returned rows are intentionally a
+        bounded recent slice rather than a complete account history.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "MetaDAO account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+        self.ensure_capability("copy_trading")
+        identity = require_activity_identity(
+            self.market_id,
+            kwargs.get("wallet") or kwargs.get("address"),
+        )
+        desired = self._activity_limit(kwargs.get("limit", 25))
+        activities = self.list_activity(identity, limit=desired)
+        return {
+            "source": "metadao_dexscreener_spot_swaps",
+            "endpoint": "/dexscreener/events",
+            "wallet": identity,
+            "limit": desired,
+            "coverage": "bounded_recent",
+            "activity": activities,
+            "raw": activities,
+        }
 
     def list_trades(
         self,

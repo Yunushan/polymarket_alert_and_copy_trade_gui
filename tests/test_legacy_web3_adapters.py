@@ -333,6 +333,16 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         self.assertTrue(all(row["proxyWallet"] == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" for row in activities))
         self.assertTrue(all(row["creator"] == row["proxyWallet"] for row in activities))
         self.assertTrue(all(row["source"] == "omen_fpmm_creator_trades" for row in activities))
+        recovered = adapter.account_recovery(
+            "activity",
+            wallet="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            limit=2,
+        )
+        self.assertEqual(recovered["source"], "omen_fpmm_creator_trades")
+        self.assertEqual(recovered["endpoint"], "fpmmTrades(creator=...)")
+        self.assertEqual(recovered["wallet"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        self.assertEqual(recovered["limit"], 2)
+        self.assertEqual(recovered["activity"], activities)
 
         preview = adapter.copy_trade_from_activity(activities[0])
         self.assertTrue(preview.accepted)
@@ -345,6 +355,8 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
             adapter.copy_trade_from_activity(mismatched)
         with self.assertRaises(MarketConfigurationError):
             adapter.list_activity("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", limit=0)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("positions", wallet="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
     def test_omen_history_validation_fails_closed(self) -> None:
         adapter = self.make_omen()
@@ -487,6 +499,11 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
             "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             limit=1,
         )
+        recovered = adapter.account_recovery(
+            "activity",
+            wallet="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            limit=1,
+        )
         activity_preview = adapter.copy_trade_from_activity(activities[0])
         paper = adapter.place_paper_order(
             PaperOrderRequest(
@@ -510,6 +527,8 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         self.assertTrue(paper.accepted)
         self.assertEqual(len(activities), 1)
         self.assertEqual(activities[0]["market_id"], "gnosis_prediction_markets")
+        self.assertEqual(recovered["wallet"], "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        self.assertEqual(recovered["activity"], activities)
         self.assertTrue(activity_preview.accepted)
 
         with self.assertRaises(UnsupportedFeatureError):

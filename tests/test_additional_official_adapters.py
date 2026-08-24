@@ -1138,6 +1138,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(all(row["side"] in {"BUY", "SELL"} for row in activities))
         self.assertTrue(all(row["transactionHash"] for row in activities))
         self.assertEqual(activities[0]["source"], "metadao_dexscreener_spot_swaps")
+        recovered = adapter.account_recovery("activity", wallet=wallet, limit=2)
+        self.assertEqual(recovered["source"], "metadao_dexscreener_spot_swaps")
+        self.assertEqual(recovered["endpoint"], "/dexscreener/events")
+        self.assertEqual(recovered["wallet"], f"solana:{wallet}")
+        self.assertEqual(recovered["limit"], 2)
+        self.assertEqual(recovered["coverage"], "bounded_recent")
+        self.assertEqual(recovered["activity"], activities)
 
         copied = adapter.copy_trade_from_activity(activities[0])
         self.assertTrue(copied.accepted)
@@ -1146,6 +1153,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_activity("not-a-solana-wallet")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("activity", wallet="not-a-solana-wallet")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("positions", wallet=wallet)
         mismatched = dict(activities[0])
         mismatched["maker"] = "22222222222222222222222222222222"
         with self.assertRaises(MarketConfigurationError):

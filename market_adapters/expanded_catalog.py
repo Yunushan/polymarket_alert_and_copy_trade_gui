@@ -532,7 +532,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://omen.eth.limo",
         description=(
             "Official Gnosis/Omen FixedProductMarketMaker adapter for market discovery, outcome prices, "
-            "public FPMM trades, bounded creator-scoped simulation-first copy previews, bounded derived candles, "
+            "public FPMM trades, the bounded `activity` account operation for creator-scoped wallet rows, "
+            "bounded derived candles, simulation-first copy previews, "
             "alerts, local paper orders, and guarded externally signed FPMM transactions; CLOB depth, collateral "
             "approval, and settlement remain unsupported."
         ),
@@ -554,7 +555,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.metadao.fi/protocol/analytics",
         description=(
             "Official MetaDAO Futarchy DEX API adapter for public DAO ticker discovery, bid/ask/price reads, "
-            "bounded recent public spot-swap history, derived OHLCV candles, alerts, local paper orders, and "
+            "bounded recent public spot-swap history, the bounded `activity` account operation for maker-wallet "
+            "rows, derived OHLCV candles, alerts, local paper orders, and "
             "guarded externally signed Solana router transactions; omitted time bounds return only a bounded recent "
             "slice, explicit out-of-window bounds fail closed, and full-history completeness is not claimed. "
             "The official bid/ask summaries are exposed as a one-level top-of-book with unknown sizes; full depth, "
