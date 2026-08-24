@@ -4,6 +4,10 @@ This document records the current evidence for the multi-market support goal in
 [`GOAL.md`](../GOAL.md). It is an evidence index, not a claim that external
 account, jurisdiction, or platform-runner checks have occurred.
 
+Good Judgment Open's documented authenticated recovery surface is also
+covered: `/api/v1/me`, `/api/v1/prediction_sets`, and `/api/v1/scores` are
+exposed as bounded account operations and preserve forecast/score semantics.
+
 ## Completion Scope
 
 All repository-controlled requirements in the goal are complete. This includes

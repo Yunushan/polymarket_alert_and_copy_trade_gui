@@ -1404,6 +1404,7 @@ PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = (
 )
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
 METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
+GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS = ("me", "prediction_sets", "scores")
 MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
 XO_ACCOUNT_OPERATIONS = (
     "account",
@@ -1442,6 +1443,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
         + AZURO_ACCOUNT_OPERATIONS
         + METACULUS_ACCOUNT_OPERATIONS
+        + GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS
         + MYRIAD_ACCOUNT_OPERATIONS
         + XO_ACCOUNT_OPERATIONS
         + SX_BET_ACCOUNT_OPERATIONS
@@ -1731,6 +1733,21 @@ def run_market_account(args: argparse.Namespace) -> int:
             "with_cp": bool(getattr(args, "include_cp", False)),
             "include_cp_history": bool(getattr(args, "include_cp_history", False)),
             "include_descriptions": bool(getattr(args, "include_descriptions", False)),
+        }
+    elif market_id == "good_judgment_open":
+        kwargs = {
+            "page": _cli_clamp_int(getattr(args, "page", "0"), 0, 0, 100_000),
+            "membership_id": str(getattr(args, "account_membership_id", "") or "").strip() or None,
+            "question_id": str(getattr(args, "account_question_id", "") or "").strip() or None,
+            "filter": str(getattr(args, "account_filter", "") or "").strip() or None,
+            "created_before": str(getattr(args, "account_created_before", "") or "").strip() or None,
+            "created_after": str(getattr(args, "account_created_after", "") or "").strip() or None,
+            "updated_before": str(getattr(args, "account_updated_before", "") or "").strip() or None,
+            "updated_after": str(getattr(args, "account_updated_after", "") or "").strip() or None,
+            "score_type": str(getattr(args, "account_score_type", "") or "").strip() or None,
+            "scoreable_id": str(getattr(args, "account_scoreable_id", "") or "").strip() or None,
+            "predictor_type": str(getattr(args, "account_predictor_type", "") or "").strip() or None,
+            "include_daily_scores": bool(getattr(args, "include_daily_scores", False)),
         }
     elif market_id == "myriad_markets":
         kwargs = {
@@ -3122,6 +3139,16 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--event-type-id", default="", help="Betfair event type id filter.")
     market_account.add_argument("--account-event-id", default="", help="Betfair event id filter.")
     market_account.add_argument("--account-forecaster-id", default="", help="Metaculus forecaster id for forecast_posts.")
+    market_account.add_argument("--account-membership-id", default="", help="Good Judgment Open membership id filter.")
+    market_account.add_argument("--account-question-id", default="", help="Good Judgment Open question id filter.")
+    market_account.add_argument("--account-filter", default="", help="Good Judgment Open documented account filter.")
+    market_account.add_argument("--account-created-before", default="", help="Good Judgment Open ISO-8601 created-before filter.")
+    market_account.add_argument("--account-created-after", default="", help="Good Judgment Open ISO-8601 created-after filter.")
+    market_account.add_argument("--account-updated-before", default="", help="Good Judgment Open ISO-8601 updated-before filter.")
+    market_account.add_argument("--account-updated-after", default="", help="Good Judgment Open ISO-8601 updated-after filter.")
+    market_account.add_argument("--account-score-type", default="", help="Good Judgment Open score type: question/challenge/site.")
+    market_account.add_argument("--account-scoreable-id", default="", help="Good Judgment Open scoreable id.")
+    market_account.add_argument("--account-predictor-type", default="", help="Good Judgment Open predictor type: user/team.")
     market_account.add_argument("--account-sport-id", default="", help="Matchbook sport id filter.")
     market_account.add_argument("--account-side", default="", help="Matchbook offer side filter (back/lay/win/lose).")
     market_account.add_argument("--account-offer-status", default="", help="Matchbook offer status filter.")
@@ -3157,6 +3184,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--include-cp", action="store_true", help="Metaculus: include Community Prediction data.")
     market_account.add_argument("--include-cp-history", action="store_true", help="Metaculus: include full aggregation history.")
     market_account.add_argument("--include-descriptions", action="store_true", help="Metaculus: include question descriptions.")
+    market_account.add_argument("--include-daily-scores", action="store_true", help="Good Judgment Open: include daily score breakdowns.")
     market_account.add_argument("--dex", default="", help="Optional Hyperliquid perpetual DEX name.")
     market_account.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
     market_account.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")

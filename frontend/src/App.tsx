@@ -173,6 +173,17 @@ interface MarketReadForm {
   account_include_cp: boolean;
   account_include_cp_history: boolean;
   account_include_descriptions: boolean;
+  account_membership_id: string;
+  account_question_id: string;
+  account_filter: string;
+  account_created_before: string;
+  account_created_after: string;
+  account_updated_before: string;
+  account_updated_after: string;
+  account_score_type: string;
+  account_scoreable_id: string;
+  account_predictor_type: string;
+  account_include_daily_scores: boolean;
   account_cursor: string;
   account_limit: string;
   account_offset: string;
@@ -494,6 +505,17 @@ function emptyMarketReadForm(): MarketReadForm {
     account_include_cp: false,
     account_include_cp_history: false,
     account_include_descriptions: false,
+    account_membership_id: "",
+    account_question_id: "",
+    account_filter: "",
+    account_created_before: "",
+    account_created_after: "",
+    account_updated_before: "",
+    account_updated_after: "",
+    account_score_type: "",
+    account_scoreable_id: "",
+    account_predictor_type: "",
+    account_include_daily_scores: false,
     account_cursor: "",
     account_limit: "",
     account_offset: "",
@@ -1086,6 +1108,17 @@ export default function App() {
             with_cp: form.account_include_cp,
             include_cp_history: form.account_include_cp_history,
             include_descriptions: form.account_include_descriptions,
+            membership_id: form.account_membership_id.trim() || undefined,
+            question_id: form.account_question_id.trim() || undefined,
+            filter: form.account_filter.trim() || undefined,
+            created_before: form.account_created_before.trim() || undefined,
+            created_after: form.account_created_after.trim() || undefined,
+            updated_before: form.account_updated_before.trim() || undefined,
+            updated_after: form.account_updated_after.trim() || undefined,
+            score_type: form.account_score_type.trim() || undefined,
+            scoreable_id: form.account_scoreable_id.trim() || undefined,
+            predictor_type: form.account_predictor_type.trim() || undefined,
+            include_daily_scores: form.account_include_daily_scores,
             wallet: form.account_wallet.trim() || undefined,
             address: form.account_wallet.trim() || undefined,
             token_id: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
@@ -3066,6 +3099,108 @@ function MarketsView({
                     onChange={(event) => onMarketReadFormChange({ account_include_descriptions: event.target.checked })}
                   />
                   <span>Include question descriptions</span>
+                </label>
+              </>
+            ) : null}
+            {selectedMarket.market_id === "good_judgment_open" ? (
+              <>
+                <label>
+                  <span>GJ Open membership id</span>
+                  <input
+                    value={marketReadForm.account_membership_id}
+                    onChange={(event) => onMarketReadFormChange({ account_membership_id: event.target.value })}
+                    placeholder="Optional forecast owner"
+                  />
+                </label>
+                <label>
+                  <span>GJ Open question id</span>
+                  <input
+                    value={marketReadForm.account_question_id}
+                    onChange={(event) => onMarketReadFormChange({ account_question_id: event.target.value })}
+                    placeholder="Prediction-set filter"
+                  />
+                </label>
+                <label>
+                  <span>GJ Open account filter</span>
+                  <select
+                    value={marketReadForm.account_filter}
+                    onChange={(event) => onMarketReadFormChange({ account_filter: event.target.value })}
+                  >
+                    <option value="">None</option>
+                    <option value="comments_with_links">Comments with links</option>
+                    <option value="comments_following">Comments following</option>
+                  </select>
+                </label>
+                <label>
+                  <span>GJ Open score type</span>
+                  <select
+                    value={marketReadForm.account_score_type}
+                    onChange={(event) => onMarketReadFormChange({ account_score_type: event.target.value })}
+                  >
+                    <option value="">Any</option>
+                    <option value="question">Question</option>
+                    <option value="challenge">Challenge</option>
+                    <option value="site">Site</option>
+                  </select>
+                </label>
+                <label>
+                  <span>GJ Open scoreable id</span>
+                  <input
+                    value={marketReadForm.account_scoreable_id}
+                    onChange={(event) => onMarketReadFormChange({ account_scoreable_id: event.target.value })}
+                    placeholder="Requires score type"
+                  />
+                </label>
+                <label>
+                  <span>GJ Open predictor type</span>
+                  <select
+                    value={marketReadForm.account_predictor_type}
+                    onChange={(event) => onMarketReadFormChange({ account_predictor_type: event.target.value })}
+                  >
+                    <option value="">Any</option>
+                    <option value="user">User</option>
+                    <option value="team">Team</option>
+                  </select>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_daily_scores}
+                    onChange={(event) => onMarketReadFormChange({ account_include_daily_scores: event.target.checked })}
+                  />
+                  <span>Include daily score breakdown</span>
+                </label>
+                <label>
+                  <span>Created after (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_created_after}
+                    onChange={(event) => onMarketReadFormChange({ account_created_after: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>Created before (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_created_before}
+                    onChange={(event) => onMarketReadFormChange({ account_created_before: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>Updated after (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_updated_after}
+                    onChange={(event) => onMarketReadFormChange({ account_updated_after: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>Updated before (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_updated_before}
+                    onChange={(event) => onMarketReadFormChange({ account_updated_before: event.target.value })}
+                    placeholder="Optional"
+                  />
                 </label>
               </>
             ) : null}

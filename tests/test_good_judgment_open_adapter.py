@@ -30,6 +30,10 @@ class GoodJudgmentOpenAdapterTests(unittest.TestCase):
                 return questions
             if url.endswith("/api/v1/prediction_sets"):
                 return history
+            if url.endswith("/api/v1/me"):
+                return load_fixture("me")
+            if url.endswith("/api/v1/scores"):
+                return load_fixture("scores")
             raise AssertionError(f"unexpected Good Judgment Open URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -51,6 +55,94 @@ class GoodJudgmentOpenAdapterTests(unittest.TestCase):
         self.assertFalse(adapter.capabilities.copy_trading)
         self.assertEqual(health["authentication_mode"], "bearer_token")
         self.assertEqual(health["api_base_url"], "https://www.gjopen.com")
+        self.assertEqual(
+            health["account_recovery_operations"],
+            ["me", "prediction_sets", "scores"],
+        )
+        self.assertEqual(
+            health["authenticated_account_endpoints"],
+            ["/api/v1/me", "/api/v1/prediction_sets", "/api/v1/scores"],
+        )
+
+    def test_account_recovery_reads_documented_user_forecasts_and_scores(self) -> None:
+        adapter = self.make_adapter()
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params, headers))
+            self.assertEqual(headers["Authorization"], "Bearer fixture-token")
+            if url.endswith("/api/v1/me"):
+                return load_fixture("me")
+            if url.endswith("/api/v1/prediction_sets"):
+                return load_fixture("prediction_sets")
+            if url.endswith("/api/v1/scores"):
+                return load_fixture("scores")
+            raise AssertionError(f"unexpected Good Judgment Open URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        me = adapter.account_recovery("me")
+        predictions = adapter.account_recovery(
+            "prediction_sets",
+            membership_id="902",
+            question_id="1201",
+            page=2,
+            filter="comments_with_links",
+            created_after="2026-01-01T00:00:00Z",
+        )
+        scores = adapter.account_recovery(
+            "scores",
+            membership_id=902,
+            score_type="question",
+            scoreable_id="1201",
+            predictor_type="user",
+            include_daily_scores=True,
+            updated_before="2026-01-03T00:00:00+00:00",
+        )
+
+        self.assertEqual(me["id"], 901)
+        self.assertEqual(predictions["prediction_sets"][0]["id"], 301)
+        self.assertEqual(scores["scores"][0]["scoreable_id"], 1201)
+        self.assertEqual(calls[0][0], "https://www.gjopen.com/api/v1/me")
+        self.assertEqual(calls[0][1], None)
+        self.assertEqual(
+            calls[1][1],
+            {
+                "page": 2,
+                "membership_id": 902,
+                "question_id": 1201,
+                "filter": "comments_with_links",
+                "created_after": "2026-01-01T00:00:00Z",
+            },
+        )
+        self.assertEqual(
+            calls[2][1],
+            {
+                "page": 0,
+                "membership_id": 902,
+                "score_type": "question",
+                "scoreable_id": 1201,
+                "predictor_type": "user",
+                "include_daily_scores": True,
+                "updated_before": "2026-01-03T00:00:00+00:00",
+            },
+        )
+
+    def test_account_recovery_rejects_ambiguous_or_unbounded_filters(self) -> None:
+        adapter = self.make_adapter()
+        for operation, kwargs in (
+            ("prediction_sets", {"membership_id": "../outside"}),
+            ("prediction_sets", {"filter": "unknown"}),
+            ("prediction_sets", {"created_after": "not-a-date"}),
+            ("scores", {"scoreable_id": 1201}),
+            ("scores", {"score_type": "invalid"}),
+            ("scores", {"predictor_type": "admin"}),
+            ("scores", {"include_daily_scores": "sometimes"}),
+        ):
+            with self.subTest(operation=operation, kwargs=kwargs):
+                with self.assertRaises(MarketConfigurationError):
+                    adapter.account_recovery(operation, **kwargs)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("unsupported")
 
     def test_list_events_and_contracts_use_documented_questions_feed(self) -> None:
         adapter = self.make_adapter()

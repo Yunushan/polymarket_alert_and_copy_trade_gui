@@ -586,7 +586,7 @@ scan and produces simulation-first paper copy previews only; it requires a canon
 | Manifold Markets (`manifold`) | Implemented | Yes | Yes (probabilities/trades, bounded derived candles, account reads) | Yes | Guarded, off by default (bet placement/cancel) | Yes, simulation-first | Required | Optional API key | Not KYC limited |
 | Metaculus (`metaculus`) | Implemented | Yes | Yes (forecast snapshots and authenticated forecast-owned posts) | No | No | No | Required | Account/API token required | Not trading/KYC limited |
 | SciCast (`scicast`) | Implemented | Yes | Yes (archive snapshots/trades) | Yes (local dry-run) | No | No | Required | API key required | Not trading/KYC limited |
-| Good Judgment Open (`good_judgment_open`) | Implemented | Yes | Yes (forecast probabilities/history) | Yes (local preview) | Guarded, off by default | No | Required | Account/API token required | Region/account limited |
+| Good Judgment Open (`good_judgment_open`) | Implemented | Yes | Yes (forecast probabilities/history and authenticated user/prediction-set/score recovery) | Yes (local preview) | Guarded, off by default | No | Required | Account/API token required | Region/account limited |
 | Hypermind (`hypermind`) | Implemented | Yes | Yes (official trade export/history) | Yes (local dry-run) | No | No | Required | Not required | Not trading/KYC limited |
 | Iowa Electronic Markets (`iowa_electronic_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Not trading/KYC limited |
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |

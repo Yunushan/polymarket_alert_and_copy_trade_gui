@@ -729,6 +729,62 @@ class WebApiTests(unittest.TestCase):
             })],
         )
 
+    def test_good_judgment_open_account_payload_forwards_documented_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="good_judgment_open",
+            display_name="Good Judgment Open",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("me", "prediction_sets", "scores")  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"scores": [{"id": 1001}]}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["good_judgment_open"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "good_judgment_open",
+            "scores",
+            {
+                "page": ["2"],
+                "membership_id": ["902"],
+                "score_type": ["question"],
+                "scoreable_id": ["1201"],
+                "predictor_type": ["user"],
+                "include_daily_scores": ["true"],
+                "created_after": ["2026-01-01T00:00:00Z"],
+            },
+        )
+        self.assertEqual(payload["data"]["scores"][0]["id"], 1001)
+        self.assertEqual(
+            calls,
+            [("scores", {
+                "page": 2,
+                "membership_id": "902",
+                "question_id": None,
+                "filter": None,
+                "created_before": None,
+                "created_after": "2026-01-01T00:00:00Z",
+                "updated_before": None,
+                "updated_after": None,
+                "score_type": "question",
+                "scoreable_id": "1201",
+                "predictor_type": "user",
+                "include_daily_scores": True,
+            })],
+        )
+
     def test_market_position_intent_payload_forwards_allowlisted_fields(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

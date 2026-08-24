@@ -1678,6 +1678,68 @@ class MarketSentinelCliTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
 
+    def test_good_judgment_open_account_command_forwards_forecast_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="good_judgment_open")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("me", "prediction_sets", "scores"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "scores": [{"id": 1001}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "scores",
+                        "--market",
+                        "good_judgment_open",
+                        "--page",
+                        "2",
+                        "--account-membership-id",
+                        "902",
+                        "--account-score-type",
+                        "question",
+                        "--account-scoreable-id",
+                        "1201",
+                        "--account-predictor-type",
+                        "user",
+                        "--include-daily-scores",
+                        "--account-created-after",
+                        "2026-01-01T00:00:00Z",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "scores")
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "page": 2,
+                "membership_id": "902",
+                "question_id": None,
+                "filter": None,
+                "created_before": None,
+                "created_after": "2026-01-01T00:00:00Z",
+                "updated_before": None,
+                "updated_after": None,
+                "score_type": "question",
+                "scoreable_id": "1201",
+                "predictor_type": "user",
+                "include_daily_scores": True,
+            },
+        )
+
     def test_smarkets_account_and_order_management_commands_forward_allow_listed_fields(self) -> None:
         cfg = SimpleNamespace(selected_market_id="smarkets")
         adapter = SimpleNamespace(

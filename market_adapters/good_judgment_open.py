@@ -20,6 +20,7 @@ from .types import MarketCandle, MarketContract, MarketEvent, PaperOrderRequest,
 
 
 DEFAULT_GOOD_JUDGMENT_OPEN_BASE_URL = "https://www.gjopen.com"
+GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS = ("me", "prediction_sets", "scores")
 
 
 class GoodJudgmentOpenAdapter(MarketAdapter):
@@ -27,6 +28,7 @@ class GoodJudgmentOpenAdapter(MarketAdapter):
 
     metadata = get_market_metadata("good_judgment_open")
     live_order_sides = ("BUY",)
+    account_recovery_operations = GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, *, runtime=None) -> None:
         super().__init__(config, runtime=runtime)
@@ -66,6 +68,12 @@ class GoodJudgmentOpenAdapter(MarketAdapter):
                 ),
                 "forecast_history_supported": True,
                 "forecast_submission_supported": True,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "/api/v1/me",
+                    "/api/v1/prediction_sets",
+                    "/api/v1/scores",
+                ],
                 "orderbook_supported": False,
                 "trading_semantics": "forecast_submission_not_exchange_execution",
                 "data_access_note": (
@@ -76,6 +84,66 @@ class GoodJudgmentOpenAdapter(MarketAdapter):
             }
         )
         return health
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read the authenticated user's Cultivate Forecasts records.
+
+        These endpoints return forecasting records and scores, not exchange
+        orders or fills.  The adapter preserves the upstream response shape
+        and validates every optional filter before putting it in a query.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            supported = ", ".join(self.account_recovery_operations)
+            raise MarketConfigurationError(
+                f"Good Judgment Open account operation must be one of: {supported}."
+            )
+        if normalized == "me":
+            response = self._get("/api/v1/me")
+        elif normalized == "prediction_sets":
+            params = self._account_list_params(kwargs, include_membership=True, include_question=True)
+            if kwargs.get("filter") not in (None, ""):
+                filter_value = str(kwargs["filter"]).strip().lower()
+                if filter_value not in {"comments_with_links", "comments_following"}:
+                    raise MarketConfigurationError(
+                        "Good Judgment Open prediction_sets filter must be comments_with_links or comments_following."
+                    )
+                params["filter"] = filter_value
+            response = self._get("/api/v1/prediction_sets", params=params)
+        else:
+            params = self._account_list_params(kwargs, include_membership=True, include_question=False)
+            score_type = str(kwargs.get("score_type") or "").strip().lower()
+            if score_type:
+                if score_type not in {"question", "challenge", "site"}:
+                    raise MarketConfigurationError(
+                        "Good Judgment Open scores score_type must be question, challenge, or site."
+                    )
+                params["score_type"] = score_type
+            scoreable_id = kwargs.get("scoreable_id")
+            if scoreable_id not in (None, ""):
+                params["scoreable_id"] = self._account_positive_int(scoreable_id, "scoreable_id")
+                if not score_type:
+                    raise MarketConfigurationError(
+                        "Good Judgment Open scores scoreable_id requires score_type."
+                    )
+            predictor_type = str(kwargs.get("predictor_type") or "").strip().lower()
+            if predictor_type:
+                if predictor_type not in {"user", "team"}:
+                    raise MarketConfigurationError(
+                        "Good Judgment Open scores predictor_type must be user or team."
+                    )
+                params["predictor_type"] = predictor_type
+            if kwargs.get("include_daily_scores") is not None:
+                params["include_daily_scores"] = self._account_bool(
+                    kwargs["include_daily_scores"], "include_daily_scores"
+                )
+            response = self._get("/api/v1/scores", params=params)
+        if not isinstance(response, (Mapping, list)):
+            raise MarketConfigurationError(
+                f"Good Judgment Open {normalized} returned an invalid response."
+            )
+        return response
 
     @property
     def api_base_url(self) -> str:
@@ -278,6 +346,75 @@ class GoodJudgmentOpenAdapter(MarketAdapter):
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params, headers=self._auth_headers())
+
+    @classmethod
+    def _account_list_params(
+        cls,
+        kwargs: Mapping[str, Any],
+        *,
+        include_membership: bool,
+        include_question: bool,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "page": cls._account_non_negative_int(kwargs.get("page", 0), "page", maximum=100_000)
+        }
+        if include_membership and kwargs.get("membership_id") not in (None, ""):
+            params["membership_id"] = cls._account_positive_int(kwargs["membership_id"], "membership_id")
+        if include_question and kwargs.get("question_id") not in (None, ""):
+            params["question_id"] = cls._account_positive_int(kwargs["question_id"], "question_id")
+        for key in ("created_before", "created_after", "updated_before", "updated_after"):
+            value = kwargs.get(key)
+            if value not in (None, ""):
+                params[key] = cls._account_iso8601(value, key)
+        return params
+
+    @staticmethod
+    def _account_positive_int(value: Any, label: str) -> int:
+        return GoodJudgmentOpenAdapter._account_non_negative_int(value, label, minimum=1)
+
+    @staticmethod
+    def _account_non_negative_int(
+        value: Any,
+        label: str,
+        *,
+        minimum: int = 0,
+        maximum: int = 2_147_483_647,
+    ) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Good Judgment Open account {label} must be an integer.")
+        text = str(value).strip()
+        if not text or not text.isdigit():
+            raise MarketConfigurationError(f"Good Judgment Open account {label} must be an integer.")
+        parsed = int(text)
+        if parsed < minimum or parsed > maximum:
+            raise MarketConfigurationError(
+                f"Good Judgment Open account {label} must be between {minimum} and {maximum}."
+            )
+        return parsed
+
+    @staticmethod
+    def _account_iso8601(value: Any, label: str) -> str:
+        text = str(value).strip()
+        if len(text) > 80 or not text:
+            raise MarketConfigurationError(f"Good Judgment Open account {label} must be an ISO-8601 timestamp.")
+        try:
+            datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise MarketConfigurationError(
+                f"Good Judgment Open account {label} must be an ISO-8601 timestamp."
+            ) from exc
+        return text
+
+    @staticmethod
+    def _account_bool(value: Any, label: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise MarketConfigurationError(f"Good Judgment Open account {label} must be a boolean.")
 
     def _url(self, path: str) -> str:
         clean_path = "/" + str(path or "").lstrip("/")

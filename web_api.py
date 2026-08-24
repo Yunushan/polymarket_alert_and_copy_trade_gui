@@ -3813,6 +3813,21 @@ def market_account_payload(
             "include_cp_history": _query_bool(query_params, "include_cp_history", False),
             "include_descriptions": _query_bool(query_params, "include_descriptions", False),
         }
+    elif normalized_market_id == "good_judgment_open":
+        kwargs = {
+            "page": _clamp_int(_query_value(query_params, "page", "0"), 0, 0, 100_000),
+            "membership_id": _query_value(query_params, "membership_id") or None,
+            "question_id": _query_value(query_params, "question_id") or None,
+            "filter": _query_value(query_params, "filter") or None,
+            "created_before": _query_value(query_params, "created_before") or None,
+            "created_after": _query_value(query_params, "created_after") or None,
+            "updated_before": _query_value(query_params, "updated_before") or None,
+            "updated_after": _query_value(query_params, "updated_after") or None,
+            "score_type": _query_value(query_params, "score_type") or None,
+            "scoreable_id": _query_value(query_params, "scoreable_id") or None,
+            "predictor_type": _query_value(query_params, "predictor_type") or None,
+            "include_daily_scores": _query_bool(query_params, "include_daily_scores", False),
+        }
     elif normalized_market_id == "myriad_markets":
         kwargs = {
             "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
