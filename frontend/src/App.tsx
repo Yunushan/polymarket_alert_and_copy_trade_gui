@@ -780,7 +780,8 @@ export default function App() {
     contract_id: "",
     side: "BUY",
     size: "",
-    limit_price: ""
+    limit_price: "",
+    metadata_json: ""
   });
   const [paperMessage, setPaperMessage] = useState("");
   const [marketQuery, setMarketQuery] = useState("");
@@ -2273,7 +2274,8 @@ export default function App() {
           contract_id: result.contract_id,
           side: result.side,
           size: String(result.size),
-          limit_price: ""
+          limit_price: "",
+          metadata_json: ""
         });
         setPaperMessage(result.message);
       } else if (action === "use-history" && target?.id) {
@@ -2283,7 +2285,8 @@ export default function App() {
           contract_id: result.contract_id,
           side: result.side,
           size: String(result.size),
-          limit_price: result.limit_price === null ? "" : String(result.limit_price)
+          limit_price: result.limit_price === null ? "" : String(result.limit_price),
+          metadata_json: ""
         });
         setPaperMessage(result.message);
       }
@@ -5725,6 +5728,15 @@ function LiveSafetyView({
             <span>Limit</span>
             <input value={form.limit_price} onChange={(event) => updateField("limit_price", event.target.value)} />
           </label>
+          <label className="full-width">
+            <span>Metadata JSON (optional)</span>
+            <textarea
+              value={form.metadata_json}
+              onChange={(event) => updateField("metadata_json", event.target.value)}
+              placeholder='{"probability_yes_per_category":{"Alpha":0.4,"Beta":0.6}}'
+              rows={3}
+            />
+          </label>
         </div>
         <div className="button-row">
           <button className="icon-button" onClick={onPreview}>
@@ -7401,6 +7413,15 @@ function PaperView({
           <label>
             <span>Limit</span>
             <input value={form.limit_price} onChange={(event) => updateField("limit_price", event.target.value)} />
+          </label>
+          <label className="full-width">
+            <span>Metadata JSON (optional)</span>
+            <textarea
+              value={form.metadata_json}
+              onChange={(event) => updateField("metadata_json", event.target.value)}
+              placeholder='{"probability_yes_per_category":{"Alpha":0.4,"Beta":0.6}}'
+              rows={3}
+            />
           </label>
         </div>
         <div className="button-row">

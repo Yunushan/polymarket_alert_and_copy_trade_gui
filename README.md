@@ -255,7 +255,8 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Lists authenticated Metaculus posts/questions through the official API
 - Reads accessible binary, multiple-choice, and numeric forecast values for alerts
 - Reads accessible Community Prediction aggregation history through `list_candles`; official irregular snapshots are normalized as point candles (no fabricated OHLCV or resampling)
-- Does not expose trading controls because Metaculus is a forecasting platform, not a cash market
+- Supports local forecast previews and guarded authenticated forecast submission through the official `/api/questions/forecast/` contract; binary forecasts use `probability_yes`, multiple-choice forecasts use a complete category distribution, and numeric/date forecasts use a 201-point `continuous_cdf`
+- Forecast submission is explicitly labeled as a forecast update, not exchange execution; live submission remains disabled by default behind the shared safety gates
 
 ### 10) Good Judgment Open adapter support
 - Lists Good Judgment Open questions and answer contracts through the documented Cultivate Forecasts REST API

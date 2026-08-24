@@ -120,8 +120,8 @@ Current catalog snapshot:
 - Orderbook reading supported: 26 yes, 31 unsupported, 11 blocked
 - Trade history supported: 32 yes, 25 unsupported, 11 blocked
 - Candle history supported: 36 yes, 21 unsupported, 11 blocked
-- Paper trading supported: 54 yes, 3 unsupported, 11 blocked
-- Live trading supported: 36 guarded/off by default, 21 unsupported, 11 blocked
+- Paper trading supported: 55 yes, 2 unsupported, 11 blocked
+- Live trading supported: 37 guarded/off by default, 20 unsupported, 11 blocked
 - Copy trading supported: 22 guarded/off by default, 35 unsupported, 11 blocked (Polymarket, Opinion Labs, Manifold, Myriad, Hyperliquid HIP-4 wallet fills, Predict.fun authenticated account activity, Probable public wallet activity, Azuro single-selection bettor activity, XO authenticated account trades, Matchbook authenticated matched bets, Limitless authenticated portfolio history, Kalshi authenticated portfolio fills, Betfair authenticated matched orders, IBKR ForecastTrader/ForecastEx/CME authenticated account executions, Gemini authenticated filled orders, SX Bet authenticated fills, Context V2 filled `orders.list` wallet activity, MetaDAO bounded public `maker` wallet activity, and Omen/Gnosis bounded public `creator` FPMM trades; all simulation-first and guarded)
 
 These totals are generated from the canonical support matrix (`market_adapters.support_matrix`)

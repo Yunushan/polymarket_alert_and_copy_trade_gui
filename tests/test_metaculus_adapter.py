@@ -39,7 +39,7 @@ class MetaculusAdapterTests(unittest.TestCase):
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
         return adapter
 
-    def test_metadata_advertises_read_only_forecasting_capabilities(self) -> None:
+    def test_metadata_advertises_forecast_submission_capabilities(self) -> None:
         adapter = MetaculusAdapter()
         health = adapter.health_check()
 
@@ -48,9 +48,12 @@ class MetaculusAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.event_listing)
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.alerts)
-        self.assertFalse(adapter.capabilities.paper_trading)
-        self.assertFalse(adapter.capabilities.live_trading)
+        self.assertTrue(adapter.capabilities.paper_trading)
+        self.assertTrue(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.orderbook_reading)
+        self.assertTrue(health["trading_supported"])
+        self.assertTrue(health["forecast_submission_supported"])
+        self.assertEqual(health["trading_semantics"], "forecast_submission_not_exchange_execution")
         self.assertIn("metaculus.com/api", health["api_base_url"])
 
     def test_missing_api_token_is_clear(self) -> None:
@@ -159,34 +162,112 @@ class MetaculusAdapterTests(unittest.TestCase):
 
         self.assertIn("Community Prediction", str(ctx.exception))
 
-    def test_orderbook_and_trading_are_unsupported(self) -> None:
+    def test_orderbook_remains_unsupported(self) -> None:
         adapter = self.make_adapter()
 
         with self.assertRaises(UnsupportedFeatureError) as orderbook_ctx:
             adapter.get_orderbook("1001:501:YES")
         self.assertEqual(orderbook_ctx.exception.feature, "orderbook_reading")
 
-        with self.assertRaises(UnsupportedFeatureError) as paper_ctx:
-            adapter.place_paper_order(
-                PaperOrderRequest(
-                    market_id="metaculus",
-                    contract_id="1001:501:YES",
-                    side="BUY",
-                    size=1,
-                )
-            )
-        self.assertEqual(paper_ctx.exception.feature, "paper_trading")
+    def test_paper_forecast_preview_builds_official_payloads_for_all_question_types(self) -> None:
+        adapter = self.make_adapter()
 
-        with self.assertRaises(UnsupportedFeatureError) as live_ctx:
-            adapter.place_live_order(
-                PaperOrderRequest(
-                    market_id="metaculus",
-                    contract_id="1001:501:YES",
-                    side="BUY",
-                    size=1,
-                )
+        binary = adapter.place_paper_order(
+            PaperOrderRequest("metaculus", "1001:501:YES", "BUY", 1, 0.7)
+        )
+        self.assertTrue(binary.accepted)
+        self.assertEqual(binary.raw["endpoint"], "/questions/forecast/")
+        self.assertEqual(binary.raw["request"][0]["question"], 501)
+        self.assertEqual(binary.raw["request"][0]["source"], "api")
+        self.assertEqual(binary.raw["request"][0]["probability_yes"], 0.7)
+        self.assertEqual(binary.raw["semantics"], "forecast_submission")
+
+        no = adapter.place_paper_order(
+            PaperOrderRequest("metaculus", "1001:501:NO", "BUY", 1, 0.25)
+        )
+        self.assertEqual(no.raw["request"][0]["probability_yes"], 0.75)
+
+        multiple = adapter.place_paper_order(
+            PaperOrderRequest(
+                "metaculus",
+                "1002:601:CHOICE:beta",
+                "BUY",
+                1,
+                metadata={"probability_yes_per_category": {"Alpha": 0.4, "Beta": 0.6}},
             )
-        self.assertEqual(live_ctx.exception.feature, "live_trading")
+        )
+        self.assertEqual(
+            multiple.raw["request"][0]["probability_yes_per_category"],
+            {"Alpha": 0.4, "Beta": 0.6},
+        )
+
+        cdf = [index / 200 for index in range(201)]
+        numeric = adapter.place_paper_order(
+            PaperOrderRequest(
+                "metaculus",
+                "1003:701:VALUE",
+                "BUY",
+                1,
+                metadata={"continuous_cdf": cdf},
+            )
+        )
+        self.assertEqual(numeric.raw["request"][0]["continuous_cdf"], cdf)
+
+    def test_forecast_submission_validation_is_fail_closed(self) -> None:
+        adapter = self.make_adapter()
+
+        invalid_orders = [
+            PaperOrderRequest("metaculus", "1001:501:YES", "SELL", 1, 0.5),
+            PaperOrderRequest("metaculus", "1001:501:YES", "BUY", 1),
+            PaperOrderRequest(
+                "metaculus",
+                "1002:601:CHOICE:beta",
+                "BUY",
+                1,
+                metadata={"probability_yes_per_category": {"Alpha": 0.2, "Beta": 0.2}},
+            ),
+            PaperOrderRequest(
+                "metaculus",
+                "1003:701:VALUE",
+                "BUY",
+                1,
+                metadata={"continuous_cdf": [0.5] * 200 + [0.4]},
+            ),
+        ]
+        for order in invalid_orders:
+            with self.subTest(order=order):
+                with self.assertRaises(MarketConfigurationError):
+                    adapter.place_paper_order(order)
+
+    def test_live_forecast_submission_uses_shared_safety_gates_and_official_route(self) -> None:
+        adapter = MetaculusAdapter(
+            {"live_trading_enabled": True, "live_trading_confirmed": True, "live_trading_max_size": 2}
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append((method, url, json_body, headers))
+            return {"status": "accepted", "id": "forecast-1"}
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"METACULUS_API_TOKEN": "unit-test-token"}):
+            response = adapter.place_live_order(
+                PaperOrderRequest("metaculus", "1001:501:YES", "BUY", 1, 0.7)
+            )
+
+        self.assertTrue(response["live"])
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/api/questions/forecast/"))
+        self.assertEqual(calls[0][2][0]["question"], 501)
+        self.assertEqual(calls[0][2][0]["probability_yes"], 0.7)
+        self.assertEqual(calls[0][3]["Authorization"], "Token unit-test-token")
+
+        with patch.dict("os.environ", {"METACULUS_API_TOKEN": "unit-test-token"}):
+            zero_response = adapter.place_live_order(
+                PaperOrderRequest("metaculus", "1001:501:YES", "BUY", 1, 0.0)
+            )
+        self.assertTrue(zero_response["live"])
+        self.assertEqual(calls[1][2][0]["probability_yes"], 0.0)
 
 
 if __name__ == "__main__":

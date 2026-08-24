@@ -1367,6 +1367,8 @@ export interface PaperOrderForm {
   side: string;
   size: string;
   limit_price: string;
+  /** Optional JSON object forwarded as adapter-specific forecast/order metadata. */
+  metadata_json: string;
 }
 
 export interface PaperQuotePayload {

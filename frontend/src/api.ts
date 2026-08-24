@@ -152,6 +152,24 @@ export function fetchMarkets(): Promise<MarketsPayload> {
   return request<MarketsPayload>("/api/markets");
 }
 
+function serializePaperOrderForm(form: PaperOrderForm): Record<string, unknown> {
+  const { metadata_json, ...payload } = form;
+  const trimmed = metadata_json.trim();
+  if (!trimmed) {
+    return payload;
+  }
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(trimmed);
+  } catch (error) {
+    throw new Error(`Order metadata must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error("Order metadata must be a JSON object.");
+  }
+  return { ...payload, metadata };
+}
+
 export function fetchMarketSupport(marketId = ""): Promise<MarketSupportPayload> {
   const path = marketId.trim()
     ? `/api/markets/${encodeURIComponent(marketId.trim())}/support`
@@ -578,7 +596,7 @@ export function previewCopyTrade(form: CopyPreviewForm): Promise<CopyPreviewPayl
 export function previewLivePreflight(form: PaperOrderForm): Promise<LivePreflightPayload> {
   return request<LivePreflightPayload>("/api/live-safety/preflight", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
@@ -592,28 +610,28 @@ export function clearPaperHistory(): Promise<PaperPayload> {
 export function refreshPaperQuote(form: PaperOrderForm): Promise<PaperQuotePayload> {
   return request<PaperQuotePayload>("/api/paper/quote", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
 export function fillPaperQuoteLimit(form: PaperOrderForm): Promise<{ limit_price: number; message: string }> {
   return request<{ limit_price: number; message: string }>("/api/paper/quote-limit", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
 export function previewPaperImpact(form: PaperOrderForm): Promise<PaperImpactPayload> {
   return request<PaperImpactPayload>("/api/paper/preview-impact", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
 export function submitPaperOrder(form: PaperOrderForm): Promise<PaperOrderResponse> {
   return request<PaperOrderResponse>("/api/paper/orders", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 

@@ -5403,7 +5403,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", static_cache_control(relative_path))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_response_body(data)
 
     def _resolve_static_path(self, static_files: Mapping[str, Path], raw_path: str) -> Optional[Path]:
         path = unquote(raw_path.split("?", 1)[0])
@@ -5506,8 +5506,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
-        self.wfile.flush()
+        self._write_response_body(data)
         self.close_connection = True
 
     def _send_text(self, status: int, text: str, *, content_type: str, filename: Optional[str] = None) -> None:
@@ -5522,9 +5521,28 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
-        self.wfile.flush()
+        self._write_response_body(data)
         self.close_connection = True
+
+    def _write_response_body(self, data: bytes) -> None:
+        """Write large responses in bounded chunks and verify every byte is sent.
+
+        Some Windows loopback/socket combinations can return from a single
+        large buffered write after only 128 KiB while the handler proceeds to
+        close the connection.  Chunking keeps the HTTP ``Content-Length``
+        contract intact for the support matrix, bundled assets, and exports.
+        """
+
+        view = memoryview(data)
+        while view:
+            chunk = view[:32768]
+            written = self.wfile.write(chunk)
+            if written is None:
+                written = len(chunk)
+            if written <= 0:
+                raise ConnectionError("HTTP response writer made no progress.")
+            view = view[written:]
+        self.wfile.flush()
 
     def _send_error(
         self,

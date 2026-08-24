@@ -67,8 +67,11 @@ METACULUS_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     candle_history=True,
     alerts=True,
-    paper_trading=False,
-    live_trading=False,
+    # Metaculus forecasts are not exchange orders, but the shared dry-run and
+    # guarded submission surfaces provide the same explicit safety boundary
+    # used by Good Judgment Open.
+    paper_trading=True,
+    live_trading=True,
     copy_trading=False,
     api_required=True,
     credentials_required=True,
@@ -767,7 +770,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="metaculus",
         display_name="Metaculus",
         homepage_url="https://www.metaculus.com",
-        description="Official Metaculus API adapter for authenticated read-only forecasting questions and probabilities.",
+        description=(
+            "Official Metaculus API adapter for authenticated question/probability reads, local forecast previews, "
+            "and guarded forecast submission; submission is a forecast update, not exchange execution."
+        ),
         capabilities=METACULUS_CAPABILITIES,
     ),
     MarketMetadata(

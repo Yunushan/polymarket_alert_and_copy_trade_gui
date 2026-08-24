@@ -41,18 +41,22 @@ check does not receive local test or security points.
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
 The latest local audit on 2026-08-24 is **83/100 (not ready)**. Local
-verification passed all 848 tests (7 intentionally skipped), Ruff, the adapter
+verification passed all 851 tests (7 intentionally skipped), Ruff, the adapter
 catalog (68 markets, 57 implemented and 11 explicitly blocked), 335 offline
 fixtures, documentation, workflow, secret-hygiene, and packaging checks; branch
-coverage was 76% overall. The BetMGM partner Sports API is covered by a
-fixture-backed read-only/paper adapter; live and copy trading remain explicitly
-unsupported because no official order/account surface is available. The no-credential
-public-only Polymarket probe was attempted twice and failed because the
-external Gamma, Data, CLOB, and Bridge endpoints reset the connection from
-this environment; credentialed and funded checks remain blocked. No live
-evidence is invented to compensate for that gap. The score therefore reflects
-repeatable repository proof plus explicitly supplied evidence, not a
-production certification.
+coverage was 76% overall. Metaculus now supports fixture-backed local forecast
+previews and guarded official forecast submission for binary, multiple-choice,
+and numeric/date question shapes; the web form forwards validated metadata JSON.
+Large HTTP responses are written in bounded chunks so the support matrix and
+exports cannot truncate on Windows loopback sockets. The BetMGM partner Sports
+API remains a fixture-backed read-only/paper adapter; live and copy trading
+remain explicitly unsupported because no official order/account surface is
+available. The no-credential public-only Polymarket probe was attempted twice
+and failed because the external Gamma, Data, CLOB, and Bridge endpoints reset
+the connection from this environment; credentialed and funded checks remain
+blocked. No live evidence is invented to compensate for that gap. The score
+therefore reflects repeatable repository proof plus explicitly supplied
+evidence, not a production certification.
 
 The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local

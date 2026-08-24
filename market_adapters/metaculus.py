@@ -1,22 +1,31 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import math
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
-from .types import MarketCandle, MarketContract, MarketEvent, PriceSnapshot
+from .types import MarketCandle, MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
 
 
 DEFAULT_METACULUS_BASE_URL = "https://www.metaculus.com/api"
 
 
 class MetaculusAdapter(MarketAdapter):
-    """Metaculus read-only adapter using the official authenticated API."""
+    """Metaculus adapter using the official authenticated API.
+
+    Metaculus is a forecasting platform rather than an exchange.  The shared
+    order methods are retained as an explicit compatibility envelope: paper
+    orders only build a forecast payload locally, while live orders submit the
+    documented forecast request behind the normal acknowledgement and kill
+    switch gates.  No exchange fill semantics are implied.
+    """
 
     metadata = get_market_metadata("metaculus")
+    live_order_sides = ("BUY",)
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -34,7 +43,9 @@ class MetaculusAdapter(MarketAdapter):
                 "data_access_note": (
                     "Metaculus API data access requires authentication; Community Prediction data is access-limited."
                 ),
-                "trading_supported": False,
+                "trading_supported": True,
+                "forecast_submission_supported": True,
+                "trading_semantics": "forecast_submission_not_exchange_execution",
             }
         )
         return health
@@ -190,6 +201,162 @@ class MetaculusAdapter(MarketAdapter):
             "orderbook_reading",
             "Metaculus is a forecasting platform and does not expose a trading orderbook.",
         )
+
+    def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
+        """Validate and preview the official forecast payload without I/O."""
+
+        self.ensure_capability("paper_trading")
+        payload, endpoint, canonical, selected_probability = self._submission_payload(order)
+        return PaperOrderResult(
+            market_id=self.market_id,
+            contract_id=canonical,
+            accepted=True,
+            message=(
+                f"DRY RUN: would submit Metaculus forecast for {canonical}; "
+                "no upstream request was sent."
+            ),
+            filled_size=0.0,
+            average_price=selected_probability,
+            raw={
+                "endpoint": endpoint,
+                "request": [payload],
+                "semantics": "forecast_submission",
+            },
+        )
+
+    def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
+        """Submit one forecast through Metaculus' documented forecast route."""
+
+        self.ensure_capability("live_trading")
+        # A zero binary probability is valid in Metaculus' [0, 1] forecast
+        # domain, while the shared exchange-oriented preflight treats a
+        # supplied limit of zero as invalid.  Omit it only from the safety
+        # preview; the payload validator below still enforces the real range.
+        safety_order = order
+        if order.limit_price is not None:
+            try:
+                is_zero_probability = float(order.limit_price) == 0.0
+            except (TypeError, ValueError):
+                is_zero_probability = False
+            if is_zero_probability:
+                safety_order = replace(order, limit_price=None)
+        preflight = self.preflight_live_order(safety_order, feature_name="forecast submission")
+        payload, endpoint, canonical, _selected_probability = self._submission_payload(order)
+        response = self.runtime.request_json(
+            "POST",
+            self._url(endpoint),
+            json_body=[payload],
+            headers=self._auth_headers(),
+        )
+        return {
+            "market_id": self.market_id,
+            "contract_id": canonical,
+            "live": True,
+            "endpoint": endpoint,
+            "preflight": preflight,
+            "request": [payload],
+            "response": response,
+            "semantics": "forecast_submission",
+        }
+
+    def _submission_payload(
+        self,
+        order: PaperOrderRequest,
+    ) -> Tuple[Dict[str, Any], str, str, Optional[float]]:
+        """Build a validated ``POST /api/questions/forecast/`` payload.
+
+        The official API accepts a list of forecast objects.  Binary forecasts
+        use ``probability_yes``; multiple-choice forecasts use a complete
+        ``probability_yes_per_category`` distribution; numeric/date forecasts
+        use the documented 201-point ``continuous_cdf``.  Metadata is used for
+        the latter two shapes because a scalar order price cannot represent
+        their full distributions.
+        """
+
+        self.ensure_order_market(order)
+        if str(order.side or "").strip().upper() != "BUY":
+            raise MarketConfigurationError("Metaculus forecast submission only accepts side BUY.")
+        try:
+            size = float(order.size)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Metaculus forecast size must be numeric.") from exc
+        if not math.isfinite(size) or size <= 0:
+            raise MarketConfigurationError("Metaculus forecast size must be positive.")
+
+        post_id, question_id, outcome, choice_id = self._split_contract_id(order.contract_id)
+        canonical = self._contract_id(post_id, question_id, outcome, choice_id)
+        metadata = dict(order.metadata or {})
+        question_ref = int(question_id) if question_id.isdigit() else question_id
+        payload: Dict[str, Any] = {
+            "question": question_ref,
+            "source": "api",
+            "probability_yes": None,
+            "probability_yes_per_category": None,
+            "continuous_cdf": None,
+        }
+        selected_probability: Optional[float] = None
+
+        if outcome in {"YES", "NO"}:
+            raw_probability = metadata.get("forecast_probability", order.limit_price)
+            probability = self._forecast_probability(raw_probability)
+            payload["probability_yes"] = probability if outcome == "YES" else 1.0 - probability
+            selected_probability = probability
+        elif outcome == "CHOICE":
+            distribution = metadata.get("probability_yes_per_category")
+            if distribution is None:
+                distribution = metadata.get("forecast_distribution")
+            if not isinstance(distribution, Mapping) or not distribution:
+                raise MarketConfigurationError(
+                    "Metaculus multiple-choice forecasts require metadata.probability_yes_per_category "
+                    "as a complete label-to-probability mapping."
+                )
+            normalized: Dict[str, float] = {}
+            for label, raw_value in distribution.items():
+                key = str(label).strip()
+                if not key:
+                    raise MarketConfigurationError("Metaculus forecast distribution labels cannot be empty.")
+                normalized[key] = self._forecast_probability(raw_value, label=f"probability for {key}")
+            total = sum(normalized.values())
+            if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-6):
+                raise MarketConfigurationError(
+                    f"Metaculus multiple-choice forecast probabilities must sum to 1.0 (got {total:.8f})."
+                )
+            payload["probability_yes_per_category"] = normalized
+            selected_probability = normalized.get(choice_id or "")
+        else:
+            raw_cdf = metadata.get("continuous_cdf")
+            if raw_cdf is None:
+                raw_cdf = metadata.get("forecast_cdf")
+            if not isinstance(raw_cdf, (list, tuple)) or len(raw_cdf) != 201:
+                raise MarketConfigurationError(
+                    "Metaculus numeric/date forecasts require metadata.continuous_cdf with exactly 201 values."
+                )
+            cdf: List[float] = []
+            previous = -math.inf
+            for index, raw_value in enumerate(raw_cdf):
+                value = self._forecast_probability(raw_value, label=f"continuous_cdf[{index}]")
+                if value < previous:
+                    raise MarketConfigurationError("Metaculus continuous_cdf must be monotonically non-decreasing.")
+                cdf.append(value)
+                previous = value
+            payload["continuous_cdf"] = cdf
+
+        end_time = metadata.get("end_time") or metadata.get("forecast_end_time")
+        if end_time not in (None, ""):
+            if not isinstance(end_time, str) or not end_time.strip():
+                raise MarketConfigurationError("Metaculus forecast end_time must be a non-empty ISO-8601 string.")
+            payload["end_time"] = end_time.strip()
+        return payload, "/questions/forecast/", canonical, selected_probability
+
+    @staticmethod
+    def _forecast_probability(value: Any, *, label: str = "forecast probability") -> float:
+        try:
+            probability = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Metaculus {label} must be numeric in [0, 1].") from exc
+        if not math.isfinite(probability) or probability < 0.0 or probability > 1.0:
+            raise MarketConfigurationError(f"Metaculus {label} must be numeric in [0, 1].")
+        return probability
 
     def _get_post(self, ref: str) -> Optional[Mapping[str, Any]]:
         if not ref:
