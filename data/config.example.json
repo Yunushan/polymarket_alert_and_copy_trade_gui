@@ -751,7 +751,7 @@
         "xmarket_order_management_enabled": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.6,
-        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key order submission, authenticated positions/order reads, and fixed batch create/cancel mutations are implemented through the official Xmarket API. Live trading and order management stay disabled by default; the latter additionally requires xmarket_order_management_enabled and the shared safety gates."
+        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key order submission, authenticated positions/order reads, bounded account-scoped filled-order history with derived candles, and fixed batch create/cancel mutations are implemented through the official Xmarket API. Public trade history and copy trading remain unsupported. Live trading and order management stay disabled by default; the latter additionally requires xmarket_order_management_enabled and the shared safety gates."
       }
     },
     "trueo": {

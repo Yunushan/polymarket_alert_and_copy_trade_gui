@@ -2722,7 +2722,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 self.assertIn(params, ({"status": "open", "page": 1, "pageSize": 50}, {"status": "closed", "page": 2, "pageSize": 25}))
                 return positions
             if url.endswith("/openapi/v1/order/my-orders"):
-                self.assertEqual(params, {"status": "all", "page": 1, "pageSize": 50})
+                self.assertEqual(params["status"], "all")
+                self.assertEqual(params["page"], 1)
+                self.assertGreaterEqual(params["pageSize"], 1)
+                self.assertLessEqual(params["pageSize"], 100)
                 return user_orders
             if url.endswith("/openapi/v1/order/market/market-1"):
                 self.assertEqual(params, {"status": "open", "page": 2, "pageSize": 25})
@@ -2747,6 +2750,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 page=2,
                 limit=25,
             )
+            trade_history = adapter.list_trades("market-1:outcome-yes", limit=10)
+            candle_history = adapter.list_candles("market-1:outcome-yes", resolution="1h")
             with self.assertRaises(MarketConfigurationError):
                 adapter.place_live_order(order)
 
@@ -2759,6 +2764,25 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(position_rows["items"][0]["id"], "position-1")
         self.assertEqual(order_rows["items"][0]["id"], "xorder-1")
         self.assertEqual(market_order_rows["items"][0]["marketId"], "market-1")
+        self.assertEqual([trade.trade_id for trade in trade_history], ["xorder-filled-1"])
+        self.assertEqual(trade_history[0].side, "BUY")
+        self.assertAlmostEqual(trade_history[0].price, 0.45)
+        self.assertAlmostEqual(trade_history[0].size, 4.0)
+        self.assertTrue(trade_history[0].raw["account_scoped"])
+        self.assertEqual(len(candle_history), 1)
+        self.assertAlmostEqual(candle_history[0].open, 0.45)
+        self.assertAlmostEqual(candle_history[0].close, 0.45)
+        self.assertAlmostEqual(candle_history[0].volume or 0.0, 4.0)
+        self.assertTrue(candle_history[0].raw["derived"])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("market-1:outcome-yes", limit=101)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("market-1:outcome-yes", before=10, after=20)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("market-1:outcome-yes", resolution="2h")
+        self.assertTrue(adapter.health_check()["trade_history_account_scoped"])
+        self.assertTrue(adapter.health_check()["candle_history_derived"])
 
         with self.assertRaises(MarketConfigurationError):
             adapter.account_recovery("market_orders", market_id="../private")

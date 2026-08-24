@@ -17,6 +17,8 @@ XMARKET_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -480,7 +482,11 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="xmarket",
         display_name="Xmarket",
         homepage_url="https://docs.xmarket.app/developers/quick-start",
-        description="Official Xmarket API adapter for market discovery, outcome prices, orderbooks, paper orders, and guarded API-key order submission.",
+        description=(
+            "Official Xmarket API adapter for market discovery, outcome prices, orderbooks, paper orders, "
+            "guarded API-key order submission, and bounded account-scoped filled-order history with "
+            "derived candles; public trade history and copy trading remain unsupported."
+        ),
         capabilities=XMARKET_CAPABILITIES,
     ),
     MarketMetadata(

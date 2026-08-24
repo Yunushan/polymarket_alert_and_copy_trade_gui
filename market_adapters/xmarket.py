@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -9,9 +10,11 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .types import (
     MarketContract,
+    MarketCandle,
     MarketEvent,
     OrderBookLevel,
     OrderBookSnapshot,
+    MarketTrade,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -34,6 +37,7 @@ XMARKET_POSITION_STATUSES = ("open", "closed", "settled")
 XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
 XMARKET_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 XMARKET_ORDER_MANAGEMENT_MAX_BATCH = 100
+XMARKET_HISTORY_MAX_LIMIT = 100
 
 
 class XMarketAdapter(MarketAdapter):
@@ -56,6 +60,11 @@ class XMarketAdapter(MarketAdapter):
                     "GET /order/my-orders",
                     "GET /order/market/:marketId",
                 ],
+                "trade_history_source": "authenticated_my_orders_filled",
+                "trade_history_account_scoped": True,
+                "candle_history_source": "bounded_derived_account_fills",
+                "candle_history_derived": True,
+                "history_page_limit": XMARKET_HISTORY_MAX_LIMIT,
                 "references": list(XMARKET_REFERENCES),
                 "order_management_operations": list(self.order_management_operations),
                 "order_management_enabled": self.config_bool("xmarket_order_management_enabled", False),
@@ -140,6 +149,193 @@ class XMarketAdapter(MarketAdapter):
             source="xmarket_orderbook",
             raw=raw,
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Normalize bounded, account-scoped fills from Xmarket order history.
+
+        Xmarket documents ``GET /order/my-orders`` and its ``filled`` and
+        ``partially_filled`` statuses, but it does not publish a public trade
+        tape.  We therefore expose only rows belonging to the authenticated
+        account and requested contract, requiring explicit fill quantity,
+        price, side, and timestamp fields before normalizing them.
+        """
+
+        self.ensure_capability("trade_history")
+        market_id, outcome_id = self._split_contract_id(contract_id)
+        desired = self._history_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Xmarket trade history requires before to be at or after after.")
+
+        payload = self._get_authenticated(
+            "/order/my-orders",
+            params={"status": "all", "page": 1, "pageSize": desired},
+        )
+        trades: List[MarketTrade] = []
+        for row in self._items(payload):
+            status = str(row.get("status") or "").strip().lower()
+            if status not in {"filled", "partially_filled"}:
+                continue
+            row_market = str(self._value_at(row, "marketId", "market_id") or "").strip()
+            row_outcome = str(self._value_at(row, "outcomeId", "outcome_id") or "").strip()
+            if row_market != market_id or row_outcome != outcome_id:
+                continue
+            side = str(row.get("side") or "").strip().upper()
+            if side not in {"BUY", "SELL"}:
+                continue
+            filled_quantity = self._value_at(
+                row,
+                "filledQuantity",
+                "filled_quantity",
+                "executedQuantity",
+                "executed_quantity",
+            )
+            if filled_quantity is None and status == "filled":
+                filled_quantity = self._value_at(row, "quantity", "size")
+            size = self._positive_number(filled_quantity)
+            price = self._safe_probability(
+                self._value_at(
+                    row,
+                    "averagePrice",
+                    "average_price",
+                    "averageFillPrice",
+                    "average_fill_price",
+                    "filledPrice",
+                    "fillPrice",
+                    "price",
+                )
+            )
+            timestamp = self._timestamp_seconds(
+                self._value_at(
+                    row,
+                    "filledAt",
+                    "filled_at",
+                    "executedAt",
+                    "executed_at",
+                    "updatedAt",
+                    "updated_at",
+                    "timestamp",
+                    "createdAt",
+                    "created_at",
+                )
+            )
+            trade_id = str(
+                self._value_at(row, "tradeId", "trade_id", "fillId", "fill_id", "id") or ""
+            ).strip()
+            if size is None or price is None or price <= 0.0 or price >= 1.0 or timestamp is None or not trade_id:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(market_id, outcome_id),
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw={
+                        "source": "xmarket_authenticated_my_orders",
+                        "account_scoped": True,
+                        "order": dict(row),
+                    },
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from authenticated Xmarket fills.
+
+        This is intentionally not a public market candle feed: each candle is
+        derived only from the account-scoped fills returned by ``my-orders``.
+        """
+
+        self.ensure_capability("candle_history")
+        interval = self._candle_interval(resolution)
+        start_ts = (
+            self._history_timestamp(from_timestamp, "from_timestamp")
+            if from_timestamp is not None
+            else None
+        )
+        end_ts = (
+            self._history_timestamp(to_timestamp, "to_timestamp")
+            if to_timestamp is not None
+            else None
+        )
+        if start_ts is not None and end_ts is not None and end_ts < start_ts:
+            raise MarketConfigurationError("Xmarket candle history requires to_timestamp at or after from_timestamp.")
+
+        trades = self.list_trades(
+            contract_id,
+            limit=XMARKET_HISTORY_MAX_LIMIT,
+            before=end_ts,
+            after=start_ts,
+        )
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for trade in sorted(trades, key=lambda item: (item.timestamp or 0.0, item.trade_id)):
+            if trade.timestamp is None:
+                continue
+            bucket = int(math.floor(trade.timestamp / interval) * interval)
+            current = buckets.get(bucket)
+            if current is None:
+                current = {
+                    "open": trade.price,
+                    "high": trade.price,
+                    "low": trade.price,
+                    "close": trade.price,
+                    "volume": 0.0,
+                    "trade_ids": [],
+                }
+                buckets[bucket] = current
+            current["high"] = max(float(current["high"]), trade.price)
+            current["low"] = min(float(current["low"]), trade.price)
+            current["close"] = trade.price
+            current["volume"] = float(current["volume"]) + trade.size
+            current["trade_ids"].append(trade.trade_id)
+
+        market_id, outcome_id = self._split_contract_id(contract_id)
+        candles: List[MarketCandle] = []
+        for timestamp in sorted(buckets):
+            values = buckets[timestamp]
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(market_id, outcome_id),
+                    timestamp=float(timestamp),
+                    open=float(values["open"]),
+                    high=float(values["high"]),
+                    low=float(values["low"]),
+                    close=float(values["close"]),
+                    volume=float(values["volume"]),
+                    raw={
+                        "source": "xmarket_authenticated_my_orders",
+                        "account_scoped": True,
+                        "derived": True,
+                        "trade_ids": list(values["trade_ids"]),
+                    },
+                )
+            )
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -458,12 +654,20 @@ class XMarketAdapter(MarketAdapter):
     def _items(payload: Any) -> List[Mapping[str, Any]]:
         if isinstance(payload, Mapping):
             data = payload.get("data")
-            if isinstance(data, Mapping):
+            if isinstance(data, list):
                 payload = data
-            elif isinstance(data, list):
+            elif isinstance(data, Mapping):
+                nested = XMarketAdapter._items(data)
+                if nested:
+                    return nested
                 payload = data
             else:
-                payload = payload.get("items", payload.get("markets", []))
+                payload = payload.get(
+                    "items",
+                    payload.get("markets", payload.get("orders", [])),
+                )
+            if isinstance(payload, Mapping):
+                payload = payload.get("items", payload.get("markets", payload.get("orders", [])))
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, Mapping)]
         return []
@@ -539,6 +743,90 @@ class XMarketAdapter(MarketAdapter):
         if 1.0 < number <= 100.0:
             number /= 100.0
         return number if 0.0 <= number <= 1.0 else None
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number > 0.0 else None
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        if value in (None, "") or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(number):
+                return None
+            return number / 1000.0 if number > 100_000_000_000 else number
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            number = None
+        if number is not None and math.isfinite(number):
+            return number / 1000.0 if number > 100_000_000_000 else number
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        timestamp = parsed.timestamp()
+        return timestamp if math.isfinite(timestamp) else None
+
+    @classmethod
+    def _history_timestamp(cls, value: Any, label: str) -> float:
+        timestamp = cls._timestamp_seconds(value)
+        if timestamp is None or timestamp < 0.0 or not math.isfinite(timestamp):
+            raise MarketConfigurationError(
+                f"Xmarket {label} timestamp must be a valid non-negative epoch or ISO time."
+            )
+        return timestamp
+
+    @staticmethod
+    def _history_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(
+                f"Xmarket trade limit must be an integer between 1 and {XMARKET_HISTORY_MAX_LIMIT}."
+            )
+        try:
+            desired = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(
+                f"Xmarket trade limit must be an integer between 1 and {XMARKET_HISTORY_MAX_LIMIT}."
+            ) from exc
+        if desired < 1 or desired > XMARKET_HISTORY_MAX_LIMIT:
+            raise MarketConfigurationError(
+                f"Xmarket trade limit must be between 1 and {XMARKET_HISTORY_MAX_LIMIT}."
+            )
+        return desired
+
+    @staticmethod
+    def _candle_interval(resolution: Any) -> int:
+        normalized = str(resolution or "").strip().lower()
+        intervals = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14_400,
+            "1d": 86_400,
+            "1w": 604_800,
+        }
+        if normalized not in intervals:
+            raise MarketConfigurationError(
+                "Xmarket candle resolution must be one of: " + ", ".join(intervals)
+            )
+        return intervals[normalized]
 
     @staticmethod
     def _price(value: Any) -> float:

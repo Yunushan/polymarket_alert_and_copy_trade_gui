@@ -182,6 +182,7 @@ HISTORY_CAPABILITIES = {
     "hypermind": {"trade_history", "candle_history"},
     "space": {"trade_history", "candle_history"},
     "scicast": {"trade_history", "candle_history"},
+    "xmarket": {"trade_history", "candle_history"},
     "probable": {"trade_history", "candle_history"},
     "context_v2": {"trade_history", "candle_history"},
     "predict_fun": {"trade_history", "candle_history"},

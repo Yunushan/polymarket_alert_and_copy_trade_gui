@@ -333,6 +333,9 @@ class VerificationFixtureTests(unittest.TestCase):
         xmarket_batch_cancel = json.loads(
             (FIXTURE_ROOT / "xmarket" / "batch_cancel_response.json").read_text(encoding="utf-8")
         )
+        xmarket_user_orders = json.loads(
+            (FIXTURE_ROOT / "xmarket" / "user_orders.json").read_text(encoding="utf-8")
+        )
         betfair_order = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "place_order_response.json").read_text(encoding="utf-8")
         )
@@ -416,6 +419,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("id", xmarket_batch_order["orders"][0])
         self.assertIsInstance(xmarket_batch_cancel.get("cancelled"), list)
         self.assertEqual(xmarket_batch_cancel.get("status"), "cancelled")
+        self.assertEqual(xmarket_user_orders.get("total"), 2)
+        self.assertEqual(xmarket_user_orders["items"][1].get("status"), "filled")
+        self.assertIn("filledAt", xmarket_user_orders["items"][1])
         self.assertEqual(betfair_order.get("status"), "SUCCESS")
         for response in (betfair_cancel, betfair_update, betfair_replace):
             self.assertEqual(response.get("result", {}).get("status"), "SUCCESS")
