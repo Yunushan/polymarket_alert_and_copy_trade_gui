@@ -111,6 +111,15 @@ CLI/API/React controls forward only those validated values. Credentials,
 delegated-signing scope, linked-account eligibility, and funding remain external
 gates.
 
+Thales' documented positional-market subgraph is also exposed through the same
+allow-listed surface: bounded wallet-scoped `positions` reads cover both binary
+and ranged position balances, while `transactions` reads cover the official
+`optionTransactions` feed with optional market and Unix-timestamp filters. The
+GraphQL document is static and all user values are sent as typed variables; raw
+upstream rows are preserved without recasting AMM activity as CLOB fills. The
+subgraph URL and optional default account wallet remain explicit configuration
+inputs, and this read-only surface never signs or submits a transaction.
+
 ## Polymarket Evidence Tiers
 
 Polymarket public and local safety paths are implemented and tested. The

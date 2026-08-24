@@ -877,7 +877,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://thalesmarket.io",
         description=(
             "Official Thales Markets REST adapter for public AMM market discovery, positional prices, "
-            "quote-backed paper orders, and alerts; live wallet transactions remain explicitly disabled."
+            "quote-backed paper orders, alerts, and account-scoped positions/option transactions; live wallet "
+            "transactions remain explicitly guarded."
         ),
         capabilities=THALES_CAPABILITIES,
     ),

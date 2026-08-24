@@ -609,16 +609,20 @@
       "enabled": false,
       "settings": {
         "adapter_status": "implemented",
-        "credential_env_vars": [],
+        "credential_env_vars": [
+          "THALES_SUBGRAPH_URL",
+          "THALES_ACCOUNT_ADDRESS"
+        ],
         "thales_network": "10",
         "thales_rpc_url": "https://mainnet.optimism.io",
+        "thales_subgraph_url": "",
         "thales_amm_address": "",
         "live_trading_enabled": false,
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "thales_submit_signed_transactions": false,
-        "notes": "Official Thales AMM market/quote reads, positional prices, alerts, and local paper orders are implemented. Guarded live submission accepts only an externally signed transaction whose reviewed chain, AMM target, method, calldata, market, and position metadata match configuration; wallet signing, collateral approval, and settlement remain operator responsibilities."
+        "notes": "Official Thales AMM market/quote reads, positional prices, alerts, local paper orders, and account-scoped positions/option-transaction reads are implemented. Configure THALES_SUBGRAPH_URL (or thales_subgraph_url) for the official positional-market subgraph and provide a wallet at request time or via THALES_ACCOUNT_ADDRESS. Guarded live submission accepts only an externally signed transaction whose reviewed chain, AMM target, method, calldata, market, and position metadata match configuration; wallet signing, collateral approval, and settlement remain operator responsibilities."
       }
     },
     "underdog_sports": {

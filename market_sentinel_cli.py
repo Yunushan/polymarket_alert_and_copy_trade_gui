@@ -1403,6 +1403,7 @@ PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = (
     "trades",
 )
 AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
+THALES_ACCOUNT_OPERATIONS = ("positions", "transactions")
 METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
 GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS = ("me", "prediction_sets", "scores")
 MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
@@ -1442,6 +1443,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + MANIFOLD_ACCOUNT_OPERATIONS
         + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
         + AZURO_ACCOUNT_OPERATIONS
+        + THALES_ACCOUNT_OPERATIONS
         + METACULUS_ACCOUNT_OPERATIONS
         + GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS
         + MYRIAD_ACCOUNT_OPERATIONS
@@ -1724,6 +1726,14 @@ def run_market_account(args: argparse.Namespace) -> int:
             "wallet": str(getattr(args, "wallet", "") or "").strip(),
             "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
             "offset": _cli_clamp_int(getattr(args, "offset", "0"), 0, 0, 1_000_000),
+        }
+    elif market_id == "thales_market":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
+            "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+            "from_timestamp": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
+            "to_timestamp": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
         }
     elif market_id == "metaculus":
         kwargs = {

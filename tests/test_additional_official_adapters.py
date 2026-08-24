@@ -1805,6 +1805,67 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 )
             )
 
+    def test_thales_account_subgraph_reads_positions_and_transactions(self) -> None:
+        wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        market = "0x1111111111111111111111111111111111111111"
+        positions = load_fixture("thales_market", "account_positions")
+        transactions = load_fixture("thales_market", "account_transactions")
+        adapter = ThalesMarketAdapter(
+            {
+                "thales_network": "10",
+                "thales_subgraph_url": "https://graph.example/thales",
+            }
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, json_body=None, headers=None, params=None):
+            calls.append((method, url, json_body, headers, params))
+            self.assertEqual(method, "POST")
+            self.assertEqual(url, "https://graph.example/thales")
+            self.assertEqual(headers, {"Content-Type": "application/json"})
+            query = str(json_body["query"])
+            if "ThalesPositions" in query:
+                self.assertEqual(json_body["variables"], {"account": wallet, "first": 25})
+                return positions
+            if "ThalesTransactions" in query:
+                self.assertEqual(
+                    json_body["variables"],
+                    {
+                        "account": wallet,
+                        "first": 10,
+                        "market": market,
+                        "from": "1780000000",
+                        "to": "1790000000",
+                    },
+                )
+                return transactions
+            raise AssertionError("unexpected Thales GraphQL query")
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        recovered_positions = adapter.account_recovery("positions", wallet=wallet, limit=25)
+        recovered_transactions = adapter.account_recovery(
+            "transactions",
+            wallet=wallet,
+            limit=10,
+            market_id=market,
+            from_timestamp=1780000000,
+            to_timestamp=1790000000,
+        )
+
+        self.assertEqual(adapter.health_check()["account_recovery_operations"], ["positions", "transactions"])
+        self.assertEqual(recovered_positions["account"], wallet)
+        self.assertEqual(recovered_positions["positions"][0]["id"], "position-balance-1")
+        self.assertEqual(recovered_positions["ranged_positions"], [])
+        self.assertEqual(recovered_transactions["transactions"][0]["market"], market)
+        self.assertEqual(len(calls), 2)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("positions", wallet="not-an-address")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("transactions", wallet=wallet, from_timestamp=2, to_timestamp=1)
+        with self.assertRaises(MarketConfigurationError):
+            ThalesMarketAdapter().account_recovery("positions", wallet=wallet)
+
     def test_smarkets_adapter_maps_events_contracts_quotes_paper_and_guarded_orders(self) -> None:
         adapter = SmarketsAdapter()
         events = load_fixture("smarkets", "events")

@@ -3804,6 +3804,20 @@ def market_account_payload(
             "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
             "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 1_000_000),
         }
+    elif normalized_market_id == "thales_market":
+        raw_market_id = _query_value(query_params, "market_id")
+        raw_contract_id = _query_value(query_params, "contract_id")
+        if not raw_market_id and raw_contract_id:
+            raw_market_id = raw_contract_id.split(":", 1)[0].strip()
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+            "market_id": raw_market_id or None,
+            "from_timestamp": _query_float(query_params, "from"),
+            "to_timestamp": _query_float(query_params, "to"),
+        }
+        if raw_contract_id:
+            kwargs["contract_id"] = raw_contract_id
     elif normalized_market_id == "metaculus":
         kwargs = {
             "forecaster_id": _query_value(query_params, "forecaster_id") or None,

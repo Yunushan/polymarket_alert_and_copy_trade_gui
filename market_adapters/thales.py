@@ -28,9 +28,103 @@ THALES_REFERENCES = (
     "https://docs.thalesmarket.io/technical-documentation/thales-integration",
     "https://docs.thales.io/thales-digital-options/digital-options-integration",
     "https://docs.thales.io/thales-sports-markets/sports-markets-integration",
+    "https://github.com/thales-markets/thales-data",
+    "https://github.com/thales-markets/thales-subgraph",
 )
 THALES_NETWORKS = {"10", "137", "42161", "8453"}
 THALES_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+THALES_ACCOUNT_OPERATIONS = ("positions", "transactions")
+THALES_ACCOUNT_LIMIT_MAX = 1000
+
+THALES_POSITIONS_QUERY = """
+query ThalesPositions($account: Bytes!, $first: Int!) {
+  positionBalances(first: $first, where: {account: $account}) {
+    id
+    account
+    amount
+    paid
+    position {
+      id
+      side
+      market {
+        id
+        result
+        currencyKey
+        strikePrice
+        maturityDate
+        expiryDate
+        isOpen
+        finalPrice
+        managerAddress
+      }
+      managerAddress
+    }
+    managerAddress
+  }
+  rangedPositionBalances(first: $first, where: {account: $account}) {
+    id
+    account
+    amount
+    paid
+    position {
+      id
+      side
+      market {
+        id
+        timestamp
+        currencyKey
+        maturityDate
+        expiryDate
+        leftPrice
+        rightPrice
+        inAddress
+        outAddress
+        isOpen
+        result
+        finalPrice
+        managerAddress
+      }
+      managerAddress
+    }
+    managerAddress
+  }
+}
+"""
+
+THALES_TRANSACTIONS_QUERY = """
+query ThalesTransactions(
+  $account: Bytes!
+  $first: Int!
+  $market: Bytes
+  $from: BigInt
+  $to: BigInt
+) {
+  optionTransactions(
+    first: $first
+    orderBy: timestamp
+    orderDirection: desc
+    where: {
+      account: $account
+      market: $market
+      timestamp_gte: $from
+      timestamp_lte: $to
+    }
+  ) {
+    id
+    timestamp
+    type
+    account
+    currencyKey
+    side
+    isRangedMarket
+    amount
+    market
+    fee
+    blockNumber
+    managerAddress
+  }
+}
+"""
 
 
 class ThalesMarketAdapter(MarketAdapter):
@@ -47,6 +141,7 @@ class ThalesMarketAdapter(MarketAdapter):
 
     metadata = get_market_metadata("thales_market")
     live_order_sides = ("BUY", "SELL")
+    account_recovery_operations = THALES_ACCOUNT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -57,6 +152,12 @@ class ThalesMarketAdapter(MarketAdapter):
                 "rpc_url": self.rpc_url,
                 "amm_address_configured": bool(self.amm_address),
                 "references": list(THALES_REFERENCES),
+                "subgraph_url": self._subgraph_url_with_source(required=False)[0],
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "POST Thales positional-market subgraph positionBalances/rangedPositionBalances",
+                    "POST Thales positional-market subgraph optionTransactions",
+                ],
                 "public_api": True,
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
@@ -70,6 +171,93 @@ class ThalesMarketAdapter(MarketAdapter):
             }
         )
         return health
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Read the official Thales positional-market account subgraph feeds.
+
+        The upstream ``thales-data`` package documents ``positionBalances`` /
+        ``rangedPositionBalances`` and ``optionTransactions`` as account-scoped
+        reads.  The adapter keeps the upstream rows lossless rather than
+        pretending they are CLOB fills, and it never signs or submits a
+        transaction from this method.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            raise MarketConfigurationError(
+                "Thales account operation must be one of: "
+                + ", ".join(self.account_recovery_operations)
+                + "."
+            )
+        wallet = str(kwargs.get("wallet") or kwargs.get("address") or "").strip()
+        if not wallet:
+            credential = self.resolve_credential(
+                "thales_account_address",
+                ("THALES_ACCOUNT_ADDRESS",),
+                required=True,
+                label="THALES_ACCOUNT_ADDRESS",
+            )
+            wallet = credential.value.strip()
+        wallet = self._address(wallet, label="account address")
+        account = wallet.lower()
+        limit = self._bounded_account_int(kwargs.get("limit", 100), "limit", default=100)
+        subgraph_url, _source = self._subgraph_url_with_source(required=True)
+
+        if normalized == "positions":
+            data = self._graphql(
+                THALES_POSITIONS_QUERY,
+                {"account": account, "first": limit},
+                subgraph_url=subgraph_url,
+            )
+            return {
+                "source": "thales_data_position_balances",
+                "network": self.network,
+                "graph_api_url": subgraph_url,
+                "account": account,
+                "limit": limit,
+                "positions": self._list_or_empty(data.get("positionBalances")),
+                "ranged_positions": self._list_or_empty(data.get("rangedPositionBalances")),
+                "data": dict(data),
+            }
+
+        market = kwargs.get("market_id") or kwargs.get("market")
+        if market in (None, ""):
+            # The web/API contract may carry a Thales contract id in the
+            # conventional ``<market-address>:<outcome-index>`` form.  The
+            # subgraph filter is keyed by the market address only.
+            contract_id = kwargs.get("contract_id")
+            if contract_id not in (None, ""):
+                market = str(contract_id).split(":", 1)[0].strip()
+        market_value = None
+        if market not in (None, ""):
+            market_value = self._address(market, label="market filter").lower()
+        from_timestamp = self._bounded_timestamp(kwargs.get("from_timestamp"), "from")
+        to_timestamp = self._bounded_timestamp(kwargs.get("to_timestamp"), "to")
+        if from_timestamp is not None and to_timestamp is not None and from_timestamp > to_timestamp:
+            raise MarketConfigurationError("Thales transaction from timestamp must not exceed to timestamp.")
+        data = self._graphql(
+            THALES_TRANSACTIONS_QUERY,
+            {
+                "account": account,
+                "first": limit,
+                "market": market_value,
+                "from": str(int(from_timestamp)) if from_timestamp is not None else None,
+                "to": str(int(to_timestamp)) if to_timestamp is not None else None,
+            },
+            subgraph_url=subgraph_url,
+        )
+        return {
+            "source": "thales_data_option_transactions",
+            "network": self.network,
+            "graph_api_url": subgraph_url,
+            "account": account,
+            "market": market_value,
+            "limit": limit,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "transactions": self._list_or_empty(data.get("optionTransactions")),
+            "data": dict(data),
+        }
 
     @property
     def api_base_url(self) -> str:
@@ -284,6 +472,87 @@ class ThalesMarketAdapter(MarketAdapter):
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params, headers={})
+
+    def _graphql(
+        self,
+        query: str,
+        variables: Mapping[str, Any],
+        *,
+        subgraph_url: str,
+    ) -> Dict[str, Any]:
+        payload = self.runtime.request_json(
+            "POST",
+            subgraph_url,
+            json_body={"query": query, "variables": dict(variables)},
+            headers={"Content-Type": "application/json"},
+        )
+        if not isinstance(payload, Mapping):
+            raise MarketHTTPError("Thales GraphQL response was not a JSON object.")
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            messages = "; ".join(
+                str(item.get("message") or item)
+                for item in errors[:3]
+                if isinstance(item, Mapping)
+            )
+            raise MarketHTTPError(f"Thales GraphQL query failed: {messages or 'unknown error'}")
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise MarketHTTPError("Thales GraphQL response did not contain a data object.")
+        return dict(data)
+
+    def _subgraph_url_with_source(self, *, required: bool = False) -> Tuple[str, str]:
+        credential = self.resolve_credential(
+            "thales_subgraph_url",
+            ("THALES_SUBGRAPH_URL",),
+            required=False,
+            label="THALES_SUBGRAPH_URL",
+        )
+        value = str(credential.value if credential else "").strip().rstrip("/")
+        if not value:
+            if required:
+                raise MarketConfigurationError(
+                    "Thales account reads require thales_subgraph_url or THALES_SUBGRAPH_URL."
+                )
+            return "", "missing"
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
+            raise MarketConfigurationError(
+                "Thales subgraph URL must be an absolute http(s) URL without query or fragment."
+            )
+        return value, credential.source if credential else "config"
+
+    @staticmethod
+    def _list_or_empty(value: Any) -> List[Mapping[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [dict(row) for row in value if isinstance(row, Mapping)]
+
+    @staticmethod
+    def _bounded_account_int(value: Any, label: str, *, default: int) -> int:
+        if value in (None, ""):
+            return default
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Thales account {label} must be an integer.") from exc
+        if number < 1 or number > THALES_ACCOUNT_LIMIT_MAX:
+            raise MarketConfigurationError(
+                f"Thales account {label} must be between 1 and {THALES_ACCOUNT_LIMIT_MAX}."
+            )
+        return number
+
+    @staticmethod
+    def _bounded_timestamp(value: Any, label: str) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Thales transaction {label} timestamp must be numeric.") from exc
+        if not math.isfinite(number) or number < 0:
+            raise MarketConfigurationError(f"Thales transaction {label} timestamp must be finite and non-negative.")
+        return number
 
     def _rpc(self, method: str, params: List[Any]) -> Any:
         payload = self.runtime.request_json(

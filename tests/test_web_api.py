@@ -1098,6 +1098,72 @@ class WebApiTests(unittest.TestCase):
             ],
         )
 
+    def test_thales_account_payload_forwards_wallet_market_and_time_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="thales_market",
+            display_name="Thales Market",
+            capabilities=MarketCapabilities(),
+        )
+        adapter.account_recovery_operations = ("positions", "transactions")  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["thales_market"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "thales_market",
+            "transactions",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "market_id": ["0x1111111111111111111111111111111111111111"],
+                "limit": ["12"],
+                "from": ["100"],
+                "to": ["200"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "transactions")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "transactions",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 12,
+                        "market_id": "0x1111111111111111111111111111111111111111",
+                        "from_timestamp": 100.0,
+                        "to_timestamp": 200.0,
+                    },
+                )
+            ],
+        )
+
+        contract_account = market_account_payload(
+            cfg,
+            Registry(),
+            "thales_market",
+            "transactions",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "contract_id": ["0x1111111111111111111111111111111111111111:1"],
+            },
+        )
+        self.assertEqual(contract_account["data"]["operation"], "transactions")
+        self.assertEqual(account_calls[-1][1]["market_id"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(account_calls[-1][1]["contract_id"], "0x1111111111111111111111111111111111111111:1")
+
     def test_myriad_account_activity_payload_forwards_wallet_and_bounds(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

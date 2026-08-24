@@ -1,0 +1,20 @@
+{
+  "data": {
+    "optionTransactions": [
+      {
+        "id": "0xfeed-1790000000-0",
+        "timestamp": "1790000000",
+        "type": "buy",
+        "account": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "currencyKey": "0x5553444300000000000000000000000000000000000000000000000000000000",
+        "side": 0,
+        "isRangedMarket": false,
+        "amount": "1000000000000000000",
+        "market": "0x1111111111111111111111111111111111111111",
+        "fee": "10000000000000000",
+        "blockNumber": "12345678",
+        "managerAddress": "0x2222222222222222222222222222222222222222"
+      }
+    ]
+  }
+}
