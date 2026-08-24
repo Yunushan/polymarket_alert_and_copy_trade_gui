@@ -8,6 +8,9 @@ Good Judgment Open's documented authenticated recovery surface is also
 covered: `/api/v1/me`, `/api/v1/prediction_sets`, and `/api/v1/scores` are
 exposed as bounded account operations and preserve forecast/score semantics.
 
+Smarkets now exposes simulation-only copy previews from complete authenticated
+executed-order rows; the preview path never submits live orders automatically.
+
 ## Completion Scope
 
 All repository-controlled requirements in the goal are complete. This includes

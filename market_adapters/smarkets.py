@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -417,10 +417,100 @@ class SmarketsAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Smarkets copy trading is unsupported because account activity mirroring is not an official adapter feature.",
+        """Build a local copy preview from a complete executed Smarkets order.
+
+        The preview accepts only documented filled/partial execution rows and
+        never calls the live order endpoint.  Raw exchange integer units are
+        normalized through the same scale validation used by trade history.
+        """
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        market_id = str(activity.get("market_id") or activity.get("marketId") or "").strip()
+        contract_ref = str(activity.get("contract") or "").strip()
+        if contract_id:
+            if ":" in contract_id:
+                parsed_market, parsed_contract = self._split_contract_id(contract_id)
+                if market_id and parsed_market != market_id:
+                    raise MarketConfigurationError("Smarkets activity market_id does not match contract_id.")
+                if contract_ref and parsed_contract != contract_ref:
+                    raise MarketConfigurationError("Smarkets activity contract does not match contract_id.")
+                market_id, contract_ref = parsed_market, parsed_contract
+            elif market_id:
+                if contract_ref and contract_id != contract_ref:
+                    raise MarketConfigurationError("Smarkets activity contract does not match contract_id.")
+                market_id = self._safe_identifier(market_id, "market")
+                contract_ref = self._safe_identifier(contract_id, "contract")
+            else:
+                raise MarketConfigurationError("Smarkets contract_id must include MARKET_ID or market_id must be provided.")
+        elif market_id and contract_ref:
+            market_id = self._safe_identifier(market_id, "market")
+            contract_ref = self._safe_identifier(contract_ref, "contract")
+            contract_id = self._contract_id(market_id, contract_ref)
+        else:
+            raise MarketConfigurationError("Smarkets activity requires contract_id or market_id plus contract.")
+
+        status = str(activity.get("status") or activity.get("state") or "").strip().lower()
+        if status not in {"filled", "partial", "matched", "executed", "complete", "completed"}:
+            raise MarketConfigurationError("Smarkets copy activity must be filled or partially filled.")
+        side = self._trade_side(activity.get("side") or activity.get("order_side") or activity.get("orderSide"))
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Smarkets activity side must be BUY/SELL or BACK/LAY.")
+
+        scaled_size = self._value(
+            activity,
+            "total_executed_quantity",
+            "totalExecutedQuantity",
+            "executed_quantity",
+            "executedQuantity",
+            "matched_quantity",
+            "matchedQuantity",
+        )
+        size = self._executed_quantity(activity) if scaled_size not in (None, "") else self._positive_number(
+            activity.get("size") or activity.get("executed_size") or activity.get("matched_size")
+        )
+        if size is None:
+            raise MarketConfigurationError("Smarkets activity executed size must be positive and finite.")
+        raw_price = self._value(
+            activity,
+            "probability",
+            "average_executed_price",
+            "averageExecutedPrice",
+            "executed_price",
+            "price",
+        )
+        probability = self._probability(raw_price)
+        if probability is None or probability <= 0.0:
+            raise MarketConfigurationError("Smarkets activity price must map to a probability in (0, 1].")
+        trade_id = self._id(activity, "order_id", "trade_id", "tradeId")
+        if not trade_id:
+            raise MarketConfigurationError("Smarkets activity requires a documented order or trade id.")
+
+        preview = self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=self._contract_id(market_id, contract_ref),
+                side=side,
+                size=size,
+                limit_price=probability,
+                metadata={
+                    "activity": dict(activity),
+                    "source": "smarkets_authenticated_executed_orders",
+                    "trade_id": trade_id,
+                },
+            )
+        )
+        preview.raw["source"] = "smarkets_authenticated_executed_orders"
+        preview.raw["trade_id"] = trade_id
+        preview.raw["copied"] = True
+        return PaperOrderResult(
+            market_id=preview.market_id,
+            contract_id=preview.contract_id,
+            accepted=preview.accepted,
+            message=preview.message,
+            filled_size=size,
+            average_price=probability,
+            raw=preview.raw,
         )
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]]) -> Any:
@@ -735,6 +825,16 @@ class SmarketsAdapter(MarketAdapter):
         if number > 1.0:
             number /= 10_000.0
         return number if 0.0 <= number <= 1.0 else None
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number > 0.0 else None
 
     def _positive_scale(self, key: str, default: float) -> float:
         value = self.config.get(key, default)

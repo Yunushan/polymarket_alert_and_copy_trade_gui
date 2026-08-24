@@ -493,7 +493,9 @@ SMARKETS_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # Authenticated executed-order rows can produce local simulation previews;
+    # copy previews never submit live orders automatically.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=True,
@@ -934,7 +936,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://smarkets.com",
         description=(
             "Official Smarkets v3 REST adapter for event/market/contract discovery, quote orderbooks, "
-            "authenticated executed-order history with bounded derived candles, paper orders, authenticated "
+            "authenticated executed-order history with bounded derived candles, simulation-first copy previews, paper orders, authenticated "
             "order/account reads, and guarded session-authenticated order submission/cancellation."
         ),
         capabilities=SMARKETS_CAPABILITIES,

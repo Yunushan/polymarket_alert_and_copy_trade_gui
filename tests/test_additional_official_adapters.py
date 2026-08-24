@@ -1914,8 +1914,22 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
             )
 
-        with self.assertRaises(UnsupportedFeatureError):
-            live_adapter.copy_trade_from_activity({"side": "BUY"})
+        filled_activity = {**orders["orders"][1], "status": "filled"}
+        copy_preview = live_adapter.copy_trade_from_activity(filled_activity)
+        self.assertTrue(copy_preview.accepted)
+        self.assertEqual(copy_preview.contract_id, "market-1:contract-yes")
+        self.assertEqual(copy_preview.raw["source"], "smarkets_authenticated_executed_orders")
+        self.assertEqual(copy_preview.raw["trade_id"], "order-filled-1")
+        self.assertTrue(copy_preview.raw["copied"])
+        self.assertAlmostEqual(copy_preview.average_price or 0.0, 0.45)
+        self.assertEqual(copy_preview.raw["request"]["quantity"], "25000")
+        self.assertEqual(copy_preview.raw["request"]["price"], "4500")
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.copy_trade_from_activity({**filled_activity, "status": "created"})
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.copy_trade_from_activity({**filled_activity, "side": "unknown"})
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.copy_trade_from_activity({**filled_activity, "contract_id": "other:contract-yes"})
 
     def test_context_v2_adapter_maps_markets_prices_orderbooks_paper_and_guarded_signed_orders(self) -> None:
         adapter = ContextV2Adapter()

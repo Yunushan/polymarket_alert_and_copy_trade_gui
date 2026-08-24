@@ -580,7 +580,7 @@
         "credential_env_vars": ["SMARKETS_SESSION_TOKEN", "SMARKETS_API_TOKEN"],
         "live_trading_enabled": false,
         "smarkets_order_management_enabled": false,
-        "notes": "Official Smarkets v3 event, market, contract, quote-orderbook, alert, paper-order, authenticated order/account reads, and guarded session-authenticated order placement/cancellation are implemented. Application approval, written data-use permission, account eligibility, and funded execution remain external gates."
+        "notes": "Official Smarkets v3 event, market, contract, quote-orderbook, alert, paper-order, simulation-first copy previews from complete authenticated executed orders, authenticated order/account reads, and guarded session-authenticated order placement/cancellation are implemented. Copy previews never submit live orders automatically. Application approval, written data-use permission, account eligibility, and funded execution remain external gates."
       }
     },
     "sx_bet": {
