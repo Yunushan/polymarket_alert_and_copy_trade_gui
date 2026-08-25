@@ -665,9 +665,11 @@ class SmarketsAdapter(MarketAdapter):
         return market_id, contract_id
 
     def _order_payload(self, order: PaperOrderRequest, *, signed: bool) -> Dict[str, Any]:
-        existing = order.metadata.get("smarkets_order")
-        if isinstance(existing, Mapping):
-            return dict(existing)
+        del signed
+        if "smarkets_order" in order.metadata:
+            raise MarketConfigurationError(
+                "Smarkets live payloads are constructed from the reviewed order; metadata.smarkets_order is not accepted."
+            )
         market_id, contract_id = self._split_contract_id(order.contract_id)
         probability = self._probability(order.limit_price)
         if probability is None:
@@ -680,7 +682,7 @@ class SmarketsAdapter(MarketAdapter):
             "side": "buy" if str(order.side).upper() == "BUY" else "sell",
             "quantity": str(round(float(order.size) * quantity_scale)),
             "price": str(round(probability * price_scale)),
-            "type": str(order.metadata.get("order_type") or "limit").lower(),
+            "type": "limit",
         }
 
     @classmethod

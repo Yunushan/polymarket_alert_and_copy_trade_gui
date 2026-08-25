@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from scripts.generate_release_sbom import build_sbom, created_at
+from scripts.generate_release_sbom import build_sbom, created_at, locked_python_packages
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,8 +26,22 @@ class ReleaseSbomTests(unittest.TestCase):
         self.assertEqual(payload["packages"][0]["name"], "market-sentinel")
         names = {package["name"] for package in payload["packages"]}
         self.assertIn("requests", names)
+        self.assertIn("py-clob-client", names)
+        self.assertIn("opinion-clob-sdk", names)
         self.assertIn("react", names)
         self.assertGreater(len(payload["relationships"]), 2)
+
+        package_coordinates = {
+            (package["name"], package["versionInfo"])
+            for package in payload["packages"]
+            if package["name"] != "market-sentinel"
+        }
+        self.assertTrue(
+            set(locked_python_packages(ROOT / "requirements-live.lock"))
+            <= package_coordinates
+        )
+        package_ids = [package["SPDXID"] for package in payload["packages"]]
+        self.assertEqual(len(package_ids), len(set(package_ids)))
 
 
 if __name__ == "__main__":

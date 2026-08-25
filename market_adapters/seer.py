@@ -54,11 +54,11 @@ class SeerAdapter(MarketAdapter):
                 "public_api": True,
                 "candle_history_source": "market-chart",
                 "candle_history_resolutions": ["raw", "price", "1h"],
-                "live_trading_supported": True,
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
-                "signed_transaction_submission_enabled": self.config_bool(
-                    "seer_submit_signed_transactions", False
-                ),
+                "live_trading_supported": bool(self.capabilities.live_trading),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
+                "signed_transaction_submission_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("seer_submit_signed_transactions", False),
                 "rpc_configured": bool(self._configured_rpc_url),
                 "allowlisted_trading_contract_count": len(self.trading_contract_addresses),
                 "wallet_transaction_required": True,

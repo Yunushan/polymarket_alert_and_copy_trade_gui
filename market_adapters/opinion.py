@@ -417,10 +417,29 @@ class OpinionAdapter(MarketAdapter):
             raise MarketConfigurationError("Opinion live orders require a positive numeric market id.")
 
         metadata = order.metadata if isinstance(order.metadata, Mapping) else {}
-        order_kind = str(metadata.get("order_type") or metadata.get("orderType") or "limit").strip().lower()
+        wire_amount_fields = {
+            "maker_amount_in_quote_token",
+            "makerAmountInQuoteToken",
+            "maker_amount_in_base_token",
+            "makerAmountInBaseToken",
+        }
+        supplied_wire_amounts = sorted(wire_amount_fields.intersection(metadata))
+        if supplied_wire_amounts:
+            raise MarketConfigurationError(
+                "Opinion wire amounts are derived from the preflighted order size; remove metadata fields: "
+                + ", ".join(supplied_wire_amounts)
+            )
+        supplied_order_kind = metadata.get("order_type") or metadata.get("orderType")
+        order_kind = str(supplied_order_kind or ("limit" if order.limit_price is not None else "market")).strip().lower()
         if order_kind not in {"limit", "limit_order", "market", "market_order"}:
             raise MarketConfigurationError("Opinion order_type must be limit or market.")
         is_market = order_kind in {"market", "market_order"}
+        expected_market = order.limit_price is None
+        if is_market != expected_market:
+            raise MarketConfigurationError(
+                "Opinion order_type must match the reviewed limit price: a supplied limit requires a limit order, "
+                "and a market order must not include a limit."
+            )
         if is_market:
             sdk_price = "0"
         else:
@@ -431,27 +450,14 @@ class OpinionAdapter(MarketAdapter):
                 raise MarketConfigurationError("Opinion limit price must be between 0.01 and 0.99.")
             sdk_price = self._decimal_string(price)
 
-        amount_quote = self._metadata_amount(
-            metadata,
-            "maker_amount_in_quote_token",
-            "makerAmountInQuoteToken",
-        )
-        amount_base = self._metadata_amount(
-            metadata,
-            "maker_amount_in_base_token",
-            "makerAmountInBaseToken",
-        )
-        if amount_quote is not None and amount_base is not None:
-            raise MarketConfigurationError(
-                "Opinion live orders must provide exactly one of maker_amount_in_quote_token or maker_amount_in_base_token."
-            )
-        if amount_quote is None and amount_base is None:
-            # Preserve the common application order model: BUY size is quote
-            # currency to spend; SELL size is outcome tokens to sell.
-            if str(order.side or "").upper() == "BUY":
-                amount_quote = self._decimal_string(order.size)
-            else:
-                amount_base = self._decimal_string(order.size)
+        amount_quote = None
+        amount_base = None
+        # BUY size is quote currency to spend; SELL size is outcome tokens.
+        # No metadata value may replace the quantity that passed preflight.
+        if str(order.side or "").upper() == "BUY":
+            amount_quote = self._decimal_string(order.size)
+        else:
+            amount_base = self._decimal_string(order.size)
 
         sdk_order = self._build_sdk_order(
             market_id=int(market_id),

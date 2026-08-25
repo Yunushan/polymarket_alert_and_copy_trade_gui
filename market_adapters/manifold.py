@@ -309,19 +309,24 @@ class ManifoldAdapter(MarketAdapter):
             raise MarketConfigurationError("Manifold activity side must be BUY or SELL.")
         size = self._required_positive_number(activity.get("size"), "Manifold activity size")
         raw_price = activity.get("price")
-        limit_price = None if raw_price in (None, "") else self._safe_probability(raw_price)
-        if raw_price not in (None, "") and limit_price is None:
+        reference_price = None if raw_price in (None, "") else self._safe_probability(raw_price)
+        if raw_price not in (None, "") and reference_price is None:
             raise MarketConfigurationError("Manifold activity reference probability must be between 0 and 1.")
         metadata: Dict[str, Any] = {"activity": dict(activity), "source": "manifold_bet_feed"}
         if side == "SELL":
             metadata["shares"] = activity.get("shares") or size
+            # Manifold's sell endpoint cannot enforce a limit. Retain the
+            # observed fill only as provenance so the paper preview never
+            # presents it as a wire-enforced limit.
+            if reference_price is not None:
+                metadata["reference_price"] = reference_price
         return self.place_paper_order(
             PaperOrderRequest(
                 market_id=self.market_id,
                 contract_id=contract_id,
                 side=side,
                 size=size,
-                limit_price=limit_price,
+                limit_price=None if side == "SELL" else reference_price,
                 metadata=metadata,
             )
         )
@@ -338,6 +343,9 @@ class ManifoldAdapter(MarketAdapter):
         self.ensure_capability("paper_trading")
         self._validate_order(order)
         payload, endpoint = self._build_order_payload(order, dry_run=True)
+        raw: Dict[str, Any] = {"endpoint": endpoint, "request": payload}
+        if "reference_price" in order.metadata:
+            raw["reference_price"] = order.metadata["reference_price"]
         return PaperOrderResult(
             market_id=self.market_id,
             contract_id=self._canonical_contract_id(order.contract_id),
@@ -349,7 +357,7 @@ class ManifoldAdapter(MarketAdapter):
             ),
             filled_size=0.0,
             average_price=None,
-            raw={"endpoint": endpoint, "request": payload},
+            raw=raw,
         )
 
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
@@ -726,7 +734,14 @@ class ManifoldAdapter(MarketAdapter):
         market_id, outcome, answer_id = self._split_contract_id(order.contract_id)
         side = str(order.side or "").upper()
         if side == "SELL":
-            payload: Dict[str, Any] = {"shares": float(order.metadata.get("shares", order.size))}
+            if order.limit_price is not None:
+                raise MarketConfigurationError(
+                    "Manifold SELL does not support a wire-enforced limit price; remove the limit or do not submit."
+                )
+            # The transmitted share count must be the exact value that passed
+            # the shared size/exposure caps. A metadata override would let the
+            # wire order diverge from the reviewed request.
+            payload: Dict[str, Any] = {"shares": float(order.size)}
             if outcome in {"YES", "NO"}:
                 payload["outcome"] = outcome
             if answer_id:

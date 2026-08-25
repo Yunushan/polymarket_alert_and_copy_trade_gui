@@ -129,7 +129,7 @@ class LamasFinanceAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketHTTPError):
             bad_adapter.list_contracts(self.up_down_event)
 
-    def test_guarded_live_order_requires_reviewed_signed_transaction(self) -> None:
+    def test_signed_transaction_forwarding_is_fail_closed(self) -> None:
         paper = self.adapter.place_paper_order(
             PaperOrderRequest("lamas_finance", f"{self.up_down_event}:YES", "BUY", 0.000001)
         )
@@ -154,15 +154,21 @@ class LamasFinanceAdapterTests(unittest.TestCase):
                 "lamas_finance_submit_signed_transactions": True,
             }
         )
-        result = live_adapter.place_live_order(
-            PaperOrderRequest("lamas_finance", f"{self.up_down_event}:YES", "BUY", 0.000001, metadata=metadata)
-        )
-        self.assertTrue(result["live"])
-        self.assertEqual(result["signature"], SIGNATURE)
-        self.assertEqual(result["instruction"], "predict")
-        self.assertNotIn(signed_transaction, json.dumps(result))
+        runtime_calls_before = len(self.calls)
+        self.assertFalse(live_adapter.capabilities.live_trading)
+        with self.assertRaises(UnsupportedFeatureError):
+            live_adapter.place_live_order(
+                PaperOrderRequest(
+                    "lamas_finance",
+                    f"{self.up_down_event}:YES",
+                    "BUY",
+                    0.000001,
+                    metadata=metadata,
+                )
+            )
+        self.assertEqual(len(self.calls), runtime_calls_before)
 
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             live_adapter.place_live_order(
                 PaperOrderRequest(
                     "lamas_finance",
@@ -172,6 +178,7 @@ class LamasFinanceAdapterTests(unittest.TestCase):
                     metadata={**metadata, "instruction_data": "00"},
                 )
             )
+        self.assertEqual(len(self.calls), runtime_calls_before)
 
 
 if __name__ == "__main__":

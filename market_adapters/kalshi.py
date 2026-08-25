@@ -32,7 +32,6 @@ KALSHI_ORDER_MANAGEMENT_MAX_BATCH = 50
 KALSHI_ORDER_MANAGEMENT_REFERENCES = (
     "https://docs.kalshi.com/api-reference/orders/cancel-order-v2",
     "https://docs.kalshi.com/api-reference/orders/batch-cancel-orders-v2",
-    "https://docs.kalshi.com/api-reference/orders/amend-order-v2",
     "https://docs.kalshi.com/api-reference/orders/decrease-order-v2",
 )
 KALSHI_ACCOUNT_REFERENCES = (
@@ -60,7 +59,6 @@ class KalshiAdapter(MarketAdapter):
     order_management_operations = (
         "cancel_order",
         "batch_cancel_orders",
-        "amend_order",
         "decrease_order",
     )
 
@@ -695,29 +693,6 @@ class KalshiAdapter(MarketAdapter):
             response = self._authenticated_request(
                 "DELETE", "/portfolio/events/orders/batched", json_body=request_body
             )
-        elif normalized == "amend_order":
-            order_id = self._order_management_id(kwargs.get("order_id"), label="order_id")
-            ticker = self._order_management_ticker(kwargs.get("ticker") or kwargs.get("market_id"))
-            side = self._order_management_side(kwargs.get("side"))
-            price = self._order_management_price(kwargs.get("price"))
-            count = self._order_management_count(kwargs.get("count"), label="count")
-            request_body = {
-                "ticker": ticker,
-                "side": side,
-                "price": self._fixed_decimal(price, places=4),
-                "count": self._fixed_decimal(count),
-            }
-            for key in ("client_order_id", "updated_client_order_id"):
-                value = self._order_management_optional_id(kwargs.get(key), label=key)
-                if value:
-                    request_body[key] = value
-            if default_exchange_index is not None:
-                request_body["exchange_index"] = default_exchange_index
-            if default_subaccount is not None:
-                request_params["subaccount"] = default_subaccount
-            response = self._authenticated_request(
-                "POST", f"/portfolio/events/orders/{order_id}/amend", params=request_params, json_body=request_body
-            )
         else:
             order_id = self._order_management_id(kwargs.get("order_id"), label="order_id")
             reduce_by = self._order_management_reduction(kwargs.get("reduce_by"), label="reduce_by")
@@ -1036,43 +1011,6 @@ class KalshiAdapter(MarketAdapter):
         if not text or len(text) > 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:" for char in text):
             raise MarketConfigurationError(f"Kalshi {label} must be a safe non-empty identifier (max 128 characters).")
         return text
-
-    @classmethod
-    def _order_management_optional_id(cls, value: Any, *, label: str) -> str:
-        if value in (None, ""):
-            return ""
-        return cls._order_management_id(value, label=label)
-
-    @classmethod
-    def _order_management_ticker(cls, value: Any) -> str:
-        text = str(value or "").strip().upper()
-        if not text or len(text) > 128 or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for char in text):
-            raise MarketConfigurationError("Kalshi ticker must be a safe non-empty identifier (max 128 characters).")
-        return text
-
-    @staticmethod
-    def _order_management_side(value: Any) -> str:
-        side = str(value or "").strip().lower()
-        if side not in {"bid", "ask"}:
-            raise MarketConfigurationError("Kalshi order-management side must be bid or ask.")
-        return side
-
-    @classmethod
-    def _order_management_price(cls, value: Any) -> float:
-        parsed = cls._safe_probability(value)
-        if parsed is None or not 0.0 < parsed < 1.0:
-            raise MarketConfigurationError("Kalshi order-management price must be between 0 and 1.")
-        return parsed
-
-    @staticmethod
-    def _order_management_count(value: Any, *, label: str = "count") -> float:
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError) as exc:
-            raise MarketConfigurationError(f"Kalshi {label} must be numeric and positive.") from exc
-        if not math.isfinite(parsed) or parsed <= 0:
-            raise MarketConfigurationError(f"Kalshi {label} must be numeric and positive.")
-        return parsed
 
     @staticmethod
     def _order_management_reduction(value: Any, *, label: str, allow_zero: bool = False) -> Optional[float]:

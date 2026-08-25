@@ -22,6 +22,11 @@ if str(ROOT) not in sys.path:
 
 from core.atomic_files import atomic_write_text
 
+try:
+    from scripts.release_version import normalize_release_version
+except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the repository root, to sys.path.
+    from release_version import normalize_release_version
+
 LOCK_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)")
 
 
@@ -73,17 +78,36 @@ def package_entry(name: str, version: str, *, license_expression: str = "NOASSER
 
 
 def build_sbom(version: str) -> dict[str, Any]:
+    try:
+        version = normalize_release_version(str(version))
+    except ValueError as exc:
+        raise SystemExit(f"Unsupported SBOM release version {version!r}: {exc}") from exc
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     project_name = str(project["name"])
-    if str(project["version"]) != version:
+    project_version = str(project["version"])
+    try:
+        canonical_project_version = normalize_release_version(project_version)
+    except ValueError as exc:
+        raise SystemExit(f"pyproject.toml has an unsupported release version {project_version!r}: {exc}") from exc
+    if project_version != canonical_project_version:
+        raise SystemExit(
+            f"pyproject.toml project.version must use canonical form {canonical_project_version!r}; "
+            f"got {project_version!r}."
+        )
+    if project_version != version:
         raise SystemExit(f"Requested SBOM version {version} does not match pyproject.toml ({project['version']}).")
     root_package = package_entry(project_name, version, license_expression="0BSD")
+    # The Windows release installs requirements-live.lock before PyInstaller,
+    # so that lock—not the lean server lock—is the shipped Python superset.
+    # Deduplicate an identical Python/Node name+version coordinate to avoid
+    # emitting duplicate SPDX package IDs and relationships.
+    dependency_coordinates = sorted(
+        set(locked_python_packages(ROOT / "requirements-live.lock"))
+        | set(locked_node_packages(ROOT / "frontend" / "package-lock.json"))
+    )
     dependencies = [
         package_entry(name, package_version)
-        for name, package_version in locked_python_packages(ROOT / "requirements.lock")
-    ] + [
-        package_entry(name, package_version)
-        for name, package_version in locked_node_packages(ROOT / "frontend" / "package-lock.json")
+        for name, package_version in dependency_coordinates
     ]
     relationships = [
         {

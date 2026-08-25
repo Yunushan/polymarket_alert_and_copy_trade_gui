@@ -7,7 +7,20 @@ GitHub repository.
 
 ## Current Check
 
-Run the local test suite and the no-credentials public Polymarket probe:
+Run the complete local verification profile:
+
+```bash
+python scripts/check_product_readiness.py \
+  --full-local \
+  --json
+```
+
+`--full-local` runs `verify.py --skip-pip-check --frontend-build
+--frontend-live-smoke`. This local-only command is the authoritative 83-point
+ceiling used for the current audit.
+
+Run the no-credentials public Polymarket probe separately when external network
+evidence is in scope:
 
 ```bash
 python scripts/check_product_readiness.py \
@@ -16,9 +29,8 @@ python scripts/check_product_readiness.py \
   --json
 ```
 
-`--full-local` runs `verify.py --skip-pip-check --frontend-build
---frontend-live-smoke`. The public probe never derives credentials, opens the
-authenticated user stream, places orders, or performs funded actions.
+The public probe never derives credentials, opens the authenticated user
+stream, places orders, or performs funded actions.
 
 The readiness scorer retries the complete public-only probe once after a
 transient subprocess, transport, or malformed-report failure. Each individual
@@ -40,12 +52,12 @@ check does not receive local test or security points.
 | Platform evidence | 10 | 5 | Reviewed platform CI and platform JSON evidence |
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
-The latest local audit on 2026-08-25 is **83/100 (not ready)** when no external
+The latest local audit on 2026-08-26 is **83/100 (not ready)** when no external
 evidence manifests are supplied. Local verification covers the adapter catalog
 (68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
 files, documentation, workflows, secret hygiene, frontend build/browser smoke,
-and packaging checks. The current verifier passed 879 tests (7 intentionally
-skipped on Windows), reached 76% branch coverage overall while satisfying the
+and packaging checks. The current verifier passed 954 tests (7 intentionally
+skipped on Windows), reached 74% branch coverage overall while satisfying the
 74% backend floor, and passed Ruff. Counts are reported from this run rather
 than carried forward from an older artifact.
 Metaculus now supports fixture-backed local forecast
@@ -55,21 +67,21 @@ Large HTTP responses are written in bounded chunks so the support matrix and
 exports cannot truncate on Windows loopback sockets. The BetMGM partner Sports
 API remains a fixture-backed read-only/paper adapter; live and copy trading
 remain explicitly unsupported because no official order/account surface is
-available. The no-credential public-only Polymarket probe was attempted twice
-and failed because the external Gamma, Data, CLOB, and Bridge endpoints reset
-the connection from this environment; credentialed and funded checks remain
-blocked. No live evidence is invented to compensate for that gap. The score
-therefore reflects repeatable repository proof plus explicitly supplied
+available. External checks were explicitly excluded from this audit: the
+public-only Polymarket probe was not rerun, and credentialed and funded checks
+remain unawarded. No live evidence is invented to compensate for that gap. The
+score therefore reflects repeatable repository proof plus explicitly supplied
 evidence, not a production certification.
 
 The repository also contains historical manifests under `evidence/`; they are
-inputs, not automatically valid current proof. With a passing local verifier,
-the currently accepted checked-in manifests produce **85/100**, while stale or
-revision/tag-mismatched manifests are rejected. Reaching 100 requires fresh
-proof for the current `v1.0.11` commit: release/release history (+2), deployment
-(+3), platform CI/targets (+5), public probe (+3), credentialed read (+1), and
-approved funded audit (+1). No points are awarded merely because an old
-manifest file exists.
+inputs, not automatically valid current proof. This audit deliberately supplied
+none of them, so the recorded score remains **83/100**. Stale or
+revision/tag-mismatched manifests are rejected, and all revision-bound evidence
+must be recollected for the exact final commit. Reaching 100 requires fresh
+proof for the current `v1.0.11` commit: repository settings (+1), release
+environment/history/release (+3), deployment (+3), platform CI/targets (+5),
+public probe (+3), credentialed read (+1), and approved funded audit (+1). No
+points are awarded merely because an old manifest file exists.
 
 The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local

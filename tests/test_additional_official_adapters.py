@@ -161,7 +161,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(account_adapter.health_check()["account_recovery_operations"], ["orders", "order_status"])
         self.assertEqual(
             account_adapter.health_check()["order_management_operations"],
-            ["cancel_order", "cancel_all_orders", "modify_order"],
+            ["cancel_order", "cancel_all_orders"],
         )
 
         calls = []
@@ -212,25 +212,24 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             order_id="987654",
             confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
         )
-        modified = management.manage_orders(
-            "modify_order",
-            order_id="987654",
-            instructions={
-                "conid": 721095497,
-                "orderType": "LMT",
-                "side": "BUY",
-                "tif": "DAY",
-                "quantity": 5,
-                "price": 0.51,
-            },
-            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
-        )
+        with self.assertRaises(MarketConfigurationError):
+            management.manage_orders(
+                "modify_order",
+                order_id="987654",
+                instructions={
+                    "conid": 721095497,
+                    "orderType": "LMT",
+                    "side": "BUY",
+                    "tif": "DAY",
+                    "quantity": 5,
+                    "price": 0.51,
+                },
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
         self.assertEqual(cancelled["response"]["msg"], "Request was submitted")
-        self.assertEqual(modified["response"][0]["order_status"], "Submitted")
         self.assertEqual(management_calls[0][0], "DELETE")
         self.assertTrue(management_calls[0][1].endswith("/iserver/account/DU123456/order/987654"))
-        self.assertEqual(management_calls[1][0], "POST")
-        self.assertEqual(management_calls[1][3]["price"], 0.51)
+        self.assertEqual(len(management_calls), 1)
         with self.assertRaises(MarketConfigurationError):
             management.manage_orders(
                 "cancel_all_orders",
@@ -312,26 +311,23 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         cme.runtime.get_json = fake_get_json  # type: ignore[method-assign]
         cme.runtime.request_json = fake_request_json  # type: ignore[method-assign]
-        result = cme.manage_orders(
-            "modify_order",
-            order_id="987654",
-            instructions={
-                "conid": 722021819,
-                "orderType": "LMT",
-                "side": "SELL",
-                "tif": "DAY",
-                "quantity": 2,
-                "price": 0.34,
-            },
-            manual_indicator=False,
-            external_operator="desk-1",
-            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
-        )
-        self.assertEqual(result["response"][0]["order_status"], "Submitted")
-        self.assertEqual(calls[0][0], "POST")
-        self.assertTrue(calls[0][1].endswith("/iserver/account/DU123456/order/987654"))
-        self.assertEqual(calls[0][2], {"manualIndicator": False, "extOperator": "desk-1"})
-        self.assertEqual(calls[0][3]["side"], "SELL")
+        with self.assertRaises(MarketConfigurationError):
+            cme.manage_orders(
+                "modify_order",
+                order_id="987654",
+                instructions={
+                    "conid": 722021819,
+                    "orderType": "LMT",
+                    "side": "SELL",
+                    "tif": "DAY",
+                    "quantity": 2,
+                    "price": 0.34,
+                },
+                manual_indicator=False,
+                external_operator="desk-1",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+        self.assertEqual(calls, [])
 
         with self.assertRaises(MarketConfigurationError):
             cme.manage_orders(
@@ -551,7 +547,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(order.contract_id)
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(order)
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
@@ -645,10 +641,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(MarketConfigurationError, "from_timestamp"):
             configured_adapter(chart).list_candles(f"100:{market_id}:0", from_timestamp=True)
 
-    def test_seer_guarded_live_order_forwards_reviewed_signed_dex_transaction(self) -> None:
+    def test_seer_signed_transaction_forwarding_is_fail_closed(self) -> None:
         market_id = "0x1111111111111111111111111111111111111111"
         dex_address = "0x2222222222222222222222222222222222222222"
-        tx_hash = "0x" + "ab" * 32
         adapter = SeerAdapter(
             {
                 "live_trading_enabled": True,
@@ -658,14 +653,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "seer_trading_contract_addresses": [dex_address],
             }
         )
+        runtime_calls = []
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
-            self.assertEqual(method, "POST")
-            self.assertIsNone(params)
-            self.assertEqual(headers, {"Content-Type": "application/json"})
-            self.assertEqual(url, "https://rpc.example.invalid/seer")
-            self.assertEqual(json_body["method"], "eth_sendRawTransaction")
-            return {"jsonrpc": "2.0", "id": 1, "result": tx_hash}
+            runtime_calls.append((method, url, params, json_body, headers))
+            raise AssertionError("fail-closed Seer live trading reached the runtime")
 
         adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
         order = PaperOrderRequest(
@@ -684,13 +676,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "data": "0x12345678",
             },
         )
-        result = adapter.place_live_order(order)
-        self.assertTrue(result["live"])
-        self.assertEqual(result["tx_hash"], tx_hash)
-        self.assertEqual(result["dex_address"], dex_address)
-        self.assertEqual(result["chain_id"], "100")
+        self.assertFalse(adapter.capabilities.live_trading)
+        with self.assertRaises(UnsupportedFeatureError):
+            adapter.place_live_order(order)
+        self.assertEqual(runtime_calls, [])
 
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(
                 PaperOrderRequest(
                     "seer",
@@ -760,6 +751,83 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 
+    def test_hyperliquid_signed_order_rejects_unbound_semantics_before_transport(self) -> None:
+        adapter = HyperliquidAdapter(
+            {"live_trading_enabled": True, "live_trading_confirmed": True}
+        )
+        runtime_calls = []
+
+        def unexpected_request(method: str, url: str, *, params=None, json_body=None, headers=None):
+            runtime_calls.append((method, url, params, json_body, headers))
+            raise AssertionError("invalid Hyperliquid signed order reached the runtime")
+
+        adapter.runtime.request_json = unexpected_request  # type: ignore[method-assign]
+        valid_wire = {
+            "a": 100000010,
+            "b": True,
+            "p": "0.63",
+            "s": "5",
+            "r": False,
+            "t": {"limit": {"tif": "Gtc"}},
+        }
+
+        def signed_payload(*, wire=None, orders=None, grouping="na", nonce=1788264000000):
+            selected_orders = orders if orders is not None else [wire or dict(valid_wire)]
+            return {
+                "action": {"type": "order", "orders": selected_orders, "grouping": grouping},
+                "nonce": nonce,
+                "signature": {"r": "0x1", "s": "0x2", "v": 27},
+            }
+
+        rejected_payloads = {
+            "second order": signed_payload(orders=[dict(valid_wire), dict(valid_wire)]),
+            "asset mismatch": signed_payload(wire={**valid_wire, "a": 100000011}),
+            "side mismatch": signed_payload(wire={**valid_wire, "b": False}),
+            "size mismatch": signed_payload(wire={**valid_wire, "s": "5.0000000001"}),
+            "nonfinite size": signed_payload(wire={**valid_wire, "s": "NaN"}),
+            "price mismatch": signed_payload(wire={**valid_wire, "p": "0.64"}),
+            "reduce only": signed_payload(wire={**valid_wire, "r": True}),
+            "trigger": signed_payload(
+                wire={
+                    **valid_wire,
+                    "t": {"trigger": {"isMarket": True, "triggerPx": "0.70", "tpsl": "sl"}},
+                }
+            ),
+            "non GTC": signed_payload(
+                wire={**valid_wire, "t": {"limit": {"tif": "Ioc"}}}
+            ),
+            "position grouping": signed_payload(grouping="positionTpsl"),
+            "extra order semantics": signed_payload(
+                wire={**valid_wire, "c": "0x1234567890abcdef1234567890abcdef"}
+            ),
+            "nonpositive nonce": signed_payload(nonce=0),
+        }
+        for label, payload in rejected_payloads.items():
+            with self.subTest(label=label), self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        "hyperliquid",
+                        "outcome:1:0",
+                        "BUY",
+                        5,
+                        0.63,
+                        {"signed_action": payload},
+                    )
+                )
+
+        with self.assertRaisesRegex(MarketConfigurationError, "explicit limit price"):
+            adapter.place_live_order(
+                PaperOrderRequest(
+                    "hyperliquid",
+                    "outcome:1:0",
+                    "BUY",
+                    5,
+                    None,
+                    {"signed_action": signed_payload()},
+                )
+            )
+        self.assertEqual(runtime_calls, [])
+
     def test_hyperliquid_guarded_order_management_validates_signed_exchange_actions(self) -> None:
         adapter = HyperliquidAdapter(
             {
@@ -772,8 +840,6 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         responses = {
             "cancel": load_fixture("hyperliquid", "cancel_response"),
             "cancelByCloid": load_fixture("hyperliquid", "cancel_response"),
-            "modify": load_fixture("hyperliquid", "modify_response"),
-            "batchModify": load_fixture("hyperliquid", "modify_response"),
             "scheduleCancel": load_fixture("hyperliquid", "schedule_cancel_response"),
         }
 
@@ -787,6 +853,21 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
         confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        self.assertEqual(
+            adapter.health_check()["order_management_operations"],
+            ["cancel_order", "cancel_orders", "cancel_by_cloid", "schedule_cancel"],
+        )
+        for unsupported_operation in ("modify_order", "batch_modify_orders"):
+            with self.subTest(operation=unsupported_operation), self.assertRaises(
+                MarketConfigurationError
+            ):
+                adapter.manage_orders(
+                    unsupported_operation,
+                    signed_action={},
+                    confirm_order_management=confirmation,
+                )
+        self.assertEqual(calls, [])
+
         cancel = {
             "action": {"type": "cancel", "cancels": [{"a": 100000010, "o": 123456}]},
             "nonce": 1788264000000,
@@ -818,48 +899,6 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter.manage_orders("cancel_by_cloid", signed_action=by_cloid, confirm_order_management=confirmation)
         self.assertEqual(calls[-1], by_cloid)
 
-        modify = {
-            "action": {
-                "type": "modify",
-                "oid": 123456,
-                "order": {
-                    "a": 100000010,
-                    "b": True,
-                    "p": "0.64",
-                    "s": "5",
-                    "r": False,
-                    "t": {"limit": {"tif": "Gtc"}},
-                },
-            },
-            "nonce": 1788264000003,
-            "signature": {"r": "0x7", "s": "0x8", "v": 27},
-        }
-        adapter.manage_orders("modify_order", signed_action=modify, confirm_order_management=confirmation)
-        self.assertEqual(calls[-1], modify)
-
-        batch_modify = {
-            "action": {
-                "type": "batchModify",
-                "modifies": [
-                    {
-                        "oid": 123456,
-                        "order": {
-                            "a": 100000010,
-                            "b": True,
-                            "p": "0.64",
-                            "s": "5",
-                            "r": False,
-                            "t": {"limit": {"tif": "Gtc"}},
-                        },
-                    }
-                ],
-            },
-            "nonce": 1788264000004,
-            "signature": {"r": "0x9", "s": "0xa", "v": 27},
-        }
-        adapter.manage_orders("batch_modify_orders", signed_action=batch_modify, confirm_order_management=confirmation)
-        self.assertEqual(calls[-1], batch_modify)
-
         schedule = {
             "action": {"type": "scheduleCancel", "time": int(time.time() * 1000) + 60_000},
             "nonce": 1788264000005,
@@ -872,6 +911,21 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             confirm_global_cancel="SCHEDULE HYPERLIQUID CANCEL",
         )
         self.assertEqual(calls[-1], schedule)
+
+        for unsafe_schedule in (
+            {**schedule, "action": {"type": "scheduleCancel"}},
+            {**schedule, "action": {"type": "scheduleCancel", "time": None}},
+            {**schedule, "action": {"type": "scheduleCancel", "time": int(time.time() * 1000) + 60_000, "extra": True}},
+        ):
+            with self.subTest(action=unsafe_schedule["action"]), self.assertRaises(
+                MarketConfigurationError
+            ):
+                adapter.manage_orders(
+                    "schedule_cancel",
+                    signed_action=unsafe_schedule,
+                    confirm_order_management=confirmation,
+                    confirm_global_cancel="SCHEDULE HYPERLIQUID CANCEL",
+                )
 
         with self.assertRaises(MarketConfigurationError):
             adapter.manage_orders("cancel_order", signed_action=cancel, confirm_order_management="wrong")
@@ -1098,7 +1152,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "trueo_live_transaction_targets": [fixture["transactionTo"]],
             }
         )
-        live.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        live_runtime_calls = []
+
+        def unexpected_live_runtime_call(method: str, url: str, *, params=None, json_body=None, headers=None):
+            live_runtime_calls.append((method, url, params, json_body, headers))
+            raise AssertionError("fail-closed Trueo live trading reached the runtime")
+
+        live.runtime.request_json = unexpected_live_runtime_call  # type: ignore[method-assign]
         reviewed_metadata = {
             "signed_transaction": fixture["signedTransaction"],
             "chain_id": fixture["transactionChainId"],
@@ -1111,15 +1171,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             "size": 1,
             "limit_price": 0.5,
         }
-        result = live.place_live_order(
-            PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, reviewed_metadata)
-        )
-        self.assertTrue(result["live"])
-        self.assertEqual(result["tx_hash"], fixture["transactionHash"])
-        self.assertEqual(result["chain_id"], fixture["transactionChainId"])
-        self.assertEqual(result["transaction_to"].lower(), fixture["transactionTo"].lower())
-        self.assertEqual(result["transaction_value"], fixture["transactionValue"])
-        self.assertEqual(result["calldata_selector"], fixture["transactionData"])
+        self.assertFalse(live.capabilities.live_trading)
+        with self.assertRaises(UnsupportedFeatureError):
+            live.place_live_order(
+                PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, reviewed_metadata)
+            )
+        self.assertEqual(live_runtime_calls, [])
 
         rejected_cases = {
             "chain": {**reviewed_metadata, "chain_id": 1},
@@ -1133,7 +1190,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             "limit_price": {**reviewed_metadata, "limit_price": 0.6},
         }
         for label, metadata in rejected_cases.items():
-            with self.subTest(label=label), self.assertRaises(MarketConfigurationError):
+            with self.subTest(label=label), self.assertRaises(UnsupportedFeatureError):
                 live.place_live_order(PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, metadata))
 
         without_allowlist = TrueoAdapter(
@@ -1143,12 +1200,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "trueo_submit_signed_transactions": True,
             }
         )
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             without_allowlist.place_live_order(
                 PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, reviewed_metadata)
             )
 
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             live.place_live_order(
                 PaperOrderRequest(
                     "trueo",
@@ -1509,7 +1566,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(orderbook.asks[0].price, 0.081747431863)
         self.assertEqual(orderbook.bids[0].size, 0.0)
         self.assertEqual(orderbook.asks[0].size, 0.0)
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(order)
 
     def test_metadao_public_maker_activity_supports_bounded_simulation_copy(self) -> None:
@@ -2032,12 +2089,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.list_trades(contract_id)
 
-    def test_metadao_guarded_live_order_forwards_reviewed_signed_router_transaction(self) -> None:
+    def test_metadao_signed_transaction_forwarding_is_fail_closed(self) -> None:
         tickers = load_fixture("metadao", "tickers")
         row = tickers[0]
         ticker_id = row["ticker_id"]
         router = "11111111111111111111111111111111"
-        signature = "1" * 64
         adapter = MetaDAOAdapter(
             {
                 "live_trading_enabled": True,
@@ -2047,20 +2103,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "metadao_router_program_ids": [router],
             }
         )
+        runtime_calls = []
 
         def fake_get_json(url: str, *, params=None, headers=None):
-            self.assertEqual(url, "https://market-api.metadao.fi/api/tickers")
-            self.assertEqual(headers, {})
-            self.assertIsNone(params)
-            return tickers
+            runtime_calls.append(("GET", url, params, headers))
+            raise AssertionError("fail-closed MetaDAO live trading reached the runtime")
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
-            self.assertEqual(method, "POST")
-            self.assertEqual(url, "https://rpc.example.invalid/metadao")
-            self.assertIsNone(params)
-            self.assertEqual(headers, {"Content-Type": "application/json"})
-            self.assertEqual(json_body["method"], "sendTransaction")
-            return {"jsonrpc": "2.0", "id": 1, "result": signature}
+            runtime_calls.append((method, url, params, json_body, headers))
+            raise AssertionError("fail-closed MetaDAO live trading reached the runtime")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
         adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
@@ -2079,13 +2130,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "instruction_data": "AQIDBA==",
             },
         )
-        result = adapter.place_live_order(order)
-        self.assertTrue(result["live"])
-        self.assertEqual(result["signature"], signature)
-        self.assertEqual(result["ticker_id"], ticker_id)
-        self.assertEqual(result["router_program_id"], router)
+        self.assertFalse(adapter.capabilities.live_trading)
+        with self.assertRaises(UnsupportedFeatureError):
+            adapter.place_live_order(order)
+        self.assertEqual(runtime_calls, [])
 
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(
                 PaperOrderRequest(
                     "metadao",
@@ -2099,7 +2149,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
     def test_thales_adapter_maps_amm_markets_prices_paper_orders_and_safety_gates(self) -> None:
         adapter = ThalesMarketAdapter()
-        self.assertTrue(adapter.capabilities.live_trading)
+        self.assertFalse(adapter.capabilities.live_trading)
         self.assertFalse(adapter.health_check()["live_trading_enabled"])
         self.assertTrue(adapter.health_check()["wallet_transaction_required"])
         markets = load_fixture("thales_market", "markets")
@@ -2135,14 +2185,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(order.contract_id)
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(order)
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 
         amm_address = "0x2222222222222222222222222222222222222222"
         signed = "0x" + ("11" * 32)
-        tx_hash = "0x" + ("aa" * 32)
         live_adapter = ThalesMarketAdapter(
             {
                 "thales_network": "10",
@@ -2157,35 +2206,31 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         def fake_request_json(method: str, url: str, *, json_body=None, headers=None, params=None):
             rpc_calls.append((method, url, json_body, headers, params))
-            return {"jsonrpc": "2.0", "id": 1, "result": tx_hash}
+            raise AssertionError("fail-closed Thales live trading reached the runtime")
 
         live_adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
-        live = live_adapter.place_live_order(
-            PaperOrderRequest(
-                "thales_market",
-                order.contract_id,
-                "BUY",
-                5,
-                0.57,
-                {
-                    "signed_transaction": signed,
-                    "transaction_to": amm_address,
-                    "chain_id": 10,
-                    "method": "buyFromAmm",
-                    "data": "0x12345678" + ("00" * 32),
-                    "market_address": address,
-                    "position": "UP",
-                },
+        with self.assertRaises(UnsupportedFeatureError):
+            live_adapter.place_live_order(
+                PaperOrderRequest(
+                    "thales_market",
+                    order.contract_id,
+                    "BUY",
+                    5,
+                    0.57,
+                    {
+                        "signed_transaction": signed,
+                        "transaction_to": amm_address,
+                        "chain_id": 10,
+                        "method": "buyFromAmm",
+                        "data": "0x12345678" + ("00" * 32),
+                        "market_address": address,
+                        "position": "UP",
+                    },
+                )
             )
-        )
-        self.assertTrue(live["live"])
-        self.assertEqual(live["tx_hash"], tx_hash)
-        self.assertEqual(live["method"], "buyFromAmm")
-        self.assertEqual(rpc_calls[0][0], "POST")
-        self.assertEqual(rpc_calls[0][2]["method"], "eth_sendRawTransaction")
-        self.assertEqual(rpc_calls[0][2]["params"], [signed])
+        self.assertEqual(rpc_calls, [])
 
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             live_adapter.place_live_order(
                 PaperOrderRequest(
                     "thales_market",
@@ -2476,6 +2521,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             {
                 "live_trading_enabled": True,
                 "live_trading_confirmed": True,
+                "context_trader_address": wallet,
                 "context_order_management_enabled": True,
             }
         )
@@ -2498,6 +2544,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             "side": 0,
             "price": "440000",
             "size": "5000000",
+            "expiry": "0",
+            "maxFee": "0",
+            "makerRoleConstraint": 0,
+            "inventoryModeConstraint": 0,
             "trader": "0x3333333333333333333333333333333333333333",
             "nonce": "0x1",
             "signature": "0x" + "ab" * 65,
@@ -2679,7 +2729,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             candle_adapter.list_candles(order.contract_id, from_timestamp=10, to_timestamp=9)
 
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(order)
 
         live_adapter = DFlowAdapter(
@@ -2694,25 +2744,22 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         def fake_request(method: str, url: str, *, params=None, json_body=None, headers=None, timeout=None):
             calls.append((method, url, params, json_body, headers, timeout))
-            return load_fixture("dflow", "rpc_response")
+            raise AssertionError("fail-closed DFlow live trading reached the runtime")
 
         live_adapter.runtime.request_json = fake_request  # type: ignore[method-assign]
         with patch.dict("os.environ", {"DFLOW_API_KEY": "dflow-key"}):
-            result = live_adapter.place_live_order(
-                PaperOrderRequest(
-                    "dflow",
-                    order.contract_id,
-                    "BUY",
-                    1,
-                    0.44,
-                    {"signed_transaction": "c2lnbmVk", "user_public_key": "wallet-1"},
+            with self.assertRaises(UnsupportedFeatureError):
+                live_adapter.place_live_order(
+                    PaperOrderRequest(
+                        "dflow",
+                        order.contract_id,
+                        "BUY",
+                        1,
+                        0.44,
+                        {"signed_transaction": "c2lnbmVk", "user_public_key": "wallet-1"},
+                    )
                 )
-            )
-        self.assertTrue(result["live"])
-        self.assertEqual(result["response"]["result"], "signature-123")
-        self.assertEqual(calls[0][0], "POST")
-        self.assertEqual(calls[0][1], "https://rpc.example")
-        self.assertEqual(calls[0][3]["method"], "sendTransaction")
+        self.assertEqual(calls, [])
 
         with self.assertRaises(MarketConfigurationError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})
@@ -2928,51 +2975,38 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 confirm_order_management=confirmation,
                 confirm_global_cancel="CANCEL ALL MATCHBOOK OFFERS",
             )
-            edited = adapter.manage_orders(
-                "edit_offer",
-                order_id=404,
-                current_odds=1.5,
-                new_odds=2.0,
-                current_stake=5,
-                new_stake=6,
-                confirm_order_management=confirmation,
-            )
-            edited_batch = adapter.manage_orders(
-                "edit_offers",
-                offers=[
-                    {
-                        "id": 404,
-                        "current-odds": 1.5,
-                        "new-odds": 2.0,
-                        "current-stake": 5,
-                        "new-stake": 6,
-                    }
-                ],
-                confirm_order_management=confirmation,
-            )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "edit_offer",
+                    order_id=404,
+                    current_odds=1.5,
+                    new_odds=2.0,
+                    current_stake=5,
+                    new_stake=6,
+                    confirm_order_management=confirmation,
+                )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "edit_offers",
+                    offers=[{"id": 404}],
+                    confirm_order_management=confirmation,
+                )
 
         self.assertTrue(cancelled["live"])
         self.assertEqual(cancelled["response"]["offers"][0]["status"], "cancelled")
         self.assertEqual(cancelled_batch["response"]["offers"][0]["id"], 404)
         self.assertEqual(cancelled_all["response"]["cancelled"], "all")
-        self.assertEqual(edited["request"]["body"]["new-odds"], 2.0)
-        self.assertEqual(edited_batch["request"]["body"]["offers"][0]["id"], 404)
         self.assertEqual(calls[0][0], "DELETE")
         self.assertTrue(calls[0][1].endswith("/v2/offers/404"))
         self.assertEqual(calls[1][2]["offer-ids"], "404,405")
         self.assertEqual(calls[2][0], "DELETE")
         self.assertEqual(calls[2][2], None)
-        self.assertEqual(calls[3][0], "PUT")
-        self.assertEqual(calls[3][3]["current-odds"], 1.5)
-        self.assertEqual(calls[4][0], "PUT")
-        self.assertEqual(calls[4][3]["offers"][0]["new-stake"], 6.0)
+        self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0][4]["session-token"], "session-123")
         self.assertEqual(adapter.health_check()["order_management_operations"], [
             "cancel_offer",
             "cancel_offers",
             "cancel_all_offers",
-            "edit_offer",
-            "edit_offers",
         ])
         with self.assertRaises(MarketConfigurationError):
             adapter.manage_orders("cancel_offers", offer_ids=[404, 404], confirm_order_management=confirmation)
@@ -3361,28 +3395,25 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         batch_adapter.runtime.session.request = fake_batch_request  # type: ignore[method-assign]
         confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
         with patch.dict("os.environ", {"XMARKET_API_KEY": "xmarket-key"}):
-            created = batch_adapter.manage_orders(
-                "batch_create_orders",
-                orders=[
-                    {"outcomeId": "outcome-yes", "side": "buy", "type": "limit", "price": 0.44, "quantity": 10},
-                    {"outcome_id": "outcome-no", "side": "sell", "type": "market", "quantity": 5},
-                ],
-                confirm_order_management=confirmation,
-            )
+            with self.assertRaises(MarketConfigurationError):
+                batch_adapter.manage_orders(
+                    "batch_create_orders",
+                    orders=[
+                        {"outcomeId": "outcome-yes", "side": "buy", "type": "limit", "price": 0.44, "quantity": 10},
+                    ],
+                    confirm_order_management=confirmation,
+                )
             cancelled = batch_adapter.manage_orders(
                 "batch_cancel_orders",
                 orders=["xorder-2", "xorder-3"],
                 confirm_order_management=confirmation,
             )
 
-        self.assertEqual(created["response"]["orders"][0]["id"], "xorder-2")
-        self.assertEqual(created["request"]["orders"][1], {"outcomeId": "outcome-no", "side": "sell", "type": "market", "quantity": 5.0})
         self.assertEqual(cancelled["response"]["cancelled"], ["xorder-2", "xorder-3"])
-        self.assertEqual([call[0] for call in batch_calls], ["POST", "POST"])
-        self.assertTrue(batch_calls[0][1].endswith("/openapi/v1/order/batch"))
-        self.assertTrue(batch_calls[1][1].endswith("/openapi/v1/order/cancel-batch"))
-        self.assertEqual(batch_calls[1][3], {"orderIds": ["xorder-2", "xorder-3"]})
-        self.assertEqual(batch_adapter.health_check()["order_management_operations"], ["batch_create_orders", "batch_cancel_orders"])
+        self.assertEqual([call[0] for call in batch_calls], ["POST"])
+        self.assertTrue(batch_calls[0][1].endswith("/openapi/v1/order/cancel-batch"))
+        self.assertEqual(batch_calls[0][3], {"orderIds": ["xorder-2", "xorder-3"]})
+        self.assertEqual(batch_adapter.health_check()["order_management_operations"], ["batch_cancel_orders"])
 
         with self.assertRaises(MarketConfigurationError):
             batch_adapter.manage_orders(
@@ -3850,25 +3881,24 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 confirm_global_cancel=global_confirmation,
                 confirm_order_management=confirmation,
             )
-            modified = adapter.manage_orders(
-                "batch_modify_orders",
-                modify={"cancel": [entry], "place": [{**entry, "time_in_force": "GTC"}]},
-                confirm_order_management=confirmation,
-            )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "batch_modify_orders",
+                    modify={"cancel": [entry], "place": [{**entry, "time_in_force": "GTC"}]},
+                    confirm_order_management=confirmation,
+                )
 
         self.assertEqual(cancelled["response"]["status"], "cancelled")
         self.assertEqual(batch["response"]["cancelled"], ["0x" + "12" * 32])
         self.assertEqual(global_cancel["response"]["cancelled_count"], 1)
-        self.assertEqual(modified["request"]["path"], "/orders/batch-modify")
         self.assertEqual(calls[0][0:2], ("DELETE", "/orders/0x" + "12" * 32))
         self.assertEqual(calls[1][0:2], ("POST", "/orders/cancel-batch"))
         self.assertEqual(calls[2][0:2], ("POST", "/orders/cancel-all"))
-        self.assertEqual(calls[3][0:2], ("POST", "/orders/batch-modify"))
         for call in calls:
             self.assertEqual(call[4]["x-api-key"], "myriad-key")
             self.assertRegex(call[4]["x-api-signature"], r"^[0-9a-f]{64}$")
         self.assertEqual(adapter.health_check()["order_management_operations"], [
-            "cancel_order", "batch_cancel_orders", "cancel_all_orders", "batch_modify_orders"
+            "cancel_order", "batch_cancel_orders", "cancel_all_orders"
         ])
         with self.assertRaises(MarketConfigurationError):
             adapter.manage_orders("cancel_order", order_hash="../private", instructions=entry, confirm_order_management=confirmation)
@@ -4241,7 +4271,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     "SELL",
                     3,
                     None,
-                    {"order_type": "market", "maker_amount_in_base_token": "3"},
+                    {"order_type": "market"},
                 )
             )
 
@@ -4998,36 +5028,31 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 instructions=[{"bet_id": "bet-1", "size_reduction": 1.25}],
                 customer_ref="cancel-1",
             )
-            updated = adapter.manage_orders(
-                "update_orders",
-                market_id="1.234",
-                instructions=[{"bet_id": "bet-1", "new_persistence_type": "persist"}],
-            )
-            replaced = adapter.manage_orders(
-                "replace_orders",
-                market_id="1.234",
-                instructions=[{"bet_id": "bet-1", "new_price": 2}],
-                market_version=7,
-                async_request=True,
-            )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "update_orders",
+                    market_id="1.234",
+                    instructions=[{"bet_id": "bet-1", "new_persistence_type": "persist"}],
+                )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "replace_orders",
+                    market_id="1.234",
+                    instructions=[{"bet_id": "bet-1", "new_price": 2}],
+                    market_version=7,
+                    async_request=True,
+                )
 
             with self.assertRaises(MarketConfigurationError):
                 adapter.manage_orders("cancel_orders", confirm_global_cancel="cancel all bets")
             global_cancel = adapter.manage_orders("cancel_orders", confirm_global_cancel="CANCEL ALL BETS")
 
         self.assertEqual(cancelled["response"]["status"], "SUCCESS")
-        self.assertEqual(updated["response"]["instructionReports"][0]["betId"], "bet-1")
-        self.assertEqual(replaced["request"]["marketVersion"], {"version": 7})
-        self.assertTrue(replaced["request"]["async"])
         self.assertEqual(global_cancel["request"], {})
         self.assertEqual(calls[0]["method"], "SportsAPING/v1.0/cancelOrders")
         self.assertEqual(calls[0]["params"]["instructions"], [{"betId": "bet-1", "sizeReduction": 1.25}])
-        self.assertEqual(calls[1]["method"], "SportsAPING/v1.0/updateOrders")
-        self.assertEqual(calls[1]["params"]["instructions"], [{"betId": "bet-1", "newPersistenceType": "PERSIST"}])
-        self.assertEqual(calls[2]["method"], "SportsAPING/v1.0/replaceOrders")
-        self.assertEqual(calls[2]["params"]["instructions"], [{"betId": "bet-1", "newPrice": 2.0}])
-        self.assertEqual(calls[3]["method"], "SportsAPING/v1.0/cancelOrders")
-        self.assertEqual(calls[3]["params"], {})
+        self.assertEqual(calls[1]["method"], "SportsAPING/v1.0/cancelOrders")
+        self.assertEqual(calls[1]["params"], {})
 
         disabled = BetfairExchangeAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         with self.assertRaises(MarketConfigurationError):

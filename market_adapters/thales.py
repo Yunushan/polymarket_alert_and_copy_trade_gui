@@ -159,11 +159,11 @@ class ThalesMarketAdapter(MarketAdapter):
                     "POST Thales positional-market subgraph optionTransactions",
                 ],
                 "public_api": True,
-                "live_trading_supported": True,
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
-                "signed_transaction_submission_enabled": self.config_bool(
-                    "thales_submit_signed_transactions", False
-                ),
+                "live_trading_supported": bool(self.capabilities.live_trading),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
+                "signed_transaction_submission_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("thales_submit_signed_transactions", False),
                 "wallet_transaction_required": True,
                 "collateral_required": True,
                 "settlement_required": True,

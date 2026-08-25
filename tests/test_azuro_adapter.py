@@ -56,7 +56,7 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
-        self.assertTrue(adapter.capabilities.live_trading)
+        self.assertFalse(adapter.capabilities.live_trading)
         self.assertTrue(adapter.capabilities.trade_history)
         self.assertTrue(adapter.capabilities.candle_history)
         self.assertFalse(adapter.capabilities.orderbook_reading)
@@ -290,10 +290,10 @@ class AzuroAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.websocket_connection_info()
 
-    def test_live_order_is_disabled_by_default(self) -> None:
+    def test_live_order_is_fail_closed_before_credentials_or_network(self) -> None:
         adapter = self.make_adapter()
 
-        with self.assertRaises(MarketConfigurationError) as ctx:
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(
                 PaperOrderRequest(
                     market_id="azuro",
@@ -304,12 +304,10 @@ class AzuroAdapterTests(unittest.TestCase):
                 )
             )
 
-        self.assertIn("disabled", str(ctx.exception))
-
-    def test_live_preflight_rejects_sell_before_credential_or_network_work(self) -> None:
+    def test_live_preflight_is_unsupported_even_when_configured(self) -> None:
         adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
 
-        with self.assertRaisesRegex(MarketConfigurationError, "one of: BUY"):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.preflight_live_order(
                 PaperOrderRequest(
                     market_id="azuro",
@@ -320,7 +318,7 @@ class AzuroAdapterTests(unittest.TestCase):
                 )
             )
 
-    def test_live_order_posts_pre_signed_official_order_payload_when_enabled(self) -> None:
+    def test_opaque_pre_signed_order_payload_is_not_forwarded(self) -> None:
         adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         client_bet_data = {
             "clientData": {
@@ -344,27 +342,23 @@ class AzuroAdapterTests(unittest.TestCase):
         }
 
         with patch.dict("os.environ", {"AZURO_BETTOR_ADDRESS": "0x0000000000000000000000000000000000000001"}):
-            result = adapter.place_live_order(
-                PaperOrderRequest(
-                    market_id="azuro",
-                    contract_id=f"{GAME_ID}:{CONDITION_ID}:29",
-                    side="BUY",
-                    size=10,
-                    limit_price=1.85,
-                    metadata={"client_bet_data": client_bet_data, "bettor_signature": "0xsigned"},
+            with self.assertRaises(UnsupportedFeatureError):
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        market_id="azuro",
+                        contract_id=f"{GAME_ID}:{CONDITION_ID}:29",
+                        side="BUY",
+                        size=10,
+                        limit_price=1.85,
+                        metadata={"client_bet_data": client_bet_data, "bettor_signature": "0xsigned"},
+                    )
                 )
-            )
-
-        self.assertEqual(result["response"]["id"], "order-1")
-        self.assertEqual(result["endpoint"], "/bet/orders/ordinar")
-        self.assertEqual(result["request"]["bettorSignature"], "0xsigned")
-        self.assertEqual(result["request"]["clientBetData"], client_bet_data)
 
     def test_live_order_requires_wallet_signed_payload_metadata(self) -> None:
         adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
 
         with patch.dict("os.environ", {"AZURO_BETTOR_ADDRESS": "0x0000000000000000000000000000000000000001"}):
-            with self.assertRaises(MarketConfigurationError) as ctx:
+            with self.assertRaises(UnsupportedFeatureError):
                 adapter.place_live_order(
                     PaperOrderRequest(
                         market_id="azuro",
@@ -375,7 +369,6 @@ class AzuroAdapterTests(unittest.TestCase):
                     )
                 )
 
-        self.assertIn("pre-signed", str(ctx.exception))
 
 
 if __name__ == "__main__":

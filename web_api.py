@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
     import tomli as tomllib
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
+from core.deployment_identity import capture_runtime_identity
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
@@ -959,13 +960,13 @@ def live_safety_payload(
 
 def format_live_preflight(preflight: Mapping[str, Any]) -> str:
     preview = str(preflight.get("dry_run_preview") or "Live order preflight passed.")
-    notional = preflight.get("approx_notional")
+    exposure = preflight.get("approx_notional")
     max_notional = preflight.get("max_notional")
     warnings = preflight.get("warnings") if isinstance(preflight.get("warnings"), list) else []
 
     parts = [f"Preflight OK: {preview}"]
-    if isinstance(notional, (int, float)):
-        parts.append(f"notional~{float(notional):g}")
+    if isinstance(exposure, (int, float)):
+        parts.append(f"max_exposure~{float(exposure):g}")
     if isinstance(max_notional, (int, float)):
         parts.append(f"max_notional={float(max_notional):g}")
     if warnings:
@@ -980,7 +981,11 @@ def live_order_audit_payload(order: PaperOrderRequest) -> Dict[str, Any]:
         "side": order.side,
         "size": order.size,
         "limit_price": order.limit_price,
-        "approx_notional": order.size * float(order.limit_price) if order.limit_price is not None else order.size,
+        # This initial audit record is produced before an adapter is selected.
+        # Use the shared fail-closed upper bound; successful preflight replaces
+        # it with the venue-specific exposure model in ``preflight``.
+        "approx_notional": order.size * max(1.0, float(order.limit_price or 0.0)),
+        "exposure_model": "full_size_upper_bound",
         "metadata_keys": sorted(str(key) for key in order.metadata.keys()),
     }
 
@@ -1067,11 +1072,18 @@ def config_payload(cfg: AppConfig) -> Dict[str, Any]:
     }
 
 
-def health_payload(config_path: Path = DEFAULT_CONFIG_PATH, frontend_dir: Path = DEFAULT_FRONTEND_DIR) -> Dict[str, Any]:
+def health_payload(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    frontend_dir: Path = DEFAULT_FRONTEND_DIR,
+    runtime_identity: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
     frontend_index = frontend_dir / "index.html"
+    identity = runtime_identity or {}
     return {
         "status": "ok",
         "api_version": project_version(),
+        "runtime_source_revision": str(identity.get("source_revision") or ""),
+        "runtime_frontend_sha256": str(identity.get("frontend_sha256") or ""),
         "mode": "parallel",
         "python_gui_available": True,
         "python_gui_command": PYTHON_GUI_COMMAND,
@@ -1104,10 +1116,11 @@ def app_state_payload(
     alert_price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
     wallet_polling: Optional[Mapping[str, Any]] = None,
     recent_wallet_activity: Optional[List[Dict[str, Any]]] = None,
+    runtime_identity: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     registry = registry or build_default_registry()
     return {
-        "health": health_payload(config_path, frontend_dir),
+        "health": health_payload(config_path, frontend_dir, runtime_identity),
         "config": config_payload(cfg),
         "markets": markets_payload(cfg, registry),
         "alerts": alerts_payload(cfg, registry, alert_price_state),
@@ -3181,7 +3194,11 @@ def copy_trade_preview_from_activity(
         limit_price=limit_price,
         metadata=order_metadata,
     )
-    approx_notional = order.size if buy_budget_activity else order.size * float(order.limit_price or 0.0)
+    approx_notional = (
+        order.size
+        if buy_budget_activity
+        else order.size * max(1.0, float(order.limit_price or 0.0))
+    )
     result: Dict[str, Any] = {
         "status": "live_preflight" if settings.live else "simulation",
         "live": bool(settings.live),
@@ -3193,6 +3210,7 @@ def copy_trade_preview_from_activity(
             "size": order.size,
             "limit_price": order.limit_price,
             "approx_notional": approx_notional,
+            "exposure_model": "full_size_upper_bound",
         },
         "pricing": {
             "raw_price": raw_price,
@@ -4531,12 +4549,14 @@ class ReactGuiServer(ThreadingHTTPServer):
                 "The frontend directory must resolve beneath the deployment resource root. "
                 f"Allowed root: {_RESOURCE_ROOT}"
             )
+        runtime_identity = capture_runtime_identity(PROJECT_ROOT, trusted_frontend_dir)
         super().__init__(server_address, request_handler_class)
         self.bind_host = bind_host
         self.is_loopback = is_loopback
         self.api_token = token
         self.config_path = config_path
         self.frontend_dir = trusted_frontend_dir
+        self.runtime_identity = runtime_identity
         # Static files are a deployment-time input. Build the immutable catalog
         # before serving requests so URL parsing never performs filesystem work.
         self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
@@ -4718,7 +4738,14 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             cfg = self._load_config()
             query_params = parse_qs(query, keep_blank_values=True)
             if path == "/api/health":
-                self._send_json(HTTPStatus.OK, health_payload(self.app_server.config_path, self.app_server.frontend_dir))
+                self._send_json(
+                    HTTPStatus.OK,
+                    health_payload(
+                        self.app_server.config_path,
+                        self.app_server.frontend_dir,
+                        self.app_server.runtime_identity,
+                    ),
+                )
                 return
             if path == "/api/state":
                 self._send_json(
@@ -4732,6 +4759,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                         self.app_server.alert_price_state,
                         self.app_server.wallet_polling,
                         self.app_server.wallet_recent_activity,
+                        self.app_server.runtime_identity,
                     ),
                 )
                 return

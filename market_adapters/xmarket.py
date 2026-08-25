@@ -34,7 +34,7 @@ XMARKET_REFERENCES = (
 XMARKET_ACCOUNT_OPERATIONS = ("positions", "user_orders", "market_orders")
 XMARKET_ACCOUNT_STATUSES = ("all", "open", "partially_filled", "filled", "cancelled", "expired")
 XMARKET_POSITION_STATUSES = ("open", "closed", "settled")
-XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
+XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_cancel_orders",)
 XMARKET_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 XMARKET_ORDER_MANAGEMENT_MAX_BATCH = 100
 XMARKET_HISTORY_MAX_LIMIT = 100
@@ -71,7 +71,6 @@ class XMarketAdapter(MarketAdapter):
                 "order_management_operations": list(self.order_management_operations),
                 "order_management_enabled": self.config_bool("xmarket_order_management_enabled", False),
                 "authenticated_order_management_endpoints": [
-                    "POST /order/batch",
                     "POST /order/cancel-batch",
                 ],
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
@@ -416,9 +415,10 @@ class XMarketAdapter(MarketAdapter):
     def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Run a guarded Xmarket batch order mutation.
 
-        Xmarket documents fixed authenticated ``POST /order/batch`` and
-        ``POST /order/cancel-batch`` endpoints.  Only those two operations are
-        exposed here; callers cannot provide an arbitrary path or method.
+        Xmarket documents fixed authenticated order creation and cancellation
+        endpoints. Only ``POST /order/cancel-batch`` is exposed here so order
+        management cannot increase exposure; callers cannot provide an
+        arbitrary path or method.
         """
 
         normalized = str(operation or "").strip().lower()
@@ -623,7 +623,9 @@ class XMarketAdapter(MarketAdapter):
     def _order_payload(self, order: PaperOrderRequest) -> Dict[str, Any]:
         _, outcome_id = self._split_contract_id(order.contract_id)
         side = str(order.side or "").strip().lower()
-        order_type = str(order.metadata.get("type") or ("limit" if order.limit_price is not None else "market")).lower()
+        order_type = "limit" if order.limit_price is not None else "market"
+        if "type" in order.metadata and str(order.metadata["type"]).strip().lower() != order_type:
+            raise MarketConfigurationError("Xmarket order type must match whether the reviewed order has a limit price.")
         payload: Dict[str, Any] = {
             "outcomeId": outcome_id,
             "side": side,

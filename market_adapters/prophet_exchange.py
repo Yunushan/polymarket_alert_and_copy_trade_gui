@@ -995,19 +995,21 @@ class ProphetExchangeAdapter(MarketAdapter):
         selection: Mapping[str, Any],
         require_strike: bool,
     ) -> Dict[str, Any]:
-        existing = order.metadata.get("prophet_exchange_order")
-        if isinstance(existing, Mapping):
-            return dict(existing)
+        if "prophet_exchange_order" in order.metadata:
+            raise MarketConfigurationError(
+                "Prophet Exchange live payloads are constructed from the reviewed order; "
+                "metadata.prophet_exchange_order is not accepted."
+            )
         probability = self._probability(order.limit_price)
         if probability is None:
             raise MarketConfigurationError("Prophet Exchange orders require a limit probability.")
-        strike_id = order.metadata.get("strike_id") or self._value(selection, "strike_id", "strikeId", "line_id", "lineId")
+        strike_id = self._value(selection, "strike_id", "strikeId", "line_id", "lineId")
         if require_strike and strike_id in (None, ""):
             raise MarketConfigurationError(
                 "Prophet Exchange live orders require the documented strike_id in the market payload or order metadata."
             )
         payload: Dict[str, Any] = {
-            "external_id": str(order.metadata.get("external_id") or uuid.uuid4().hex),
+            "external_id": uuid.uuid4().hex,
             "strike_id": str(strike_id or ""),
             "price": round(1.0 / probability, 8),
             "quantity": float(order.size),

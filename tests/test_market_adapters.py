@@ -199,6 +199,22 @@ HISTORY_CAPABILITIES = {
     "prophet_exchange": {"trade_history", "candle_history"},
 }
 
+FAIL_CLOSED_SIGNED_FORWARDERS = {
+    "azuro",
+    "dflow",
+    "gnosis_prediction_markets",
+    "hedgehog_markets",
+    "lamas_finance",
+    "metadao",
+    "omen",
+    "seer",
+    "thales_market",
+    "trueo",
+    "zeitgeist",
+    "zeitgeist_prediction_pools",
+    "zeitgeist_sdk_markets",
+}
+
 
 class DummyAdapter(MarketAdapter):
     metadata = MarketMetadata(
@@ -428,6 +444,151 @@ class AdapterFoundationTests(unittest.TestCase):
         for market_id in MARKET_IDS:
             with self.subTest(market_id=market_id):
                 self.assertEqual(capability_contract_issues(registry.create(market_id)), ())
+
+    def test_opaque_signed_transaction_forwarders_fail_closed_before_runtime_calls(self) -> None:
+        registry = build_default_registry()
+
+        def runtime_guard():
+            calls = []
+
+            def unexpected_runtime_call(*args, **kwargs):
+                calls.append((args, kwargs))
+                raise AssertionError("fail-closed live trading reached the adapter runtime")
+
+            return calls, unexpected_runtime_call
+
+        for market_id in FAIL_CLOSED_SIGNED_FORWARDERS:
+            with self.subTest(market_id=market_id):
+                adapter = registry.create(
+                    market_id,
+                    {"live_trading_enabled": True, "live_trading_confirmed": True},
+                )
+                runtime_calls, unexpected_runtime_call = runtime_guard()
+
+                adapter.runtime.request_json = unexpected_runtime_call  # type: ignore[method-assign]
+                adapter.runtime.get_json = unexpected_runtime_call  # type: ignore[method-assign]
+                contract_id = (
+                    "0x0000000000000000000000000000000000000001:0"
+                    if market_id == "trueo"
+                    else "contract-1"
+                )
+
+                with self.assertRaises(UnsupportedFeatureError) as ctx:
+                    adapter.place_live_order(
+                        PaperOrderRequest(market_id, contract_id, "BUY", 1.0, 0.5)
+                    )
+
+                self.assertEqual(ctx.exception.market_id, market_id)
+                self.assertEqual(ctx.exception.feature, "live_trading")
+                self.assertEqual(runtime_calls, [])
+
+        self.assertTrue(registry.create("zetarium_world").capabilities.live_trading)
+
+    def test_non_live_catalog_adapters_cannot_report_live_submission_health(self) -> None:
+        registry = build_default_registry()
+        config = {
+            "live_trading_enabled": True,
+            "live_trading_confirmed": True,
+            "gnosis_submit_signed_transactions": True,
+            "hedgehog_submit_signed_transactions": True,
+            "lamas_finance_submit_signed_transactions": True,
+            "metadao_submit_signed_transactions": True,
+            "omen_submit_signed_transactions": True,
+            "seer_submit_signed_transactions": True,
+            "thales_submit_signed_transactions": True,
+            "trueo_submit_signed_transactions": True,
+            "zeitgeist_submit_signed_extrinsics": True,
+        }
+
+        for market_id in MARKET_IDS:
+            with self.subTest(market_id=market_id):
+                adapter = registry.create(market_id, config)
+                if adapter.capabilities.live_trading:
+                    continue
+                health = adapter.health_check()
+
+                self.assertFalse(adapter.capabilities.live_trading)
+                self.assertFalse(health.get("live_trading_supported", False))
+                self.assertFalse(health.get("live_trading_enabled", False))
+                self.assertFalse(health.get("signed_transaction_submission_enabled", False))
+                self.assertFalse(health.get("signed_extrinsic_submission_enabled", False))
+
+    def test_order_management_health_inventories_exclude_removed_mutations(self) -> None:
+        registry = build_default_registry()
+        expected = {
+            "betfair_exchange": (
+                "order_management_endpoints",
+                ["cancelOrders"],
+            ),
+            "hyperliquid": (
+                "authenticated_order_management_endpoints",
+                [
+                    "POST /exchange action.cancel/cancelByCloid",
+                    "POST /exchange action.scheduleCancel",
+                ],
+            ),
+            "myriad_markets": (
+                "authenticated_order_management_endpoints",
+                [
+                    "/orders/{orderHash}",
+                    "/orders/cancel-batch",
+                    "/orders/cancel-all",
+                ],
+            ),
+            "xmarket": (
+                "authenticated_order_management_endpoints",
+                ["POST /order/cancel-batch"],
+            ),
+        }
+
+        for market_id, (health_key, endpoints) in expected.items():
+            with self.subTest(market_id=market_id):
+                adapter = registry.create(market_id)
+                self.assertEqual(adapter.health_check()[health_key], endpoints)
+
+    def test_budget_buy_preflight_uses_collateral_size_for_notional_limit(self) -> None:
+        adapter_cases = (
+            (ManifoldAdapter, "manifold", "market:YES"),
+            (MyriadAdapter, "myriad_markets", "501:1"),
+        )
+        config = {
+            "live_trading_enabled": True,
+            "live_trading_confirmed": True,
+            "live_trading_max_notional": 25,
+        }
+
+        for adapter_cls, market_id, contract_id in adapter_cases:
+            with self.subTest(market_id=market_id):
+                adapter = adapter_cls(config)
+                with self.assertRaises(MarketConfigurationError):
+                    adapter.preflight_live_order(
+                        PaperOrderRequest(market_id, contract_id, "BUY", 100, 0.2)
+                    )
+
+                preview = adapter.preflight_live_order(
+                    PaperOrderRequest(market_id, contract_id, "BUY", 20, 0.2)
+                )
+                self.assertEqual(preview["approx_notional"], 20)
+
+    def test_default_live_preflight_uses_full_size_as_conservative_exposure(self) -> None:
+        class ShareSizedLiveAdapter(MarketAdapter):
+            metadata = MarketMetadata(
+                market_id="share_sized_live",
+                display_name="Share-sized Live",
+                capabilities=MarketCapabilities(live_trading=True),
+            )
+
+        adapter = ShareSizedLiveAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_notional": 25,
+            }
+        )
+        with self.assertRaisesRegex(MarketConfigurationError, "notional 100 exceeds configured max 25"):
+            adapter.preflight_live_order(
+                PaperOrderRequest("share_sized_live", "contract-1", "BUY", 100, 0.2)
+            )
 
     def test_alert_capability_requires_normalized_price_reading(self) -> None:
         class AlertWithoutPriceAdapter(MarketAdapter):

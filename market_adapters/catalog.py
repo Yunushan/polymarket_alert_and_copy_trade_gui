@@ -237,7 +237,9 @@ AZURO_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Signed clientBetData is opaque to this adapter, so the wire market,
+    # outcome, stake, and odds cannot yet be bound to shared preflight.
+    live_trading=False,
     copy_trading=True,
     api_required=True,
     credentials_required=False,
@@ -269,7 +271,9 @@ OMEN_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Externally signed transactions cannot yet be decoded and bound to the
+    # reviewed FPMM order, so submission is fail-closed.
+    live_trading=False,
     # Public FPMMTrade.creator rows support bounded, simulation-first wallet
     # activity previews; no live copy submission is performed.
     copy_trading=True,
@@ -286,9 +290,9 @@ ZEITGEIST_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    # Guarded forwarding of an operator-reviewed, externally signed
-    # HybridRouter Substrate extrinsic; signing and settlement remain external.
-    live_trading=True,
+    # Externally signed extrinsics cannot yet be decoded and bound to the
+    # reviewed HybridRouter order, so submission is fail-closed.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -482,7 +486,9 @@ THALES_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Externally signed transactions cannot yet be decoded and bound to the
+    # reviewed order, so submission is fail-closed.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -592,7 +598,9 @@ HEDGEHOG_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Externally signed Solana transactions cannot yet be decoded and bound
+    # to the reviewed DepositV1 order, so submission is fail-closed.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -877,8 +885,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://thalesmarket.io",
         description=(
             "Official Thales Markets REST adapter for public AMM market discovery, positional prices, "
-            "quote-backed paper orders, alerts, and account-scoped positions/option transactions; live wallet "
-            "transactions remain explicitly guarded."
+            "quote-backed paper orders, alerts, and account-scoped positions/option transactions. Live "
+            "submission is fail-closed until signed calldata can be decoded and bound to the reviewed order."
         ),
         capabilities=THALES_CAPABILITIES,
     ),
@@ -888,8 +896,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://hedgehog.markets",
         description=(
             "Official Hedgehog HPL Parimutuel/Eclipse adapter for on-chain MarketV1 discovery, pooled outcome "
-            "prices, alerts, and dry-run DepositV1 intents; CLOB depth, wallet-signed live execution, and copy "
-            "trading remain disabled."
+            "prices, alerts, and dry-run DepositV1 intents. Live submission is fail-closed until every signed "
+            "Solana instruction can be decoded and bound to the reviewed deposit; CLOB depth and copy trading remain disabled."
         ),
         capabilities=HEDGEHOG_CAPABILITIES,
     ),
@@ -897,21 +905,21 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="omen",
         display_name="Omen",
         homepage_url="https://omen.eth.limo",
-        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, public FPMM trades, the bounded `activity` account operation for creator-scoped wallet rows, bounded derived candles, simulation-first copy previews, alerts, paper orders, and guarded externally signed live transactions.",
+        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, public FPMM trades, the bounded `activity` account operation for creator-scoped wallet rows, bounded derived candles, simulation-first copy previews, alerts, and paper orders. Live submission is fail-closed until signed calldata can be decoded and bound to the reviewed FPMM order.",
         capabilities=OMEN_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="zeitgeist",
         display_name="Zeitgeist",
         homepage_url="https://zeitgeist.pm",
-        description="Official Zeitgeist Subsquid/indexer adapter for market discovery, outcome asset prices, alerts, and paper orders.",
+        description="Official Zeitgeist Subsquid/indexer adapter for market discovery, outcome asset prices, alerts, and paper orders. Live submission is fail-closed until the signed extrinsic can be decoded and bound to the reviewed HybridRouter order.",
         capabilities=ZEITGEIST_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="azuro",
         display_name="Azuro",
         homepage_url="https://azuro.org",
-        description="Official Azuro V3 backend/feed API adapter for games, conditions, odds, bettor-scoped single-bet activity, simulation-first copy previews, WebSocket subscriptions, dry-run bets, and guarded pre-signed live order posting.",
+        description="Official Azuro V3 backend/feed API adapter for games, conditions, odds, bettor-scoped single-bet activity, simulation-first copy previews, WebSocket subscriptions, and dry-run bets. Live posting is fail-closed until signed clientBetData can be decoded and bound to the reviewed order.",
         capabilities=AZURO_CAPABILITIES,
     ),
     MarketMetadata(

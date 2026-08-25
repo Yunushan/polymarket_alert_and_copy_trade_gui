@@ -285,7 +285,7 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
 
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(f"{OMEN_FPMM_ID}:0")
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(
                 PaperOrderRequest(market_id="omen", contract_id=f"{OMEN_FPMM_ID}:0", side="BUY", size=1)
             )
@@ -459,7 +459,7 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(MarketConfigurationError, "token scale was not indexed"):
             adapter.list_trades(f"{OMEN_FPMM_ID}:0", limit=1)
 
-    def test_omen_guarded_live_order_forwards_reviewed_signed_fpmm_transaction(self) -> None:
+    def test_omen_signed_transaction_forwarding_is_fail_closed(self) -> None:
         adapter = self.make_omen(
             {
                 "omen_rpc_url": "https://rpc.example.test/omen",
@@ -468,24 +468,30 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
                 "omen_submit_signed_transactions": True,
             }
         )
-        result = adapter.place_live_order(
-            PaperOrderRequest(
-                market_id="omen",
-                contract_id=f"{OMEN_FPMM_ID}:0",
-                side="BUY",
-                size=1,
-                metadata={
-                    "signed_transaction": "0x" + "cd" * 96,
-                    "transaction_to": OMEN_FPMM_ID,
-                    "method": "buy",
-                    "outcome_index": 0,
-                    "data": "0x12345678",
-                },
+        runtime_calls = []
+
+        def unexpected_runtime_call(*args, **kwargs):
+            runtime_calls.append((args, kwargs))
+            raise AssertionError("fail-closed Omen live trading reached the runtime")
+
+        adapter.runtime.request_json = unexpected_runtime_call  # type: ignore[method-assign]
+        with self.assertRaises(UnsupportedFeatureError):
+            adapter.place_live_order(
+                PaperOrderRequest(
+                    market_id="omen",
+                    contract_id=f"{OMEN_FPMM_ID}:0",
+                    side="BUY",
+                    size=1,
+                    metadata={
+                        "signed_transaction": "0x" + "cd" * 96,
+                        "transaction_to": OMEN_FPMM_ID,
+                        "method": "buy",
+                        "outcome_index": 0,
+                        "data": "0x12345678",
+                    },
+                )
             )
-        )
-        self.assertTrue(result["live"])
-        self.assertEqual(result["submission"], "evm_rpc_eth_sendRawTransaction")
-        self.assertEqual(result["tx_hash"], "0x" + "ab" * 32)
+        self.assertEqual(runtime_calls, [])
 
     def test_gnosis_prediction_markets_alias_uses_official_omen_schema(self) -> None:
         adapter = self.make_gnosis()
@@ -533,7 +539,7 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
 
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(f"{OMEN_FPMM_ID}:0")
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(
                 PaperOrderRequest(
                     market_id="gnosis_prediction_markets",
@@ -574,12 +580,12 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(f"{ZEITGEIST_MARKET_ID}:0")
 
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(
                 PaperOrderRequest(market_id="zeitgeist", contract_id=f"{ZEITGEIST_MARKET_ID}:0", side="BUY", size=1)
             )
 
-    def test_zeitgeist_guarded_live_order_forwards_reviewed_hybrid_router_extrinsic(self) -> None:
+    def test_zeitgeist_signed_extrinsic_forwarding_is_fail_closed(self) -> None:
         adapter = self.make_zeitgeist(
             {
                 "zeitgeist_rpc_url": "https://rpc.example.test/zeitgeist",
@@ -588,32 +594,37 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
                 "zeitgeist_submit_signed_extrinsics": True,
             }
         )
-        result = adapter.place_live_order(
-            PaperOrderRequest(
-                market_id="zeitgeist",
-                contract_id=f"{ZEITGEIST_MARKET_ID}:0",
-                side="BUY",
-                size=1,
-                metadata={
-                    "pallet": "HybridRouter",
-                    "call": "buy",
-                    "market_id": 90,
-                    "outcome_index": 0,
-                    "asset": "CategoricalOutcome:90:0",
-                    "asset_count": 2,
-                    "amount_in": "1000000",
-                    "max_price": "900000",
-                    "orders": [1, 3],
-                    "strategy": "ImmediateOrCancel",
-                    "runtime_spec_version": 57,
-                    "signed_extrinsic": "0x" + "ab" * 128,
-                },
+        runtime_calls = []
+
+        def unexpected_runtime_call(*args, **kwargs):
+            runtime_calls.append((args, kwargs))
+            raise AssertionError("fail-closed Zeitgeist live trading reached the runtime")
+
+        adapter.runtime.request_json = unexpected_runtime_call  # type: ignore[method-assign]
+        with self.assertRaises(UnsupportedFeatureError):
+            adapter.place_live_order(
+                PaperOrderRequest(
+                    market_id="zeitgeist",
+                    contract_id=f"{ZEITGEIST_MARKET_ID}:0",
+                    side="BUY",
+                    size=1,
+                    metadata={
+                        "pallet": "HybridRouter",
+                        "call": "buy",
+                        "market_id": 90,
+                        "outcome_index": 0,
+                        "asset": "CategoricalOutcome:90:0",
+                        "asset_count": 2,
+                        "amount_in": "1000000",
+                        "max_price": "900000",
+                        "orders": [1, 3],
+                        "strategy": "ImmediateOrCancel",
+                        "runtime_spec_version": 57,
+                        "signed_extrinsic": "0x" + "ab" * 128,
+                    },
+                )
             )
-        )
-        self.assertTrue(result["live"])
-        self.assertEqual(result["submission"], "substrate_rpc_author_submitExtrinsic")
-        self.assertEqual(result["extrinsic_hash"], "0x" + "12" * 32)
-        self.assertEqual(result["call"], "buy")
+        self.assertEqual(runtime_calls, [])
 
     def test_zeitgeist_sdk_markets_alias_uses_explicit_indexer_configuration(self) -> None:
         adapter = ZeitgeistSdkMarketsAdapter({"zeitgeist_sdk_indexer_url": "https://example.test/zeitgeist-sdk"})
@@ -659,7 +670,7 @@ class LegacyWeb3AdapterTests(unittest.TestCase):
         self.assertEqual(health["alias_of"], "zeitgeist")
         self.assertTrue(health["pool_schema_supported"])
         self.assertFalse(health["pool_settlement_supported"])
-        self.assertTrue(adapter.capabilities.live_trading)
+        self.assertFalse(adapter.capabilities.live_trading)
         self.assertEqual(events[0].raw["pool"]["poolId"], 17)
         self.assertEqual(contracts[0].raw["market"]["pool"]["poolId"], 17)
         self.assertAlmostEqual(price.last or 0, 0.8076745721806113)

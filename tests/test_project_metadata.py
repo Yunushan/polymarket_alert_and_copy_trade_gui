@@ -4,6 +4,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from scripts.verify_python_dist_artifacts import REQUIRED_SDIST_MEMBERS
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 compatibility.
@@ -121,18 +123,33 @@ class ProjectMetadataTests(unittest.TestCase):
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
 
         for fragment in (
+            "include requirements-bootstrap.lock",
+            "include requirements-security.lock",
             "recursive-include .github",
             "recursive-include assets",
             "recursive-include data",
             "recursive-include docs",
             "recursive-include frontend",
             "recursive-include scripts",
-            "recursive-include tests",
+            "recursive-include tests *.csv *.json *.py *.txt",
             "prune frontend/dist",
             "prune frontend/node_modules",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, manifest)
+
+        self.assertTrue(
+            {
+                "requirements-bootstrap.lock",
+                "requirements-bootstrap.txt",
+                "requirements-build.txt",
+                "requirements-security.lock",
+                "requirements-security.txt",
+                "tests/fixtures/hypermind/outcomes.txt",
+                "tests/fixtures/hypermind/prices.csv",
+                "tests/fixtures/iowa_electronic_markets/powell_price_data.txt",
+            }.issubset(REQUIRED_SDIST_MEMBERS)
+        )
 
 
 if __name__ == "__main__":

@@ -375,7 +375,7 @@ class KalshiAdapterTests(unittest.TestCase):
         self.assertTrue(headers["KALSHI-ACCESS-SIGNATURE"])
         self.assertTrue(headers["KALSHI-ACCESS-TIMESTAMP"].isdigit())
 
-    def test_order_management_uses_guarded_v2_mutation_endpoints(self) -> None:
+    def test_order_management_allows_only_non_increasing_v2_mutations(self) -> None:
         adapter = KalshiAdapter(
             {
                 "live_trading_enabled": True,
@@ -391,7 +391,6 @@ class KalshiAdapterTests(unittest.TestCase):
         fixtures = {
             "DELETE /portfolio/events/orders/order-kalshi-1": load_fixture("cancel_order_response"),
             "DELETE /portfolio/events/orders/batched": load_fixture("batch_cancel_orders_response"),
-            "POST /portfolio/events/orders/order-kalshi-1/amend": load_fixture("amend_order_response"),
             "POST /portfolio/events/orders/order-kalshi-1/decrease": load_fixture("decrease_order_response"),
         }
         calls = []
@@ -426,17 +425,16 @@ class KalshiAdapterTests(unittest.TestCase):
             orders=[{"order_id": "order-kalshi-1"}, {"order_id": "order-kalshi-2", "subaccount": 1}],
             confirm_order_management=confirmation,
         )
-        amended = adapter.manage_orders(
-            "amend_order",
-            order_id="order-kalshi-1",
-            ticker="KXFED-26MAY-TARGET-425",
-            side="bid",
-            price=0.44,
-            count=8,
-            client_order_id="client-kalshi-1",
-            updated_client_order_id="client-kalshi-1-updated",
-            confirm_order_management=confirmation,
-        )
+        with self.assertRaisesRegex(MarketConfigurationError, "must be one of"):
+            adapter.manage_orders(
+                "amend_order",
+                order_id="order-kalshi-1",
+                ticker="KXFED-26MAY-TARGET-425",
+                side="bid",
+                price=0.44,
+                count=8,
+                confirm_order_management=confirmation,
+            )
         decreased = adapter.manage_orders(
             "decrease_order",
             order_id="order-kalshi-1",
@@ -446,7 +444,6 @@ class KalshiAdapterTests(unittest.TestCase):
 
         self.assertEqual(cancelled["response"]["order_id"], "order-kalshi-1")
         self.assertEqual(batch["response"]["orders"][1]["order_id"], "order-kalshi-2")
-        self.assertEqual(amended["response"]["client_order_id"], "client-kalshi-1-updated")
         self.assertEqual(decreased["response"]["remaining_count"], "5.00")
         self.assertEqual(calls[0][0:3], ("DELETE", "/portfolio/events/orders/order-kalshi-1", {"subaccount": 0, "exchange_index": 0}))
         self.assertEqual(calls[1][0:3], ("DELETE", "/portfolio/events/orders/batched", {}))
@@ -454,19 +451,8 @@ class KalshiAdapterTests(unittest.TestCase):
             calls[1][3],
             {"orders": [{"order_id": "order-kalshi-1"}, {"order_id": "order-kalshi-2", "subaccount": 1}]},
         )
-        self.assertEqual(calls[2][0:3], ("POST", "/portfolio/events/orders/order-kalshi-1/amend", {}))
-        self.assertEqual(
-            calls[2][3],
-            {
-                "ticker": "KXFED-26MAY-TARGET-425",
-                "side": "bid",
-                "price": "0.4400",
-                "count": "8.00",
-                "client_order_id": "client-kalshi-1",
-                "updated_client_order_id": "client-kalshi-1-updated",
-            },
-        )
-        self.assertEqual(calls[3][3], {"reduce_by": "5.00"})
+        self.assertEqual(calls[2][0:3], ("POST", "/portfolio/events/orders/order-kalshi-1/decrease", {}))
+        self.assertEqual(calls[2][3], {"reduce_by": "5.00"})
 
     def test_order_management_requires_opt_in_confirmation_and_strict_shapes(self) -> None:
         disabled = KalshiAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})

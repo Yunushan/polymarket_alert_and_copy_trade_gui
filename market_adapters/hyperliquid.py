@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import math
 import re
 import time
@@ -52,8 +53,6 @@ HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
     "cancel_orders",
     "cancel_by_cloid",
-    "modify_order",
-    "batch_modify_orders",
     "schedule_cancel",
 )
 HYPERLIQUID_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
@@ -140,7 +139,6 @@ class HyperliquidAdapter(MarketAdapter):
                 "order_management_enabled": self.config_bool("hyperliquid_order_management_enabled", False),
                 "authenticated_order_management_endpoints": [
                     "POST /exchange action.cancel/cancelByCloid",
-                    "POST /exchange action.modify/batchModify",
                     "POST /exchange action.scheduleCancel",
                 ],
             }
@@ -510,13 +508,14 @@ class HyperliquidAdapter(MarketAdapter):
         raise MarketConfigurationError(f"Hyperliquid account recovery operation must be one of: {supported}.")
 
     def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
-        """Forward a reviewed, externally signed Hyperliquid order action.
+        """Forward a reviewed, externally signed Hyperliquid cancellation action.
 
-        Hyperliquid exposes cancellation and modification through the fixed
-        ``POST /exchange`` route.  The app never signs these actions and never
-        accepts an arbitrary exchange action: callers must provide the complete
-        signed envelope and the operation-specific action type is validated
-        locally before the request is sent.
+        Hyperliquid exposes cancellation through the fixed ``POST /exchange``
+        route.  The app never signs these actions and never accepts an arbitrary
+        exchange action: callers must provide the complete signed envelope and
+        the operation-specific action type is validated locally before the
+        request is sent. Risk-increasing modify actions are intentionally not
+        exposed because they do not pass through live-order exposure preflight.
         """
 
         normalized = str(operation or "").strip().lower()
@@ -814,28 +813,77 @@ class HyperliquidAdapter(MarketAdapter):
     def _validate_signed_payload(
         self, payload: Mapping[str, Any], outcome_id: str, side: int, order: PaperOrderRequest
     ) -> None:
+        if order.limit_price is None:
+            raise MarketConfigurationError(
+                "Hyperliquid signed live orders require an explicit limit price."
+            )
+
+        allowed_envelope_fields = {"action", "nonce", "signature", "vaultAddress", "expiresAfter"}
+        if set(payload) - allowed_envelope_fields:
+            raise MarketConfigurationError(
+                "Hyperliquid signed_action contains unsupported envelope fields."
+            )
+        if "vaultAddress" in payload and payload.get("vaultAddress") is not None:
+            raise MarketConfigurationError(
+                "Hyperliquid signed live orders do not accept unbound vaultAddress routing."
+            )
+        if payload.get("expiresAfter") not in (None, ""):
+            self._positive_integer(
+                payload.get("expiresAfter"), "Hyperliquid signed-action expiresAfter"
+            )
+
         action = payload.get("action")
         if not isinstance(action, Mapping) or action.get("type") != "order":
             raise MarketConfigurationError("Hyperliquid signed_action.action.type must be 'order'.")
+        if set(action) != {"type", "orders", "grouping"}:
+            raise MarketConfigurationError(
+                "Hyperliquid signed order action must contain only type, orders, and grouping."
+            )
+        if action.get("grouping") != "na":
+            raise MarketConfigurationError(
+                "Hyperliquid signed order grouping must be 'na'."
+            )
         orders = action.get("orders")
-        if not isinstance(orders, list) or not orders or not isinstance(orders[0], Mapping):
-            raise MarketConfigurationError("Hyperliquid signed_action.action.orders must contain an order.")
+        if not isinstance(orders, list) or len(orders) != 1 or not isinstance(orders[0], Mapping):
+            raise MarketConfigurationError(
+                "Hyperliquid signed_action.action.orders must contain exactly one order."
+            )
         wire = orders[0]
+        if set(wire) != {"a", "b", "p", "s", "r", "t"}:
+            raise MarketConfigurationError(
+                "Hyperliquid signed order contains unsupported order semantics."
+            )
         expected_asset = self._asset_id(outcome_id, side)
-        if int(wire.get("a", -1)) != expected_asset:
+        wire_asset = wire.get("a")
+        if isinstance(wire_asset, bool) or not isinstance(wire_asset, int) or wire_asset != expected_asset:
             raise MarketConfigurationError("Hyperliquid signed order asset does not match the selected outcome side.")
         expected_buy = str(order.side).upper() == "BUY"
-        if bool(wire.get("b")) != expected_buy:
+        if not isinstance(wire.get("b"), bool) or wire.get("b") != expected_buy:
             raise MarketConfigurationError("Hyperliquid signed order side does not match the selected order side.")
-        try:
-            signed_size = float(wire.get("s"))
-        except (TypeError, ValueError) as exc:
-            raise MarketConfigurationError("Hyperliquid signed order size must be numeric.") from exc
-        if not math.isclose(signed_size, float(order.size), rel_tol=0.0, abs_tol=1e-9):
+        if self._wire_decimal(wire.get("s"), "Hyperliquid signed order size") != Decimal(
+            str(order.size)
+        ):
             raise MarketConfigurationError("Hyperliquid signed order size does not match the requested size.")
+        if self._wire_decimal(wire.get("p"), "Hyperliquid signed order price") != Decimal(
+            str(order.limit_price)
+        ):
+            raise MarketConfigurationError(
+                "Hyperliquid signed order price does not match the requested limit price."
+            )
+        if wire.get("r") is not False:
+            raise MarketConfigurationError("Hyperliquid signed order must not be reduce-only.")
+        order_type = wire.get("t")
+        if not isinstance(order_type, Mapping) or set(order_type) != {"limit"}:
+            raise MarketConfigurationError(
+                "Hyperliquid signed order type must be a canonical GTC limit order."
+            )
+        limit = order_type.get("limit")
+        if not isinstance(limit, Mapping) or set(limit) != {"tif"} or limit.get("tif") != "Gtc":
+            raise MarketConfigurationError(
+                "Hyperliquid signed order type must be a canonical GTC limit order."
+            )
         self._validate_signature(payload.get("signature"))
-        if payload.get("nonce") in (None, ""):
-            raise MarketConfigurationError("Hyperliquid signed_action must include a signature and nonce.")
+        self._positive_integer(payload.get("nonce"), "Hyperliquid signed-action nonce")
 
     def _validate_management_envelope(self, payload: Any, operation: str) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
@@ -860,8 +908,6 @@ class HyperliquidAdapter(MarketAdapter):
             "cancel_order": "cancel",
             "cancel_orders": "cancel",
             "cancel_by_cloid": "cancelByCloid",
-            "modify_order": "modify",
-            "batch_modify_orders": "batchModify",
             "schedule_cancel": "scheduleCancel",
         }[operation]
         if action_type != expected:
@@ -870,38 +916,34 @@ class HyperliquidAdapter(MarketAdapter):
             )
 
         if action_type == "cancel":
+            if set(action) != {"type", "cancels"}:
+                raise MarketConfigurationError(
+                    "Hyperliquid cancel actions must contain only type and cancels."
+                )
             cancels = self._validate_cancel_entries(action.get("cancels"), by_cloid=False)
             if operation == "cancel_order" and len(cancels) != 1:
                 raise MarketConfigurationError("Hyperliquid cancel_order requires exactly one cancel entry.")
             if operation == "cancel_orders" and not cancels:
                 raise MarketConfigurationError("Hyperliquid cancel_orders requires at least one cancel entry.")
         elif action_type == "cancelByCloid":
+            if set(action) != {"type", "cancels"}:
+                raise MarketConfigurationError(
+                    "Hyperliquid cancel-by-cloid actions must contain only type and cancels."
+                )
             cancels = self._validate_cancel_entries(action.get("cancels"), by_cloid=True)
             if not cancels:
                 raise MarketConfigurationError("Hyperliquid cancel_by_cloid requires at least one cancel entry.")
-        elif action_type == "modify":
-            if not isinstance(action.get("order"), Mapping):
-                raise MarketConfigurationError("Hyperliquid modify_order requires a signed order object.")
-            self._order_reference(action.get("oid"), "modify oid")
-            self._validate_modify_order(action.get("order"))
-        elif action_type == "batchModify":
-            modifies = action.get("modifies")
-            if not isinstance(modifies, list) or not modifies:
-                raise MarketConfigurationError("Hyperliquid batch_modify_orders requires a non-empty modifies array.")
-            if len(modifies) > HYPERLIQUID_ORDER_MANAGEMENT_MAX_BATCH:
-                raise MarketConfigurationError(
-                    f"Hyperliquid batch_modify_orders is capped at {HYPERLIQUID_ORDER_MANAGEMENT_MAX_BATCH} orders."
-                )
-            for entry in modifies:
-                self._validate_modify_entry(entry)
         else:
             schedule_time = action.get("time")
-            if schedule_time not in (None, ""):
-                schedule_time = self._positive_integer(schedule_time, "Hyperliquid schedule cancel time")
-                if schedule_time < int(time.time() * 1000) + 5_000:
-                    raise MarketConfigurationError(
-                        "Hyperliquid schedule cancel time must be at least five seconds in the future."
-                    )
+            if set(action) != {"type", "time"} or schedule_time in (None, ""):
+                raise MarketConfigurationError(
+                    "Hyperliquid schedule_cancel requires an explicit future time; clearing the dead-man switch is unavailable."
+                )
+            schedule_time = self._positive_integer(schedule_time, "Hyperliquid schedule cancel time")
+            if schedule_time < int(time.time() * 1000) + 5_000:
+                raise MarketConfigurationError(
+                    "Hyperliquid schedule cancel time must be at least five seconds in the future."
+                )
         return envelope
 
     @staticmethod
@@ -947,58 +989,17 @@ class HyperliquidAdapter(MarketAdapter):
             entries.append(entry)
         return entries
 
-    def _validate_modify_entry(self, value: Any) -> Dict[str, Any]:
-        if not isinstance(value, Mapping):
-            raise MarketConfigurationError("Hyperliquid modify entries must be objects.")
-        oid = self._order_reference(value.get("oid"), "modify oid")
-        order = self._validate_modify_order(value.get("order"))
-        return {"oid": oid, "order": order}
-
-    def _validate_modify_order(self, value: Any) -> Dict[str, Any]:
-        if not isinstance(value, Mapping):
-            raise MarketConfigurationError("Hyperliquid modify order must be an object.")
-        asset = self._hip4_asset(value.get("a"))
-        if not isinstance(value.get("b"), bool) or not isinstance(value.get("r"), bool):
-            raise MarketConfigurationError("Hyperliquid modify order b and r fields must be booleans.")
-        price = self._probability(value.get("p"))
-        if price is None:
-            raise MarketConfigurationError("Hyperliquid modify order price must be between 0 and 1.")
-        size = self._required_positive_number(value.get("s"), "Hyperliquid modify order size")
-        order_type = value.get("t")
-        if not isinstance(order_type, Mapping):
-            raise MarketConfigurationError("Hyperliquid modify order type must be a limit or trigger object.")
-        normalized_type: Dict[str, Any]
-        if isinstance(order_type.get("limit"), Mapping):
-            tif = str(order_type["limit"].get("tif") or "").strip()
-            if tif not in {"Alo", "Ioc", "Gtc"}:
-                raise MarketConfigurationError("Hyperliquid modify limit tif must be Alo, Ioc, or Gtc.")
-            normalized_type = {"limit": {"tif": tif}}
-        elif isinstance(order_type.get("trigger"), Mapping):
-            trigger = order_type["trigger"]
-            if not isinstance(trigger.get("isMarket"), bool):
-                raise MarketConfigurationError("Hyperliquid trigger isMarket must be boolean.")
-            trigger_price = self._probability(trigger.get("triggerPx"))
-            if trigger_price is None:
-                raise MarketConfigurationError("Hyperliquid trigger price must be between 0 and 1.")
-            tpsl = str(trigger.get("tpsl") or "").strip().lower()
-            if tpsl not in {"tp", "sl"}:
-                raise MarketConfigurationError("Hyperliquid trigger tpsl must be tp or sl.")
-            normalized_type = {
-                "trigger": {"isMarket": bool(trigger["isMarket"]), "triggerPx": str(trigger_price), "tpsl": tpsl}
-            }
-        else:
-            raise MarketConfigurationError("Hyperliquid modify order type must contain limit or trigger.")
-        normalized: Dict[str, Any] = {
-            "a": asset,
-            "b": bool(value["b"]),
-            "p": str(price),
-            "s": str(size),
-            "r": bool(value["r"]),
-            "t": normalized_type,
-        }
-        if value.get("c") not in (None, ""):
-            normalized["c"] = self._cloid(value.get("c"), "modify cloid")
-        return normalized
+    @staticmethod
+    def _wire_decimal(value: Any, label: str) -> Decimal:
+        if not isinstance(value, str) or not value.strip():
+            raise MarketConfigurationError(f"{label} must be a decimal string.")
+        try:
+            number = Decimal(value.strip())
+        except InvalidOperation as exc:
+            raise MarketConfigurationError(f"{label} must be a decimal string.") from exc
+        if not number.is_finite() or number <= 0:
+            raise MarketConfigurationError(f"{label} must be positive and finite.")
+        return number
 
     @staticmethod
     def _positive_integer(value: Any, label: str) -> int:
@@ -1011,13 +1012,6 @@ class HyperliquidAdapter(MarketAdapter):
         if number <= 0 or number > 2**63 - 1 or str(value).strip() != str(number):
             raise MarketConfigurationError(f"{label} must be a positive integer.")
         return number
-
-    @classmethod
-    def _order_reference(cls, value: Any, label: str) -> Any:
-        text = str(value or "").strip()
-        if HYPERLIQUID_CLOID_RE.fullmatch(text):
-            return text
-        return cls._positive_integer(text, label)
 
     @classmethod
     def _cloid(cls, value: Any, label: str) -> str:

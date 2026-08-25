@@ -38,6 +38,29 @@ CONTEXT_REFERENCES = (
 CONTEXT_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
 CONTEXT_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 CONTEXT_ORDER_MANAGEMENT_MAX_BATCH = 20
+CONTEXT_SIGNED_ORDER_FIELDS = frozenset(
+    {
+        "type",
+        "marketId",
+        "outcomeIndex",
+        "side",
+        "price",
+        "size",
+        "expiry",
+        "maxFee",
+        "makerRoleConstraint",
+        "inventoryModeConstraint",
+        "trader",
+        "nonce",
+        "signature",
+    }
+)
+CONTEXT_NEUTRAL_ORDER_FIELDS = (
+    "expiry",
+    "maxFee",
+    "makerRoleConstraint",
+    "inventoryModeConstraint",
+)
 
 
 class ContextV2Adapter(MarketAdapter):
@@ -60,6 +83,11 @@ class ContextV2Adapter(MarketAdapter):
         credential = self.resolve_credential(
             "context_api_key", ("CONTEXT_API_KEY",), label="CONTEXT_API_KEY"
         )
+        trader = self.resolve_credential(
+            "context_trader_address",
+            ("CONTEXT_TRADER_ADDRESS",),
+            label="CONTEXT_TRADER_ADDRESS",
+        )
         health.update(
             {
                 "api_base_url": self.api_base_url,
@@ -71,6 +99,11 @@ class ContextV2Adapter(MarketAdapter):
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "signed_order_required": True,
                 "private_key_handling": "external_wallet_only",
+                "trusted_trader_configured": bool(trader),
+                "signed_order_policy": {
+                    "allowed_fields": sorted(CONTEXT_SIGNED_ORDER_FIELDS),
+                    "neutral_zero_fields": list(CONTEXT_NEUTRAL_ORDER_FIELDS),
+                },
                 "order_management_operations": list(self.order_management_operations),
                 "order_management_enabled": self.config_bool("context_order_management_enabled", False),
                 "order_management_max_batch": CONTEXT_ORDER_MANAGEMENT_MAX_BATCH,
@@ -687,6 +720,7 @@ class ContextV2Adapter(MarketAdapter):
         expected_price = round(price * 1_000_000)
         expected_size = round(size * 1_000_000)
         if signed:
+            trusted_trader = self._trusted_trader_address()
             self._validate_signed_order_binding(
                 payload,
                 market_id=market_id,
@@ -694,7 +728,9 @@ class ContextV2Adapter(MarketAdapter):
                 side=expected_side,
                 price=expected_price,
                 size=expected_size,
+                trader=trusted_trader,
             )
+            return payload
         payload.setdefault("type", "limit")
         payload.setdefault("marketId", market_id)
         payload.setdefault("outcomeIndex", outcome_index)
@@ -705,24 +741,7 @@ class ContextV2Adapter(MarketAdapter):
         payload.setdefault("maxFee", "0")
         payload.setdefault("makerRoleConstraint", 0)
         payload.setdefault("inventoryModeConstraint", 0)
-        payload.setdefault("nonce", str(order.metadata.get("nonce") or "0x0"))
-        if signed:
-            trader = str(payload.get("trader") or order.metadata.get("trader") or "").strip()
-            signature = str(payload.get("signature") or order.metadata.get("signature") or "").strip()
-            if not trader or not signature:
-                raise MarketConfigurationError(
-                    "Context live orders require signed payload fields 'trader' and 'signature'."
-                )
-            cls_trader = trader[2:] if trader.startswith("0x") else ""
-            if len(cls_trader) != 40 or any(
-                character not in "0123456789abcdefABCDEF" for character in cls_trader
-            ):
-                raise MarketConfigurationError(
-                    "Context signed order trader must be a 20-byte 0x-prefixed address."
-                )
-            self._validate_hex_signature(signature)
-            payload["trader"] = trader
-            payload["signature"] = signature
+        payload.setdefault("nonce", "0x0")
         return payload
 
     @classmethod
@@ -735,19 +754,33 @@ class ContextV2Adapter(MarketAdapter):
         side: int,
         price: int,
         size: int,
+        trader: str,
     ) -> None:
-        """Reject a signature whose economic fields differ from preflight."""
+        """Reject signed fields that are not bound to preflight or trusted policy."""
 
-        order_type = payload.get("type")
-        if order_type not in (None, "") and str(order_type).strip().lower() != "limit":
+        unknown = sorted(str(field) for field in payload if field not in CONTEXT_SIGNED_ORDER_FIELDS)
+        if unknown:
             raise MarketConfigurationError(
-                "Context signed order type does not match the preflighted limit order."
+                "Context signed order contains unsupported fields: " + ", ".join(unknown) + "."
             )
+
         required_fields = ("marketId", "outcomeIndex", "side", "price", "size")
         missing = [field for field in required_fields if payload.get(field) in (None, "")]
         if missing:
             raise MarketConfigurationError(
                 "Context signed order is missing preflight-bound fields: " + ", ".join(missing) + "."
+            )
+        remaining_required = sorted(CONTEXT_SIGNED_ORDER_FIELDS.difference(required_fields))
+        missing = [field for field in remaining_required if payload.get(field) in (None, "")]
+        if missing:
+            raise MarketConfigurationError(
+                "Context signed order is missing required signed fields: " + ", ".join(missing) + "."
+            )
+
+        order_type = payload.get("type")
+        if order_type != "limit":
+            raise MarketConfigurationError(
+                "Context signed order type does not match the preflighted limit order."
             )
         if not cls._identifiers_match(payload["marketId"], market_id):
             raise MarketConfigurationError(
@@ -763,16 +796,73 @@ class ContextV2Adapter(MarketAdapter):
                 raise MarketConfigurationError(
                     f"Context signed order {label} does not match the preflighted order."
                 )
+        for field in CONTEXT_NEUTRAL_ORDER_FIELDS:
+            value = payload.get(field)
+            if value not in (None, "") and cls._wire_integer(
+                value,
+                f"signed order {field}",
+            ) != 0:
+                raise MarketConfigurationError(
+                    f"Context signed order {field} must be zero under the guarded live-order policy."
+                )
+
+        actual_trader = str(payload.get("trader") or "").strip()
+        if not actual_trader:
+            raise MarketConfigurationError("Context signed order requires trader.")
+        cls._validate_trader_address(actual_trader, "Context signed order trader")
+        if not cls._identifiers_match(actual_trader, trader):
+            raise MarketConfigurationError(
+                "Context signed order trader does not match the trusted configured trader."
+            )
+        cls._validate_nonce(payload.get("nonce"), "Context signed order nonce")
+        cls._validate_hex_signature(payload.get("signature"))
+
+    def _trusted_trader_address(self) -> str:
+        credential = self.resolve_credential(
+            "context_trader_address",
+            ("CONTEXT_TRADER_ADDRESS",),
+            required=True,
+            label="CONTEXT_TRADER_ADDRESS",
+        )
+        assert credential is not None
+        trader = str(credential.value).strip()
+        self._validate_trader_address(trader, "Context trusted trader")
+        return trader
+
+    @staticmethod
+    def _validate_trader_address(value: Any, label: str) -> None:
+        trader = str(value or "").strip()
+        body = trader[2:] if trader.startswith("0x") else ""
+        if len(body) != 40 or any(
+            character not in "0123456789abcdefABCDEF" for character in body
+        ):
+            raise MarketConfigurationError(
+                f"{label} must be a 20-byte 0x-prefixed address."
+            )
+
+    @staticmethod
+    def _validate_nonce(value: Any, label: str) -> str:
+        nonce = str(value or "").strip()
+        body = nonce[2:] if nonce.startswith("0x") else ""
+        if (
+            not body
+            or len(body) > 64
+            or any(character not in "0123456789abcdefABCDEF" for character in body)
+        ):
+            raise MarketConfigurationError(
+                f"{label} must be a 1- to 32-byte 0x-prefixed hexadecimal value."
+            )
+        return nonce
 
     @staticmethod
     def _validate_hex_signature(value: Any) -> None:
         signature = str(value or "").strip()
         body = signature[2:] if signature.startswith("0x") else ""
-        if not body or len(body) % 2 or any(
+        if len(body) != 130 or any(
             character not in "0123456789abcdefABCDEF" for character in body
         ):
             raise MarketConfigurationError(
-                "Context signed order signature must be an even-length 0x-prefixed hexadecimal value."
+                "Context signed order signature must be a 65-byte 0x-prefixed hexadecimal value."
             )
 
     @classmethod
@@ -780,13 +870,8 @@ class ContextV2Adapter(MarketAdapter):
         if not isinstance(value, Mapping):
             raise MarketConfigurationError(f"{label} must be a JSON object with trader, nonce, and signature.")
         trader = str(value.get("trader") or "").strip()
-        trader_body = trader[2:] if trader.startswith("0x") else ""
-        if len(trader_body) != 40 or any(character not in "0123456789abcdefABCDEF" for character in trader_body):
-            raise MarketConfigurationError(f"{label} trader must be a 20-byte 0x-prefixed address.")
-        nonce = str(value.get("nonce") or "").strip()
-        nonce_body = nonce[2:] if nonce.startswith("0x") else ""
-        if not nonce_body or any(character not in "0123456789abcdefABCDEF" for character in nonce_body):
-            raise MarketConfigurationError(f"{label} nonce must be a non-empty 0x-prefixed hexadecimal value.")
+        cls._validate_trader_address(trader, f"{label} trader")
+        nonce = cls._validate_nonce(value.get("nonce"), f"{label} nonce")
         signature = str(value.get("signature") or "").strip()
         cls._validate_hex_signature(signature)
         return {"trader": trader, "nonce": nonce, "signature": signature}

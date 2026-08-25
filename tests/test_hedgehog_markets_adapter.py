@@ -56,7 +56,7 @@ class HedgehogMarketsAdapterTests(unittest.TestCase):
         self.assertFalse(adapter.capabilities.orderbook_reading)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
-        self.assertTrue(adapter.capabilities.live_trading)
+        self.assertFalse(adapter.capabilities.live_trading)
         self.assertFalse(adapter.capabilities.copy_trading)
 
     def test_program_accounts_contracts_prices_and_paper_intent(self) -> None:
@@ -93,12 +93,12 @@ class HedgehogMarketsAdapterTests(unittest.TestCase):
             adapter.place_paper_order(PaperOrderRequest("hedgehog_markets", "../outside:0", "BUY", 1))
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(f"{FIRST_MARKET}:0")
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(PaperOrderRequest("hedgehog_markets", f"{FIRST_MARKET}:0", "BUY", 1))
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({})
 
-    def test_guarded_live_order_submits_reviewed_deposit_intent(self) -> None:
+    def test_signed_transaction_forwarding_is_fail_closed(self) -> None:
         adapter, calls = self.make_adapter(
             {
                 "live_trading_enabled": True,
@@ -109,33 +109,29 @@ class HedgehogMarketsAdapterTests(unittest.TestCase):
         amount_raw = 2_500_000
         instruction_data = bytes([4, 1]) + amount_raw.to_bytes(8, "little")
         signed = base64.b64encode(b"x" * 96).decode("ascii")
-        result = adapter.place_live_order(
-            PaperOrderRequest(
-                "hedgehog_markets",
-                f"{FIRST_MARKET}:1",
-                "BUY",
-                2.5,
-                0.3,
-                {
-                    "signed_transaction": signed,
-                    "program_id": adapter.program_id,
-                    "instruction": "DepositV1",
-                    "market_account": FIRST_MARKET,
-                    "option": 1,
-                    "amount_raw": amount_raw,
-                    "instruction_data": instruction_data.hex(),
-                },
+        with self.assertRaises(UnsupportedFeatureError):
+            adapter.place_live_order(
+                PaperOrderRequest(
+                    "hedgehog_markets",
+                    f"{FIRST_MARKET}:1",
+                    "BUY",
+                    2.5,
+                    0.3,
+                    {
+                        "signed_transaction": signed,
+                        "program_id": adapter.program_id,
+                        "instruction": "DepositV1",
+                        "market_account": FIRST_MARKET,
+                        "option": 1,
+                        "amount_raw": amount_raw,
+                        "instruction_data": instruction_data.hex(),
+                    },
+                )
             )
-        )
-        self.assertTrue(result["live"])
-        self.assertEqual(result["submission"], "solana_rpc_sendTransaction")
-        self.assertEqual(result["amount_raw"], amount_raw)
-        self.assertEqual(result["signed_transaction_bytes"], 96)
-        request = next(item for item in calls if item[2]["method"] == "sendTransaction")
-        self.assertEqual(request[2]["params"][1], {"encoding": "base64", "skipPreflight": False})
+        self.assertEqual(calls, [])
 
     def test_guarded_live_order_rejects_unreviewed_metadata(self) -> None:
-        adapter, _ = self.make_adapter(
+        adapter, calls = self.make_adapter(
             {
                 "live_trading_enabled": True,
                 "live_trading_confirmed": True,
@@ -143,7 +139,7 @@ class HedgehogMarketsAdapterTests(unittest.TestCase):
             }
         )
         signed = base64.b64encode(b"x" * 96).decode("ascii")
-        with self.assertRaises(MarketConfigurationError):
+        with self.assertRaises(UnsupportedFeatureError):
             adapter.place_live_order(
                 PaperOrderRequest(
                     "hedgehog_markets",
@@ -161,6 +157,7 @@ class HedgehogMarketsAdapterTests(unittest.TestCase):
                     },
                 )
             )
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

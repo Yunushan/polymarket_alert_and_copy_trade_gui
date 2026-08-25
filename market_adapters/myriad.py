@@ -32,7 +32,6 @@ MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
     "batch_cancel_orders",
     "cancel_all_orders",
-    "batch_modify_orders",
 )
 MYRIAD_POSITION_INTENT_OPERATIONS = (
     "split",
@@ -109,7 +108,6 @@ class MyriadAdapter(MarketAdapter):
                     "/orders/{orderHash}",
                     "/orders/cancel-batch",
                     "/orders/cancel-all",
-                    "/orders/batch-modify",
                 ],
             }
         )

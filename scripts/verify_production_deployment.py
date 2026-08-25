@@ -6,6 +6,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -16,9 +18,33 @@ from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.deployment_identity import (
+    SHA256_HEX,
+    frontend_tree_sha256,
+    git_top_level_matches,
+    safe_git_command,
+    safe_git_environment,
+)
+
 if __package__:
+    from scripts.restore_state_backup import (
+        DEFAULT_MAX_ARCHIVE_BYTES,
+        DEFAULT_MAX_MEMBERS,
+        DEFAULT_MAX_UNCOMPRESSED_BYTES,
+        catalog_verified_backups,
+    )
     from scripts.verify_service_health import check_health
 else:  # Supports the documented `python /path/to/scripts/verify_production_deployment.py` invocation.
+    from restore_state_backup import (
+        DEFAULT_MAX_ARCHIVE_BYTES,
+        DEFAULT_MAX_MEMBERS,
+        DEFAULT_MAX_UNCOMPRESSED_BYTES,
+        catalog_verified_backups,
+    )
     from verify_service_health import check_health
 
 try:
@@ -55,13 +81,20 @@ REQUIRED_PROXY_HEADER_VALUES = {
 }
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+DEFAULT_BACKUP_DIRECTORY = Path("/var/lib/market-sentinel-backups")
 EVIDENCE_SCHEMA_VERSION = 1
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_PRIVATE_PATHS = (
     (Path("/etc/market-sentinel/market-sentinel.env"), S_IFREG, True),
     (Path("/var/lib/market-sentinel"), S_IFDIR, False),
-    (Path("/var/lib/market-sentinel-backups"), S_IFDIR, False),
+    (DEFAULT_BACKUP_DIRECTORY, S_IFDIR, False),
+)
+PUBLIC_PROXY_AUTH_PROBES = (
+    ("GET", ""),
+    ("GET", "api/health"),
+    ("GET", "api/state"),
+    ("GET", "metrics"),
+    ("PATCH", "api/config"),
 )
 
 
@@ -82,26 +115,71 @@ def source_identity(root: Path = PROJECT_ROOT) -> dict[str, str]:
         pass
 
     revision = ""
+    revision_status = "unavailable"
+    worktree_status = "unavailable"
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
+        trusted_root = root.resolve(strict=True)
+        environment = safe_git_environment()
+        top_level_result = subprocess.run(
+            safe_git_command(trusted_root, "rev-parse", "--show-toplevel"),
+            cwd=trusted_root,
             capture_output=True,
             text=True,
             check=False,
             timeout=10,
-            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+            env=environment,
         )
-        candidate = result.stdout.strip().lower()
-        if result.returncode == 0 and COMMIT_SHA.fullmatch(candidate):
-            revision = candidate
-    except (OSError, subprocess.TimeoutExpired):
+        if top_level_result.returncode == 0 and git_top_level_matches(trusted_root, top_level_result.stdout):
+            before_result = subprocess.run(
+                safe_git_command(trusted_root, "rev-parse", "--verify", "HEAD^{commit}"),
+                cwd=trusted_root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+                env=environment,
+            )
+            before = before_result.stdout.strip().lower()
+            before_valid = before_result.returncode == 0 and COMMIT_SHA.fullmatch(before)
+        else:
+            revision_status = "invalid"
+            before = ""
+            before_valid = False
+        if before_valid:
+            status_result = subprocess.run(
+                safe_git_command(trusted_root, "status", "--porcelain=v1", "--untracked-files=all"),
+                cwd=trusted_root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+                env=environment,
+            )
+            if status_result.returncode == 0:
+                after_result = subprocess.run(
+                    safe_git_command(trusted_root, "rev-parse", "--verify", "HEAD^{commit}"),
+                    cwd=trusted_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                    env=environment,
+                )
+                after = after_result.stdout.strip().lower()
+                if after_result.returncode == 0 and COMMIT_SHA.fullmatch(after) and before == after:
+                    revision = before
+                    revision_status = "ok"
+                    worktree_status = "clean" if not status_result.stdout.strip() else "dirty"
+                else:
+                    revision_status = "invalid"
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
         pass
 
     return {
         "project_version": project_version,
         "git_revision": revision,
-        "git_revision_status": "ok" if revision else "unavailable",
+        "git_revision_status": revision_status,
+        "git_worktree_status": worktree_status,
     }
 
 
@@ -118,6 +196,13 @@ def check_source_revision(
             "detail": "--expected-source-revision must be a lowercase 40-character Git commit",
         }
     identity = source if source is not None else source_identity()
+    revision_status = identity.get("git_revision_status", "unavailable").strip().lower()
+    if revision_status != "ok":
+        return {
+            "name": "source_revision",
+            "status": "fail",
+            "detail": f"deployed Git revision identity is {revision_status or 'unavailable'}",
+        }
     actual = identity.get("git_revision", "").strip().lower()
     if actual != expected:
         return {
@@ -125,10 +210,21 @@ def check_source_revision(
             "status": "fail",
             "detail": f"deployed Git revision is {actual or 'unavailable'}, expected {expected}",
         }
+    worktree_status = identity.get("git_worktree_status", "unavailable").strip().lower()
+    if worktree_status != "clean":
+        return {
+            "name": "source_revision",
+            "status": "fail",
+            "detail": (
+                "deployed source checkout is not clean "
+                f"(git_worktree_status={worktree_status or 'unavailable'}); "
+                "tracked, staged, and untracked source changes are not release evidence"
+            ),
+        }
     return {
         "name": "source_revision",
         "status": "pass",
-        "detail": f"deployed Git revision matches {expected}",
+        "detail": f"deployed Git revision matches {expected} and the checkout is clean",
     }
 
 
@@ -144,10 +240,16 @@ def _systemd_timestamp_seconds(value: str) -> float:
 
 def check_filesystem_permissions(
     stat_reader: Callable[[Path], object] = lambda path: path.lstat(),
+    *,
+    backup_directory: Path = DEFAULT_BACKUP_DIRECTORY,
 ) -> list[dict[str, Any]]:
+    required_paths = (
+        *REQUIRED_PRIVATE_PATHS[:-1],
+        (Path(backup_directory), S_IFDIR, False),
+    )
     return [
         _check_private_path(path, expected_type, require_root_owner, stat_reader)
-        for path, expected_type, require_root_owner in REQUIRED_PRIVATE_PATHS
+        for path, expected_type, require_root_owner in required_paths
     ]
 
 
@@ -246,12 +348,143 @@ def check_systemd(
     return checks
 
 
-def check_loopback(url: str, token: str, timeout: float, expected_version: str = "") -> dict[str, Any]:
+def check_backup_evidence(
+    backup_directory: Path,
+    *,
+    clock: Callable[[], float] = time.time,
+    stat_reader: Callable[[Path], object] = lambda path: path.lstat(),
+) -> dict[str, Any]:
+    """Require a recent, bounded, cryptographically verified state backup."""
+    backup_directory = Path(backup_directory)
+    base = {
+        "name": "verified_recent_state_backup",
+        "directory": str(backup_directory),
+    }
+    if not backup_directory.is_absolute():
+        return {
+            **base,
+            "status": "fail",
+            "detail": "trusted backup directory must be an absolute path",
+        }
+    symlinked_component = next(
+        (path for path in (backup_directory, *backup_directory.parents) if path.is_symlink()),
+        None,
+    )
+    if symlinked_component is not None:
+        return {
+            **base,
+            "status": "fail",
+            "detail": f"refusing symbolic-link backup path component: {symlinked_component}",
+        }
+    directory_check = _check_private_path(backup_directory, S_IFDIR, False, stat_reader)
+    if directory_check["status"] != "pass":
+        return {
+            **base,
+            "status": "fail",
+            "detail": f"backup directory is not a trusted private directory: {directory_check['detail']}",
+        }
+
+    try:
+        catalog = catalog_verified_backups(
+            backup_directory,
+            max_members=DEFAULT_MAX_MEMBERS,
+            max_bytes=DEFAULT_MAX_UNCOMPRESSED_BYTES,
+            max_archive_bytes=DEFAULT_MAX_ARCHIVE_BYTES,
+        )
+    except (OSError, RuntimeError, ValueError, tarfile.TarError) as exc:
+        return {**base, "status": "fail", "detail": str(exc)}
+
+    observed_at = clock()
+    for backup in catalog.verified:
+        age_seconds = observed_at - backup.created_at.timestamp()
+        if -BACKUP_MAX_FUTURE_SKEW_SECONDS <= age_seconds <= BACKUP_MAX_AGE_SECONDS:
+            manifest = backup.manifest
+            return {
+                **base,
+                "status": "pass",
+                "archive": backup.archive_path.name,
+                "created_at": backup.created_at.isoformat().replace("+00:00", "Z"),
+                "backup_age_seconds": round(age_seconds),
+                "sha256": manifest["sha256"],
+                "file_count": manifest["file_count"],
+                "verified_archive_bytes": manifest["verified_archive_bytes"],
+                "verified_tar_bytes": manifest["verified_tar_bytes"],
+                "verified_bytes": manifest["verified_bytes"],
+                "verified_pairs": len(catalog.verified),
+                "invalid_pairs": len(catalog.invalid_pairs),
+                "orphan_archives": len(catalog.orphan_archives),
+                "orphan_manifests": len(catalog.orphan_manifests),
+                "detail": "archive checksum, manifest, member paths, types, counts, and size bounds verified",
+            }
+
+    return {
+        **base,
+        "status": "fail",
+        "verified_pairs": len(catalog.verified),
+        "invalid_pairs": len(catalog.invalid_pairs),
+        "orphan_archives": len(catalog.orphan_archives),
+        "orphan_manifests": len(catalog.orphan_manifests),
+        "detail": (
+            "no cryptographically verified backup pair has a creation timestamp within "
+            f"{BACKUP_MAX_AGE_SECONDS} seconds and no more than "
+            f"{BACKUP_MAX_FUTURE_SKEW_SECONDS} seconds in the future"
+        ),
+    }
+
+
+def _require_runtime_fingerprints(
+    payload: dict[str, Any],
+    expected_source_revision: str,
+    expected_frontend_sha256: str,
+) -> tuple[str, str]:
+    runtime_revision = str(payload.get("runtime_source_revision") or "").strip().lower()
+    runtime_frontend_sha256 = str(payload.get("runtime_frontend_sha256") or "").strip().lower()
+    if expected_source_revision and runtime_revision != expected_source_revision:
+        raise RuntimeError(
+            "health endpoint reported process-start source revision "
+            f"{runtime_revision or 'unavailable'}, expected {expected_source_revision}; restart the service"
+        )
+    if expected_frontend_sha256 and runtime_frontend_sha256 != expected_frontend_sha256:
+        raise RuntimeError(
+            "health endpoint reported process-start frontend digest "
+            f"{runtime_frontend_sha256 or 'unavailable'}, expected {expected_frontend_sha256}; restart the service"
+        )
+    return runtime_revision, runtime_frontend_sha256
+
+
+def check_loopback(
+    url: str,
+    token: str,
+    timeout: float,
+    expected_version: str = "",
+    expected_source_revision: str = "",
+    expected_frontend_sha256: str = "",
+    frontend_dir: Path = PROJECT_ROOT / "frontend" / "dist",
+) -> dict[str, Any]:
     payload = check_health(url, token, timeout)
     version = str(payload["api_version"])
     if expected_version and version != expected_version:
         raise RuntimeError(f"health endpoint reported version {version}, expected {expected_version}")
-    return {"name": "loopback_health", "status": "pass", "api_version": version}
+    runtime_revision, runtime_frontend = _require_runtime_fingerprints(
+        payload,
+        expected_source_revision,
+        expected_frontend_sha256,
+    )
+    disk_frontend = ""
+    if expected_frontend_sha256:
+        disk_frontend = frontend_tree_sha256(frontend_dir)
+        if disk_frontend != expected_frontend_sha256:
+            raise RuntimeError(
+                f"served frontend tree digest is {disk_frontend}, expected {expected_frontend_sha256}"
+            )
+    return {
+        "name": "loopback_health",
+        "status": "pass",
+        "api_version": version,
+        "runtime_source_revision": runtime_revision,
+        "runtime_frontend_sha256": runtime_frontend,
+        "disk_frontend_sha256": disk_frontend,
+    }
 
 
 def check_loopback_metrics(url: str, token: str, timeout: float) -> dict[str, Any]:
@@ -277,28 +510,63 @@ def check_loopback_metrics(url: str, token: str, timeout: float) -> dict[str, An
     return {"name": "loopback_metrics", "status": "pass", "format": "prometheus"}
 
 
+def _require_unauthorized(request: Request, timeout: float, label: str) -> None:
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            status = response.status
+    except HTTPError as exc:
+        try:
+            if exc.code != 401:
+                raise RuntimeError(f"unauthenticated {label} returned HTTP {exc.code}, expected 401") from exc
+        finally:
+            exc.close()
+        return
+    raise RuntimeError(f"unauthenticated {label} was accepted with HTTP {status}")
+
+
+def check_loopback_token_auth(url: str, timeout: float) -> dict[str, Any]:
+    """Prove that the upstream API rejects a tokenless loopback request."""
+    _require_unauthorized(
+        Request(url, headers={"Accept": "application/json"}, method="GET"),
+        timeout,
+        "loopback API request",
+    )
+    return {"name": "loopback_token_auth", "status": "pass"}
+
+
 def check_public_proxy(
     url: str,
     username: str,
     password: str,
     timeout: float,
     expected_version: str = "",
+    upstream_token: str = "",
+    expected_source_revision: str = "",
+    expected_frontend_sha256: str = "",
 ) -> dict[str, Any]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ValueError("public URL must be an absolute https URL")
     if not username or not password:
         raise ValueError("public proxy verification requires non-empty Basic Auth credentials")
-    health_url = urljoin(url.rstrip("/") + "/", "api/health")
-    try:
-        with urlopen(Request(health_url, headers={"Accept": "application/json"}, method="GET"), timeout=timeout):
-            raise RuntimeError("unauthenticated public proxy request was accepted")
-    except HTTPError as exc:
-        try:
-            if exc.code != 401:
-                raise RuntimeError(f"unauthenticated public proxy request returned HTTP {exc.code}, expected 401") from exc
-        finally:
-            exc.close()
+    if not upstream_token.strip():
+        raise ValueError("public proxy verification requires a non-empty upstream API token")
+
+    base_url = url.rstrip("/") + "/"
+    for method, relative_url in PUBLIC_PROXY_AUTH_PROBES:
+        probe_url = urljoin(base_url, relative_url)
+        headers = {"Accept": "application/json"}
+        body = None
+        if method == "PATCH":
+            headers["Content-Type"] = "application/json"
+            body = b"{"
+        _require_unauthorized(
+            Request(probe_url, data=body, headers=headers, method=method),
+            timeout,
+            f"public proxy {method} {urlparse(probe_url).path or '/'}",
+        )
+
+    health_url = urljoin(base_url, "api/health")
 
     headers = {"Accept": "application/json"}
     encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
@@ -313,6 +581,7 @@ def check_public_proxy(
             raise RuntimeError(
                 f"public proxy reported version {payload.get('api_version')}, expected {expected_version}"
             )
+        _require_runtime_fingerprints(payload, expected_source_revision, expected_frontend_sha256)
         if response_headers.get("cache-control") != "no-store":
             raise RuntimeError("public proxy health endpoint is missing Cache-Control: no-store")
         if missing:
@@ -326,7 +595,12 @@ def check_public_proxy(
             raise RuntimeError("public proxy has incomplete security-header policy: " + ", ".join(weak_headers))
         if response_headers.get("server"):
             raise RuntimeError("public proxy exposes a Server header")
-    return {"name": "public_https_proxy", "status": "pass", "api_version": payload.get("api_version")}
+    return {
+        "name": "public_https_proxy",
+        "status": "pass",
+        "api_version": payload.get("api_version"),
+        "unauthenticated_probes": len(PUBLIC_PROXY_AUTH_PROBES),
+    }
 
 
 def write_evidence(path: Path, payload: dict[str, Any]) -> None:
@@ -390,11 +664,30 @@ def main() -> int:
         default="",
         help="Required lowercase 40-character Git commit for the deployed release source.",
     )
+    parser.add_argument(
+        "--expected-frontend-sha256",
+        default="",
+        help="Required trusted SHA-256 fingerprint of the reviewed frontend tree.",
+    )
+    parser.add_argument(
+        "--frontend-dir",
+        type=Path,
+        default=PROJECT_ROOT / "frontend" / "dist",
+        help="Served frontend directory to hash independently of the running process.",
+    )
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument(
         "--skip-systemd",
         action="store_true",
-        help="Skip Linux systemd and Linux filesystem-ownership checks for an isolated loopback smoke test.",
+        help=(
+            "Skip Linux systemd, filesystem-ownership, and backup-archive checks for an isolated loopback smoke test."
+        ),
+    )
+    parser.add_argument(
+        "--backup-directory",
+        type=Path,
+        default=DEFAULT_BACKUP_DIRECTORY,
+        help="Trusted private directory containing state backup archive/manifest pairs.",
     )
     parser.add_argument(
         "--output",
@@ -411,8 +704,10 @@ def main() -> int:
     args = parser.parse_args()
 
     checks: list[dict[str, Any]] = []
+    evidence_source = source_identity()
     expected_version = args.expected_version.strip()
     expected_source_revision = args.expected_source_revision.strip().lower()
+    expected_frontend_sha256 = args.expected_frontend_sha256.strip().lower()
     missing_identity = False
     if not expected_version:
         missing_identity = True
@@ -432,16 +727,48 @@ def main() -> int:
                 "detail": "--expected-source-revision is required to prove the deployed source identity",
             }
         )
+    if not expected_frontend_sha256:
+        missing_identity = True
+        checks.append(
+            {
+                "name": "expected_frontend_sha256",
+                "status": "fail",
+                "detail": "--expected-frontend-sha256 is required to prove the served frontend identity",
+            }
+        )
+    elif not SHA256_HEX.fullmatch(expected_frontend_sha256):
+        missing_identity = True
+        checks.append(
+            {
+                "name": "expected_frontend_sha256",
+                "status": "fail",
+                "detail": "--expected-frontend-sha256 must be a lowercase 64-character SHA-256 digest",
+            }
+        )
     if not missing_identity:
         try:
-            checks.append(check_source_revision(expected_source_revision))
+            checks.append(check_source_revision(expected_source_revision, evidence_source))
             if not args.skip_systemd:
                 checks.extend(check_systemd())
-                checks.extend(check_filesystem_permissions())
-            checks.append(check_loopback(args.loopback_url, args.token, args.timeout, expected_version))
+                checks.extend(check_filesystem_permissions(backup_directory=args.backup_directory))
+                checks.append(check_backup_evidence(args.backup_directory))
+            if args.public_url and not args.token.strip():
+                raise ValueError("public proxy verification requires a non-empty upstream API token")
+            checks.append(
+                check_loopback(
+                    args.loopback_url,
+                    args.token,
+                    args.timeout,
+                    expected_version,
+                    expected_source_revision,
+                    expected_frontend_sha256,
+                    args.frontend_dir,
+                )
+            )
             checks.append(check_loopback_metrics(args.loopback_metrics_url, args.token, args.timeout))
             if args.public_url:
                 password = os.environ.get(args.public_basic_password_env, "")
+                checks.append(check_loopback_token_auth(args.loopback_url, args.timeout))
                 checks.append(
                     check_public_proxy(
                         args.public_url,
@@ -449,22 +776,38 @@ def main() -> int:
                         password,
                         args.timeout,
                         expected_version,
+                        args.token,
+                        expected_source_revision,
+                        expected_frontend_sha256,
                     )
                 )
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
             checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
 
-    evidence = build_evidence(checks)
+    # Re-read source provenance after all host/network probes. Evidence must
+    # never report success for a revision different from the one actually
+    # recorded in the artifact.
+    evidence_source = source_identity()
+    if not missing_identity:
+        final_source_check = check_source_revision(expected_source_revision, evidence_source)
+        final_source_check["name"] = "source_revision_final"
+        checks.append(final_source_check)
+    evidence = build_evidence(checks, source=evidence_source)
     if args.output:
         output_directory = check_evidence_output_directory(args.output)
         checks.append(output_directory)
-        evidence = build_evidence(checks)
+        evidence_source = source_identity()
+        if not missing_identity:
+            pre_write_source_check = check_source_revision(expected_source_revision, evidence_source)
+            pre_write_source_check["name"] = "source_revision_pre_write"
+            checks.append(pre_write_source_check)
+        evidence = build_evidence(checks, source=evidence_source)
         if output_directory["status"] == "pass":
             try:
                 write_evidence(args.output, evidence)
             except OSError as exc:
                 checks.append({"name": "evidence_output", "status": "fail", "detail": str(exc)})
-                evidence = build_evidence(checks)
+                evidence = build_evidence(checks, source=evidence_source)
     print(json.dumps(evidence, sort_keys=True))
     return 0 if evidence["status"] == "ok" else 1
 

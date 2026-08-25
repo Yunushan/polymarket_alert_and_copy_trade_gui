@@ -594,11 +594,22 @@ class XOMarketAdapter(MarketAdapter):
 
     def _order_payload(self, order: PaperOrderRequest) -> Dict[str, Any]:
         market_id, outcome_id = self._split_contract_id(order.contract_id)
+        derived_type = "limit" if order.limit_price is not None else "market"
+        supplied_type = order.metadata.get("type")
+        if supplied_type is not None:
+            normalized_type = str(supplied_type).strip().lower()
+            if normalized_type not in {"limit", "market"}:
+                raise MarketConfigurationError("XO order type must be limit or market.")
+            if normalized_type != derived_type:
+                raise MarketConfigurationError(
+                    "XO order type must match the reviewed limit price; metadata cannot convert a limit order "
+                    "into a market order or vice versa."
+                )
         payload: Dict[str, Any] = {
             "market_id": market_id,
             "outcome_id": outcome_id,
             "side": str(order.side or "").lower(),
-            "type": str(order.metadata.get("type") or ("limit" if order.limit_price is not None else "market")),
+            "type": derived_type,
             "amount_usd": float(order.size),
             "time_in_force": str(order.metadata.get("time_in_force") or "GTC"),
         }

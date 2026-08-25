@@ -1386,7 +1386,7 @@ def run_ci_cd_workflow_check() -> None:
         ),
         ROOT / "scripts" / "generate_release_sbom.py": (
             "SPDX-2.3",
-            "requirements.lock",
+            "requirements-live.lock",
             "package-lock.json",
         ),
         ROOT / "scripts" / "sign_windows_release.py": (

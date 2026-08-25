@@ -768,11 +768,11 @@ class OmenAdapter(_GraphQLAdapter):
                 "public_account_endpoints": [
                     "POST <subgraph> fpmmTrades(creator=...)",
                 ],
-                "live_trading_supported": True,
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
-                "signed_transaction_submission_enabled": self.config_bool(
-                    self._submit_config_key, False
-                ),
+                "live_trading_supported": bool(self.capabilities.live_trading),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
+                "signed_transaction_submission_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool(self._submit_config_key, False),
                 "rpc_configured": bool(self._configured_rpc_url),
             }
         )
@@ -1726,11 +1726,11 @@ class ZeitgeistAdapter(_GraphQLAdapter):
                 "indexer_url_source": source,
                 "references": list(ZEITGEIST_REFERENCES),
                 "orderbook_supported": False,
-                "live_trading_supported": True,
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
-                "signed_extrinsic_submission_enabled": self.config_bool(
-                    "zeitgeist_submit_signed_extrinsics", False
-                ),
+                "live_trading_supported": bool(self.capabilities.live_trading),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
+                "signed_extrinsic_submission_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("zeitgeist_submit_signed_extrinsics", False),
                 "rpc_configured": bool(rpc_url),
                 "rpc_url_source": rpc_source,
                 "hybrid_router_pallet": "HybridRouter",

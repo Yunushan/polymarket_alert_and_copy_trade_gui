@@ -214,6 +214,7 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertEqual(result.raw["endpoint"], "/market/mf-binary-1/sell")
         self.assertEqual(result.raw["request"], {"shares": 6.25, "outcome": "NO"})
+        self.assertAlmostEqual(result.raw["reference_price"], 0.42)
 
     def test_paper_order_builds_documented_dry_run_payload(self) -> None:
         adapter = self.make_adapter()
@@ -329,6 +330,46 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertTrue(url.endswith("/market/mf-binary-1/sell"))
         self.assertEqual(payload, {"shares": 4.0, "outcome": "NO"})
         self.assertEqual(headers["Authorization"], "Key unit-test-key")
+
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            with self.assertRaisesRegex(MarketConfigurationError, "does not support a wire-enforced limit"):
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        market_id="manifold",
+                        contract_id="mf-binary-1:NO",
+                        side="SELL",
+                        size=4,
+                        limit_price=0.60,
+                    )
+                )
+
+    def test_live_sell_cannot_override_the_preflighted_share_count(self) -> None:
+        adapter = ManifoldAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_size": 5,
+            }
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append(json_body)
+            return {"sold": True}
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            adapter.place_live_order(
+                PaperOrderRequest(
+                    market_id="manifold",
+                    contract_id="mf-binary-1:NO",
+                    side="SELL",
+                    size=4,
+                    metadata={"shares": 1_000_000},
+                )
+            )
+
+        self.assertEqual(calls, [{"shares": 4.0, "outcome": "NO"}])
 
     def test_live_buy_for_single_answer_is_blocked_until_documented_shape_maps_safely(self) -> None:
         adapter = ManifoldAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})

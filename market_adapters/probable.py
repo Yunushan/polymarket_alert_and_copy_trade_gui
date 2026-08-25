@@ -36,6 +36,25 @@ PROBABLE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders", "cancel
 PROBABLE_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 PROBABLE_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL PROBABLE ORDERS"
 PROBABLE_MAX_ORDER_BATCH = 50
+PROBABLE_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+PROBABLE_SIGNED_ORDER_FIELDS = frozenset(
+    {
+        "salt",
+        "maker",
+        "signer",
+        "taker",
+        "tokenId",
+        "makerAmount",
+        "takerAmount",
+        "expiration",
+        "nonce",
+        "feeRateBps",
+        "side",
+        "signatureType",
+        "signature",
+    }
+)
+PROBABLE_ORDER_PAYLOAD_FIELDS = frozenset({"deferExec", "order", "owner", "orderType"})
 PROBABLE_REFERENCES = (
     "https://developer.probable.markets/",
     "https://www.npmjs.com/package/@prob/clob",
@@ -78,6 +97,28 @@ class ProbableAdapter(MarketAdapter):
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "signed_order_required": True,
+                "signed_order_policy": {
+                    "allowed_outer_fields": sorted(PROBABLE_ORDER_PAYLOAD_FIELDS),
+                    "allowed_signed_fields": sorted(PROBABLE_SIGNED_ORDER_FIELDS),
+                    "order_type": "GTC",
+                    "defer_execution": True,
+                    "expiration": 0,
+                    "taker": PROBABLE_ZERO_ADDRESS,
+                    "fee_rate_bps": self._trusted_uint_config(
+                        "probable_fee_rate_bps",
+                        default=0,
+                        maximum=10_000,
+                    ),
+                    "nonce": self._trusted_uint_config(
+                        "probable_order_nonce",
+                        default=0,
+                    ),
+                    "signature_type": self._trusted_uint_config(
+                        "probable_signature_type",
+                        default=0,
+                        maximum=255,
+                    ),
+                },
                 "account_recovery_operations": list(self.account_recovery_operations),
                 "authenticated_account_endpoints": [
                     "/orders/{chain_id}/open",
@@ -448,9 +489,9 @@ class ProbableAdapter(MarketAdapter):
         self.ensure_capability("live_trading")
         self._validate_order(order)
         preflight = self.preflight_live_order(order)
-        payload = self._live_order_payload(order)
-        path = str(self.config.get("probable_order_path") or f"/orders/{self.chain_id}")
         credentials = self._l2_credentials()
+        payload = self._live_order_payload(order, trusted_wallet=credentials["address"])
+        path = str(self.config.get("probable_order_path") or f"/orders/{self.chain_id}")
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         headers = self._l2_headers("POST", path, body, credentials)
         response = self._request_json("POST", path, body, headers)
@@ -646,8 +687,7 @@ class ProbableAdapter(MarketAdapter):
         )
         assert credential is not None
         wallet = str(credential.value).strip()
-        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", wallet):
-            raise MarketConfigurationError("Probable wallet address must be a 0x-prefixed 40-hex-character address.")
+        self._validate_wallet_address(wallet, "Probable wallet address")
         return wallet
 
     @staticmethod
@@ -855,6 +895,7 @@ class ProbableAdapter(MarketAdapter):
             credential = self.resolve_credential(config_key, env_vars, required=True, label=label)
             assert credential is not None
             values[key] = credential.value
+        self._validate_wallet_address(values["address"], "Probable wallet address")
         return values
 
     @staticmethod
@@ -879,7 +920,12 @@ class ProbableAdapter(MarketAdapter):
         }
         return headers
 
-    def _live_order_payload(self, order: PaperOrderRequest) -> Dict[str, Any]:
+    def _live_order_payload(
+        self,
+        order: PaperOrderRequest,
+        *,
+        trusted_wallet: Optional[str] = None,
+    ) -> Dict[str, Any]:
         existing = order.metadata.get("probable_payload")
         if isinstance(existing, Mapping):
             payload = dict(existing)
@@ -895,39 +941,53 @@ class ProbableAdapter(MarketAdapter):
             raise MarketConfigurationError(
                 "Probable live orders require order.metadata['signed_order'] with an EIP-712 signature."
             )
-        self._validate_live_order_binding(order, payload, signed_order)
-        owner = str(
-            payload.get("owner")
-            or order.metadata.get("owner")
-            or signed_order.get("signer")
-            or ""
-        ).strip()
-        if not owner:
-            raise MarketConfigurationError("Probable live orders require an owner or signed-order signer address.")
-        order_type = str(
-            payload.get("orderType")
-            or order.metadata.get("order_type")
-            or signed_order.get("timeInForce")
-            or "GTC"
-        ).upper()
-        if order_type not in {"GTC", "GTD", "IOC", "FOK", "FAK"}:
-            raise MarketConfigurationError("Probable order type must be GTC, GTD, IOC, FOK, or FAK.")
-        payload.setdefault("deferExec", bool(order.metadata.get("defer_exec", True)))
-        payload.setdefault("order", dict(signed_order))
-        payload.setdefault("owner", owner)
-        payload.setdefault("orderType", order_type)
-        slippage = order.metadata.get("slippage_tolerance")
-        if slippage is not None and "slippageTolerance" not in payload:
-            payload["slippageTolerance"] = {"minPrice": str(slippage)}
-        return payload
+        wallet = str(trusted_wallet or self._wallet_address()).strip()
+        self._validate_wallet_address(wallet, "Probable trusted wallet address")
+        self._validate_live_order_binding(order, payload, signed_order, trusted_wallet=wallet)
+        return {
+            "deferExec": True,
+            "order": dict(signed_order),
+            "owner": wallet,
+            "orderType": "GTC",
+        }
 
     def _validate_live_order_binding(
         self,
         order: PaperOrderRequest,
         payload: Mapping[str, Any],
         signed_order: Mapping[str, Any],
+        *,
+        trusted_wallet: str,
     ) -> None:
-        """Bind the externally signed CLOB order to the preflighted intent."""
+        """Bind the complete externally signed CLOB order to trusted policy."""
+
+        unknown_outer = sorted(
+            str(field) for field in payload if field not in PROBABLE_ORDER_PAYLOAD_FIELDS
+        )
+        if unknown_outer:
+            raise MarketConfigurationError(
+                "Probable live-order payload contains unsupported fields: "
+                + ", ".join(unknown_outer)
+                + "."
+            )
+        unknown_signed = sorted(
+            str(field) for field in signed_order if field not in PROBABLE_SIGNED_ORDER_FIELDS
+        )
+        if unknown_signed:
+            raise MarketConfigurationError(
+                "Probable signed order contains unsupported fields: "
+                + ", ".join(unknown_signed)
+                + "."
+            )
+        missing = sorted(
+            field
+            for field in PROBABLE_SIGNED_ORDER_FIELDS
+            if signed_order.get(field) in (None, "")
+        )
+        if missing:
+            raise MarketConfigurationError(
+                "Probable signed order is missing required fields: " + ", ".join(missing) + "."
+            )
 
         signature = str(signed_order.get("signature") or "").strip()
         if not signature:
@@ -938,7 +998,7 @@ class ProbableAdapter(MarketAdapter):
             )
 
         market_id, token_ref = self._split_contract_id(order.contract_id)
-        canonical_token_id, canonical_contract_id, market = self._resolve_token_details(
+        canonical_token_id, _canonical_contract_id, market = self._resolve_token_details(
             market_id,
             token_ref,
         )
@@ -951,20 +1011,6 @@ class ProbableAdapter(MarketAdapter):
             raise MarketConfigurationError(
                 f"Probable market {market_id!r} does not contain token or outcome {token_ref!r}."
             )
-        for key in ("marketId", "market_id", "conditionId", "condition_id"):
-            if key in payload and str(payload[key] or "").strip() != market_id:
-                raise MarketConfigurationError(
-                    f"Probable wire payload {key} does not match the preflighted contract."
-                )
-        for key in ("contractId", "contract_id"):
-            if key in payload and str(payload[key] or "").strip() not in {
-                order.contract_id,
-                canonical_contract_id,
-            }:
-                raise MarketConfigurationError(
-                    f"Probable wire payload {key} does not match the preflighted contract."
-                )
-
         token_id = str(signed_order.get("tokenId") or "").strip()
         if not token_id:
             raise MarketConfigurationError("Probable signed order requires tokenId.")
@@ -972,11 +1018,85 @@ class ProbableAdapter(MarketAdapter):
             raise MarketConfigurationError(
                 "Probable signed order tokenId does not match the preflighted contract."
             )
-        for key in ("tokenId", "token_id", "asset", "assetId"):
-            if key in payload and str(payload[key] or "").strip() != canonical_token_id:
+
+        for field in ("maker", "signer"):
+            address = str(signed_order.get(field) or "").strip()
+            self._validate_wallet_address(address, f"Probable signed order {field}")
+            if address.lower() != trusted_wallet.lower():
                 raise MarketConfigurationError(
-                    f"Probable wire payload {key} does not match the preflighted token."
+                    f"Probable signed order {field} does not match the trusted configured wallet."
                 )
+        taker = str(signed_order.get("taker") or "").strip()
+        self._validate_wallet_address(taker, "Probable signed order taker")
+        if taker.lower() != PROBABLE_ZERO_ADDRESS:
+            raise MarketConfigurationError(
+                "Probable signed order taker must be the zero address under the guarded live-order policy."
+            )
+
+        salt = self._wire_uint(signed_order.get("salt"), "salt")
+        if salt == 0:
+            raise MarketConfigurationError("Probable signed order salt must be positive.")
+        for field, expected in (
+            ("expiration", 0),
+            (
+                "nonce",
+                self._trusted_uint_config("probable_order_nonce", default=0),
+            ),
+            (
+                "feeRateBps",
+                self._trusted_uint_config(
+                    "probable_fee_rate_bps",
+                    default=0,
+                    maximum=10_000,
+                ),
+            ),
+            (
+                "signatureType",
+                self._trusted_uint_config(
+                    "probable_signature_type",
+                    default=0,
+                    maximum=255,
+                ),
+            ),
+        ):
+            if self._wire_uint(signed_order.get(field), field) != expected:
+                raise MarketConfigurationError(
+                    f"Probable signed order {field} does not match the trusted live-order policy."
+                )
+
+        owner = payload.get("owner")
+        if owner not in (None, "") and str(owner).strip().lower() != trusted_wallet.lower():
+            raise MarketConfigurationError(
+                "Probable live-order owner does not match the trusted configured wallet."
+            )
+        if payload.get("orderType") not in (None, "", "GTC"):
+            raise MarketConfigurationError(
+                "Probable live-order orderType must be GTC under the guarded live-order policy."
+            )
+        if "deferExec" in payload and payload["deferExec"] is not True:
+            raise MarketConfigurationError(
+                "Probable live-order deferExec must be true under the guarded live-order policy."
+            )
+        metadata_owner = order.metadata.get("owner")
+        if (
+            metadata_owner not in (None, "")
+            and str(metadata_owner).strip().lower() != trusted_wallet.lower()
+        ):
+            raise MarketConfigurationError(
+                "Probable order metadata owner does not match the trusted configured wallet."
+            )
+        if order.metadata.get("order_type") not in (None, "", "GTC"):
+            raise MarketConfigurationError(
+                "Probable order metadata order_type must be GTC under the guarded live-order policy."
+            )
+        if "defer_exec" in order.metadata and order.metadata["defer_exec"] is not True:
+            raise MarketConfigurationError(
+                "Probable order metadata defer_exec must be true under the guarded live-order policy."
+            )
+        if order.metadata.get("slippage_tolerance") is not None:
+            raise MarketConfigurationError(
+                "Probable live orders do not accept an unbound slippage_tolerance modifier."
+            )
 
         expected_side = 0 if str(order.side).upper() == "BUY" else 1
         actual_side = self._wire_side(signed_order.get("side"))
@@ -995,6 +1115,51 @@ class ProbableAdapter(MarketAdapter):
         if (maker_amount, taker_amount) not in expected_amounts:
             raise MarketConfigurationError(
                 "Probable signed order makerAmount/takerAmount do not match the preflighted price and size."
+            )
+
+    def _trusted_uint_config(
+        self,
+        key: str,
+        *,
+        default: int,
+        maximum: int = (2**256) - 1,
+    ) -> int:
+        value = self.config.get(key, default)
+        parsed = self._wire_uint(value, key)
+        if parsed > maximum:
+            raise MarketConfigurationError(
+                f"Probable {key} must be between 0 and {maximum}."
+            )
+        return parsed
+
+    @staticmethod
+    def _wire_uint(value: Any, label: str) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(
+                f"Probable signed order {label} must be an unsigned integer."
+            )
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise MarketConfigurationError(
+                f"Probable signed order {label} must be an unsigned integer."
+            ) from exc
+        if (
+            not number.is_finite()
+            or number < 0
+            or number != number.to_integral_value()
+            or number >= Decimal(2) ** 256
+        ):
+            raise MarketConfigurationError(
+                f"Probable signed order {label} must be an unsigned 256-bit integer."
+            )
+        return int(number)
+
+    @staticmethod
+    def _validate_wallet_address(value: Any, label: str) -> None:
+        if re.fullmatch(r"0x[a-fA-F0-9]{40}", str(value or "").strip()) is None:
+            raise MarketConfigurationError(
+                f"{label} must be a 0x-prefixed 40-hex-character address."
             )
 
     def _expected_signed_amounts(self, order: PaperOrderRequest, side: int) -> set[Tuple[int, int]]:

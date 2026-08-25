@@ -41,6 +41,7 @@ class BetfairExchangeAdapter(MarketAdapter):
     """Betfair Exchange adapter using the official Exchange API JSON-RPC."""
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
+    live_order_exposure_model = "exchange_stake_or_lay_liability"
     metadata = get_market_metadata("betfair_exchange")
     account_recovery_operations = (
         "active_orders",
@@ -50,7 +51,22 @@ class BetfairExchangeAdapter(MarketAdapter):
         "statement",
         "currency_rates",
     )
-    order_management_operations = ("cancel_orders", "update_orders", "replace_orders")
+    # Persistence updates and replacements can increase exposure without the
+    # original order preflight context. Only cancellation is fail-safe here.
+    order_management_operations = ("cancel_orders",)
+
+    def live_order_exposure(
+        self,
+        order: PaperOrderRequest,
+        *,
+        size: float,
+        limit_price: Optional[float],
+    ) -> float:
+        if str(order.side or "").upper() not in {"SELL", "LAY"}:
+            return size
+        if limit_price is None or limit_price > 1:
+            raise MarketConfigurationError("Betfair LAY preflight requires a probability greater than 0 and at most 1.")
+        return size * ((1.0 / limit_price) - 1.0)
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -83,7 +99,7 @@ class BetfairExchangeAdapter(MarketAdapter):
                     "getAccountStatement",
                     "listCurrencyRates",
                 ],
-                "order_management_endpoints": ["cancelOrders", "updateOrders", "replaceOrders"],
+                "order_management_endpoints": ["cancelOrders"],
             }
         )
         return health

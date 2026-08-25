@@ -172,7 +172,8 @@ class AzuroAdapter(MarketAdapter):
                 "trade_history_account_scoped": True,
                 "candle_history_derived": True,
                 "candle_history_account_scoped": True,
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
             }
         )

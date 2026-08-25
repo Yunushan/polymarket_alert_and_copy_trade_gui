@@ -33,8 +33,6 @@ MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_offer",
     "cancel_offers",
     "cancel_all_offers",
-    "edit_offer",
-    "edit_offers",
 )
 MATCHBOOK_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 MATCHBOOK_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL MATCHBOOK OFFERS"
@@ -68,6 +66,7 @@ class MatchbookAdapter(MarketAdapter):
     """Matchbook REST adapter with guarded session-authenticated offers."""
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
+    live_order_exposure_model = "exchange_stake_or_lay_liability"
     order_management_operations = MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS
     metadata = get_market_metadata("matchbook")
     account_recovery_operations = (
@@ -77,6 +76,19 @@ class MatchbookAdapter(MarketAdapter):
         "balance",
         "account",
     )
+
+    def live_order_exposure(
+        self,
+        order: PaperOrderRequest,
+        *,
+        size: float,
+        limit_price: Optional[float],
+    ) -> float:
+        if str(order.side or "").upper() not in {"SELL", "LAY"}:
+            return size
+        if limit_price is None or limit_price > 1:
+            raise MarketConfigurationError("Matchbook LAY preflight requires a probability greater than 0 and at most 1.")
+        return size * ((1.0 / limit_price) - 1.0)
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> None:
         super().__init__(config, **kwargs)

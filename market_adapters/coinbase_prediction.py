@@ -49,6 +49,7 @@ class CoinbasePredictionMarketsAdapter(KalshiAdapter):
                 "references": list(COINBASE_PREDICTION_REFERENCES),
                 "coinbase_order_api_supported": False,
                 "live_trading_supported": False,
+                "live_trading_enabled": False,
                 "copy_trading_supported": False,
                 "market_data_scope": "public Kalshi venue data; Coinbase account execution is not exposed",
             }

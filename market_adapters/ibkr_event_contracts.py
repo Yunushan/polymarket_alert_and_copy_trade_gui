@@ -79,7 +79,7 @@ IBKR_CANDLE_RESOLUTIONS = (
 )
 
 IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
-IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders", "modify_order")
+IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders")
 IBKR_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 IBKR_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL IBKR EVENT ORDERS"
 IBKR_ORDER_ID_PATTERN = re.compile(r"[0-9]{1,20}")
@@ -463,10 +463,10 @@ class IBKREventContractsAdapter(MarketAdapter):
             )
         if order.limit_price is None:
             raise MarketConfigurationError(f"{self.mode_name} live orders require a limit price.")
-        account = self.resolve_credential("ibkr_account_id", ("IBKR_ACCOUNT_ID",), required=True, label="IBKR_ACCOUNT_ID")
         canonical, conid = self._parse_contract_id(order.contract_id)
-        self._ensure_accounts()
         payload = {"orders": [self._order_payload(order, conid=conid, include_manual_fields=True)]}
+        account = self.resolve_credential("ibkr_account_id", ("IBKR_ACCOUNT_ID",), required=True, label="IBKR_ACCOUNT_ID")
+        self._ensure_accounts()
         response = self._post(f"/iserver/account/{account.value}/orders", payload)
         return {
             "market_id": self.market_id,
@@ -738,9 +738,12 @@ class IBKREventContractsAdapter(MarketAdapter):
     ) -> Dict[str, Any]:
         if order.limit_price is None:
             raise MarketConfigurationError(f"{self.mode_name} orders require a limit price.")
+        requested_type = str(order.metadata.get("order_type") or "LMT").upper()
+        if requested_type != "LMT":
+            raise MarketConfigurationError(f"{self.mode_name} live orders support only preflighted LMT orders.")
         payload: Dict[str, Any] = {
             "conid": conid,
-            "orderType": str(order.metadata.get("order_type") or "LMT").upper(),
+            "orderType": "LMT",
             "price": float(order.limit_price),
             "side": str(order.side or "").upper(),
             "tif": str(order.metadata.get("tif") or "DAY").upper(),

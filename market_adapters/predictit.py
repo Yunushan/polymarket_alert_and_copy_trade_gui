@@ -39,7 +39,8 @@ class PredictItAdapter(MarketAdapter):
                 "orderbook_supported": True,
                 "orderbook_depth_supported": False,
                 "live_trading_supported": False,
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
             }
         )
         return health

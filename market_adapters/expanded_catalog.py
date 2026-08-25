@@ -79,7 +79,9 @@ METADAO_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Externally signed Solana transactions cannot yet be decoded and bound
+    # to the reviewed router order, so submission is fail-closed.
+    live_trading=False,
     # Public swap rows include maker wallets; the adapter filters a bounded
     # recent slice locally and only creates simulation-first paper previews.
     copy_trading=True,
@@ -98,7 +100,9 @@ SEER_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Externally signed transactions cannot yet be decoded and bound to the
+    # reviewed order, so submission is fail-closed.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -120,7 +124,9 @@ TRUEO_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # The envelope is decoded, but router calldata is not yet ABI-decoded and
+    # bound to the reviewed market/order, so submission is fail-closed.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -136,8 +142,8 @@ ZEITGEIST_SDK_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    # Same guarded HybridRouter extrinsic boundary as the primary adapter.
-    live_trading=True,
+    # Same fail-closed signed-extrinsic boundary as the primary adapter.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -155,7 +161,9 @@ GNOSIS_PREDICTION_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Externally signed transactions cannot yet be decoded and bound to the
+    # reviewed FPMM order, so submission is fail-closed.
+    live_trading=False,
     # Alias uses the same public FPMMTrade.creator feed as Omen; copy remains
     # bounded and simulation-first.
     copy_trading=True,
@@ -173,9 +181,9 @@ ZEITGEIST_POOL_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    # Pool-scoped live forwarding still requires reviewed pool metadata and an
-    # externally signed HybridRouter extrinsic; the adapter never signs or settles.
-    live_trading=True,
+    # Pool-scoped signed extrinsics cannot yet be decoded and bound to the
+    # reviewed HybridRouter order, so submission is fail-closed.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -271,7 +279,9 @@ DFLOW_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Externally signed Solana transactions cannot yet be decoded and bound
+    # to the reviewed order, so submission is fail-closed.
+    live_trading=False,
     # DFlow's documented on-chain trade feed is wallet-filtered and includes
     # complete mint, side, size, price, and transaction fields for local,
     # simulation-first copy previews.
@@ -390,7 +400,9 @@ LAMAS_FINANCE_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Byte-substring checks do not prove that every Solana instruction is the
+    # reviewed prediction instruction, so submission is fail-closed.
+    live_trading=False,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -468,8 +480,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://seer-3.gitbook.io/seer-documentation/developers/interact-with-seer",
         description=(
             "Official Seer serverless API adapter for market discovery, outcome prices, alerts, "
-            "local paper orders, and guarded externally signed transactions to an explicitly reviewed "
-            "third-party DEX; CLOB depth, wallet signing, approvals, and settlement remain operator-owned."
+            "and local paper orders. Live submission is fail-closed until signed DEX calldata can be decoded "
+            "and bound to the reviewed order; CLOB depth, wallet signing, approvals, and settlement remain operator-owned."
         ),
         capabilities=SEER_CAPABILITIES,
     ),
@@ -479,7 +491,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://pond.dflow.net/introduction",
         description=(
             "Official DFlow Metadata/Trade API adapter for event and market discovery, outcome prices, "
-            "orderbooks, public trade history, paper orders, and guarded wallet-signed Solana transaction submission."
+            "orderbooks, public trade history, and paper orders. Live submission is fail-closed until every "
+            "signed Solana instruction can be decoded and bound to the reviewed order."
         ),
         capabilities=DFLOW_CAPABILITIES,
     ),
@@ -514,7 +527,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         description=(
             "Official Trueo Base on-chain adapter for TruthMarketManager discovery, immutable market fields, "
             "validated Uniswap V3/V4 outcome prices, bounded swap history, derived candles, alerts, paper "
-            "orders, and guarded externally signed transactions; CLOB depth and copy trading remain unsupported."
+            "orders, and decoded transaction envelopes. Live submission is fail-closed until router calldata "
+            "can be ABI-decoded and bound to the reviewed order; CLOB depth and copy trading remain unsupported."
         ),
         capabilities=TRUEO_CAPABILITIES,
     ),
@@ -543,8 +557,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
             "Official Gnosis/Omen FixedProductMarketMaker adapter for market discovery, outcome prices, "
             "public FPMM trades, the bounded `activity` account operation for creator-scoped wallet rows, "
             "bounded derived candles, simulation-first copy previews, "
-            "alerts, local paper orders, and guarded externally signed FPMM transactions; CLOB depth, collateral "
-            "approval, and settlement remain unsupported."
+            "alerts, and local paper orders. Live submission is fail-closed until signed calldata can be decoded "
+            "and bound to the reviewed FPMM order; CLOB depth, collateral approval, and settlement remain unsupported."
         ),
         capabilities=GNOSIS_PREDICTION_CAPABILITIES,
     ),
@@ -554,7 +568,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.zeitgeist.pm/docs/build/sdk/v2/fetch-markets",
         description=(
             "Official Zeitgeist SDK/Markets alias using the documented Subsquid/indexer GraphQL market and asset "
-            "contract for discovery, outcome prices, alerts, and paper orders."
+            "contract for discovery, outcome prices, alerts, and paper orders. Live submission is fail-closed "
+            "until the signed extrinsic can be decoded and bound to the reviewed HybridRouter order."
         ),
         capabilities=ZEITGEIST_SDK_CAPABILITIES,
     ),
@@ -565,11 +580,11 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         description=(
             "Official MetaDAO Futarchy DEX API adapter for public DAO ticker discovery, bid/ask/price reads, "
             "bounded recent public spot-swap history, the bounded `activity` account operation for maker-wallet "
-            "rows, derived OHLCV candles, alerts, local paper orders, and "
-            "guarded externally signed Solana router transactions; omitted time bounds return only a bounded recent "
+            "rows, derived OHLCV candles, alerts, and local paper orders; omitted time bounds return only a bounded recent "
             "slice, explicit out-of-window bounds fail closed, and full-history completeness is not claimed. "
             "The official bid/ask summaries are exposed as a one-level top-of-book with unknown sizes; full depth, "
-            "wallet signing, approvals, and settlement remain operator-owned or unsupported; wallet copy is bounded and simulation-first."
+            "wallet signing, approvals, and settlement remain operator-owned or unsupported; wallet copy is bounded and simulation-first. "
+            "Live submission is fail-closed until every signed Solana instruction can be decoded and bound to the reviewed order."
         ),
         capabilities=METADAO_CAPABILITIES,
     ),
@@ -591,8 +606,9 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.lamas.co/1.0",
         description=(
             "Official Lamas Finance Solana Anchor adapter for PricePredict and UpOrDown round discovery, "
-            "pooled prices, alerts, local paper intents, and guarded externally signed predict transactions. "
-            "CLOB depth, settlement, and copy trading remain unsupported."
+            "pooled prices, alerts, and local paper intents. Live submission is fail-closed until every signed "
+            "Solana instruction can be decoded and bound to the reviewed prediction; CLOB depth, settlement, "
+            "and copy trading remain unsupported."
         ),
         capabilities=LAMAS_FINANCE_CAPABILITIES,
     ),
@@ -625,7 +641,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.zeitgeist.pm/docs/build/sdk/v2/fetch-markets",
         description=(
             "Official Zeitgeist pool-aware indexer adapter for market discovery, pool-backed outcome prices, "
-            "alerts, and local paper orders; CLOB depth, wallet execution, and pool settlement remain unsupported."
+            "alerts, and local paper orders. Live submission is fail-closed until the signed extrinsic can be "
+            "decoded and bound to the reviewed pool-scoped HybridRouter order; CLOB depth and settlement remain unsupported."
         ),
         capabilities=ZEITGEIST_POOL_CAPABILITIES,
     ),

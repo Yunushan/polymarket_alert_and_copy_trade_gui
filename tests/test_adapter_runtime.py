@@ -252,7 +252,8 @@ class AdapterRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(preflight["market_id"], "live_dummy")
-        self.assertEqual(preflight["approx_notional"], 2.0)
+        self.assertEqual(preflight["approx_notional"], 4.0)
+        self.assertEqual(preflight["exposure_model"], "full_size_upper_bound")
         self.assertEqual(preflight["metadata_keys"], ["client_order_id", "private_key"])
         self.assertIn("credentials_required", preflight["warnings"])
         self.assertIn("kyc_required", preflight["warnings"])
@@ -264,8 +265,12 @@ class AdapterRuntimeTests(unittest.TestCase):
         self.assertIn("size", str(size_ctx.exception))
 
         with self.assertRaises(MarketConfigurationError) as notional_ctx:
-            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 4.0, 2.0))
+            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 6.0, 0.5))
         self.assertIn("notional", str(notional_ctx.exception))
+
+        with self.assertRaises(MarketConfigurationError) as high_price_ctx:
+            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 3.0, 2.0))
+        self.assertIn("notional 6", str(high_price_ctx.exception))
 
     def test_live_preflight_rejects_noncanonical_contracts_and_order_sides(self) -> None:
         adapter = LiveAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})

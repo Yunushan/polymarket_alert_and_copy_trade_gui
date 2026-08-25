@@ -5,8 +5,10 @@ include LICENSE
 include README.md
 include SECURITY.md
 include requirements.lock
+include requirements-bootstrap.lock
 include requirements-build.lock
 include requirements-live.lock
+include requirements-security.lock
 include requirements-test.lock
 include requirements*.txt
 include *.bat
@@ -18,6 +20,6 @@ recursive-include deploy *
 recursive-include docs *.md
 recursive-include frontend *.css *.html *.json *.png *.ts *.tsx
 recursive-include scripts *.py
-recursive-include tests *.json *.py
+recursive-include tests *.csv *.json *.py *.txt
 prune frontend/dist
 prune frontend/node_modules

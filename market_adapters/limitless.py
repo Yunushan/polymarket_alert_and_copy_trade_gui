@@ -563,8 +563,6 @@ class LimitlessAdapter(MarketAdapter):
         if not trade_id:
             raise MarketConfigurationError("Limitless activity requires a documented trade id.")
         metadata = {"activity": dict(activity), "source": "limitless_portfolio_history"}
-        if token_id:
-            metadata["token_id"] = token_id
         preview = self.place_paper_order(
             PaperOrderRequest(
                 market_id=self.market_id,
@@ -660,21 +658,33 @@ class LimitlessAdapter(MarketAdapter):
     def _build_delegated_order_payload(self, order: PaperOrderRequest, *, dry_run: bool) -> Dict[str, Any]:
         slug, outcome = self._split_contract_id(order.contract_id)
         side = str(order.side or "").upper()
+        forbidden_wire_fields = {"token_id", "tokenId", "maker_amount", "makerAmount"}
+        supplied_wire_fields = sorted(forbidden_wire_fields.intersection(order.metadata))
+        if supplied_wire_fields:
+            raise MarketConfigurationError(
+                "Limitless wire identity and amount are derived from the reviewed order; remove metadata fields: "
+                + ", ".join(supplied_wire_fields)
+            )
         order_type = str(order.metadata.get("order_type") or self.config.get("limitless_order_type") or "GTC").upper()
         if order_type not in {"GTC", "FAK", "FOK"}:
             raise MarketConfigurationError("Limitless order_type must be GTC, FAK, or FOK.")
+        if order_type == "FOK" and order.limit_price is not None:
+            raise MarketConfigurationError(
+                "Limitless FOK is a market-style order and must not discard a reviewed limit price. "
+                "Use GTC/FAK to enforce the limit."
+            )
         if order_type in {"GTC", "FAK"} and order.limit_price is None:
-            raise MarketConfigurationError("Limitless GTC/FAK live and paper orders require a limit price.")
+            raise MarketConfigurationError(
+                "Limitless GTC/FAK are limit orders and require a reviewed limit price; use FOK only for an "
+                "explicit market-style request."
+            )
 
         args: Dict[str, Any] = {
-            "tokenId": str(order.metadata.get("token_id") or self._token_id_for_outcome(slug, outcome)),
+            "tokenId": self._token_id_for_outcome(slug, outcome),
             "side": side,
         }
         if order_type == "FOK":
-            maker_amount = order.metadata.get("maker_amount", order.size)
-            if not self._is_positive_number(maker_amount):
-                raise MarketConfigurationError("Limitless FOK maker_amount must be positive.")
-            args["makerAmount"] = float(maker_amount)
+            args["makerAmount"] = float(order.size)
         else:
             args["price"] = self._limit_probability(order.limit_price)
             args["size"] = float(order.size)

@@ -50,6 +50,7 @@ class _RobinhoodKalshiDistributionAlias(KalshiAdapter):
                 "robinhood_order_api_supported": False,
                 "distribution_order_api_supported": False,
                 "live_trading_supported": False,
+                "live_trading_enabled": False,
                 "copy_trading_supported": False,
                 "supported_public_data_scope": (
                     "public Kalshi venue data distributed through Robinhood; "

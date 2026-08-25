@@ -204,6 +204,14 @@ class CiCdWorkflowTests(unittest.TestCase):
             "scripts/generate_release_sbom.py",
             "Verify final release assets",
             "scripts/verify_release_assets.py",
+            "Reconcile and publish GitHub release",
+            "--print-stale-remote-asset-ids",
+            "--verify-remote-inventory",
+            "--remote-release-json",
+            "--remote-assets-json",
+            "gh api --paginate --slurp",
+            "gh release download",
+            "cmp --",
             "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
             "attestations: write",
             "id-token: write",
@@ -223,6 +231,21 @@ class CiCdWorkflowTests(unittest.TestCase):
             "License-Expression",
             "fetch-depth: 0",
             "scripts/verify_python_dist_artifacts.py",
+            "Prepare Windows application payload",
+            "Sign staged Windows executable",
+            "Package signed Windows portable zip and MSI",
+            "Sign Windows MSI package",
+            "Verify signatures in final Windows artifacts",
+            "--prepare-only",
+            "--package-only",
+            "requirements-live.lock",
+            "release-assets/RELEASE_NOTES.md",
+            "--notes-file release-assets/RELEASE_NOTES.md",
+            "scripts/release_version.py normalize-tag",
+            "scripts/release_version.py is-prerelease",
+            "scripts/release_version.py validate-project",
+            '"--prerelease=${PRERELEASE}"',
+            '"--draft=${DRAFT}"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
@@ -231,10 +254,71 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
+        self.assertNotIn('version=${tag_name#v}', text)
+        self.assertNotIn('tag_name="${{ inputs.tag_name }}"', text)
         self.assertLess(
             text.index("Verify protected Windows signing configuration"),
             text.index("Download frontend bundle"),
         )
+        windows_app = text.split("  windows-app:\n", 1)[1].split("  publish:\n", 1)[0]
+        self.assertIn(
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock",
+            windows_app,
+        )
+        self.assertNotIn(
+            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            windows_app,
+        )
+        prepare_index = windows_app.index("Prepare Windows application payload")
+        sign_exe_index = windows_app.index("Sign staged Windows executable")
+        package_index = windows_app.index("Package signed Windows portable zip and MSI")
+        sign_msi_index = windows_app.index("Sign Windows MSI package")
+        verify_signatures_index = windows_app.index("Verify signatures in final Windows artifacts")
+        upload_index = windows_app.index("Upload Windows release packages")
+        self.assertLess(prepare_index, sign_exe_index)
+        self.assertLess(sign_exe_index, package_index)
+        self.assertLess(package_index, sign_msi_index)
+        self.assertLess(sign_msi_index, verify_signatures_index)
+        self.assertLess(verify_signatures_index, upload_index)
+        self.assertIn("build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe", windows_app)
+        self.assertIn("& $executable --smoke-test", windows_app)
+        self.assertIn("release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi", windows_app)
+        self.assertIn('Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "market-sentinel.exe"', windows_app)
+        self.assertIn("verify /pa /all $embeddedExecutables[0].FullName", windows_app)
+        self.assertIn("verify /pa /all $installer", windows_app)
+        self.assertNotIn("Get-ChildItem release-assets -File", windows_app)
+        checksum_index = text.index("sha256sum * > SHA256SUMS.txt")
+        notes_index = text.index("cat > release-assets/RELEASE_NOTES.md")
+        self.assertLess(checksum_index, notes_index)
+        metadata = text.split("  metadata:\n", 1)[1].split("  python-compatibility:\n", 1)[0]
+        self.assertIn("version=\"$(python scripts/release_version.py normalize-tag", metadata)
+        self.assertIn("prerelease=\"$(python scripts/release_version.py is-prerelease", metadata)
+        self.assertIn('if [ "${{ github.event_name }}" = "workflow_dispatch" ]', metadata)
+        self.assertIn('[ "${requested_prerelease}" != "${prerelease}" ]', metadata)
+        publish = text.split("  publish:\n", 1)[1]
+        self.assertEqual(publish.count('"${release_state_flags[@]}"'), 1)
+        self.assertNotIn("release_flags+=(--prerelease)", publish)
+        self.assertNotIn("release_flags+=(--draft)", publish)
+        self.assertNotIn("gh release delete", publish)
+        self.assertIn('gh release edit "${TAG_NAME}" --draft=true', publish)
+        self.assertIn('[[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]', publish)
+        self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"', publish)
+        self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100"', publish)
+        draft_index = publish.index('gh release edit "${TAG_NAME}" --draft=true')
+        upload_index = publish.index('gh release upload "${TAG_NAME}"')
+        cleanup_plan_index = publish.index("--print-stale-remote-asset-ids")
+        cleanup_index = publish.index('"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"')
+        remote_verify_index = publish.index("--verify-remote-inventory")
+        download_index = publish.index('gh release download "${TAG_NAME}"')
+        byte_compare_index = publish.index("cmp --")
+        final_publish_index = publish.rindex('gh release edit "${TAG_NAME}"')
+        self.assertLess(draft_index, upload_index)
+        self.assertLess(upload_index, cleanup_plan_index)
+        self.assertLess(cleanup_plan_index, cleanup_index)
+        self.assertLess(cleanup_index, remote_verify_index)
+        self.assertLess(remote_verify_index, download_index)
+        self.assertLess(download_index, byte_compare_index)
+        self.assertLess(byte_compare_index, final_publish_index)
         self.assertEqual(
             [],
             workflow_action_pin_issues(
@@ -382,6 +466,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "docs/PLATFORM_SUPPORT.md",
             "git tag v0.1.0",
             "SHA256SUMS.txt",
+            "Release reruns are fail-closed",
+            "numeric asset IDs",
             "release environment",
             "branch protection",
             "Windows code-signing credentials are required",

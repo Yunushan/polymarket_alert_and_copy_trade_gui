@@ -76,7 +76,8 @@ class DFlowAdapter(MarketAdapter):
                     )
                     if item
                 ],
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
                 "wallet_signed_transaction_required": True,
             }
         )

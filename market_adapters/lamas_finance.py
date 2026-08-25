@@ -162,11 +162,11 @@ class LamasFinanceAdapter(MarketAdapter):
                 "account_encoding": "Anchor RoundResult account",
                 "wallet_transaction_required": True,
                 "settlement_required": True,
-                "live_trading_supported": True,
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
-                "signed_transaction_submission_enabled": self.config_bool(
-                    "lamas_finance_submit_signed_transactions", False
-                ),
+                "live_trading_supported": bool(self.capabilities.live_trading),
+                "live_trading_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("live_trading_enabled", False),
+                "signed_transaction_submission_enabled": bool(self.capabilities.live_trading)
+                and self.config_bool("lamas_finance_submit_signed_transactions", False),
                 "rpc_configured": bool(
                     self.config.get("lamas_finance_rpc_url") or self.config.get("solana_rpc_url")
                 ),

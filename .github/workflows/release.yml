@@ -54,50 +54,44 @@ jobs:
 
       - name: Resolve release inputs
         id: release
+        env:
+          DISPATCH_TAG_NAME: ${{ inputs.tag_name }}
+          DISPATCH_PRERELEASE: ${{ inputs.prerelease }}
+          DISPATCH_DRAFT: ${{ inputs.draft }}
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag_name="${{ inputs.tag_name }}"
-            prerelease="${{ inputs.prerelease }}"
-            draft="${{ inputs.draft }}"
+            tag_name="${DISPATCH_TAG_NAME}"
+            requested_prerelease="${DISPATCH_PRERELEASE}"
+            draft="${DISPATCH_DRAFT}"
           else
             tag_name="${GITHUB_REF_NAME}"
-            if [[ "${tag_name}" == *-* ]]; then
-              prerelease="true"
-            else
-              prerelease="false"
-            fi
             draft="false"
           fi
 
-          if ! [[ "${tag_name}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must look like v1.2.3 or v1.2.3-rc.1; got ${tag_name}" >&2
+          version="$(python scripts/release_version.py normalize-tag "${tag_name}")"
+          prerelease="$(python scripts/release_version.py is-prerelease "${tag_name}")"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ "${requested_prerelease}" != "${prerelease}" ]; then
+            echo "The prerelease input (${requested_prerelease}) conflicts with tag ${tag_name} (${prerelease})." >&2
+            echo "Prerelease state is derived from the validated release tag; correct the input and retry." >&2
             exit 1
           fi
 
           echo "tag_name=${tag_name}" >> "${GITHUB_OUTPUT}"
-          echo "version=${tag_name#v}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
           echo "draft=${draft}" >> "${GITHUB_OUTPUT}"
 
       - name: Validate package version matches release tag
         env:
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
         shell: bash
         run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          import tomllib
-
-          expected = os.environ["RELEASE_VERSION"]
-          actual = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-          if actual != expected:
-              raise SystemExit(
-                  f"pyproject.toml project.version is {actual}, but the release tag is {expected}. "
-                  "Update [project].version before publishing this release."
-              )
-          PY
+          python scripts/release_version.py validate-project \
+            --tag "${RELEASE_TAG}" \
+            --pyproject pyproject.toml
 
       - name: Require release tag to resolve to workflow commit on protected main
         env:
@@ -383,7 +377,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock
           python -m pip install --no-cache-dir --no-deps -e .
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
 
@@ -404,32 +398,69 @@ jobs:
           }
           $wixVersion
 
-      - name: Build Windows portable zip and MSI
+      - name: Prepare Windows application payload
         shell: pwsh
         run: |
           python scripts/build_windows_release.py `
             --version "${{ needs.metadata.outputs.version }}" `
             --tag "${{ needs.metadata.outputs.tag_name }}" `
             --frontend-zip "release-inputs/release-frontend-dist.zip" `
-            --output-dir "release-assets"
+            --output-dir "release-assets" `
+            --prepare-only
 
-      - name: Sign Windows release packages
+      - name: Sign staged Windows executable
         env:
           WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
           WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
         shell: pwsh
         run: |
-          $targets = Get-ChildItem release-assets -File | Where-Object { $_.Extension -in '.exe', '.msi' }
-          if (-not $targets) {
-            throw "No Windows EXE or MSI files were produced for signing."
+          $executable = "build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe"
+          python scripts/sign_windows_release.py --path $executable
+          & $executable --smoke-test
+
+      - name: Package signed Windows portable zip and MSI
+        shell: pwsh
+        run: |
+          python scripts/build_windows_release.py `
+            --version "${{ needs.metadata.outputs.version }}" `
+            --tag "${{ needs.metadata.outputs.tag_name }}" `
+            --output-dir "release-assets" `
+            --package-only
+
+      - name: Sign Windows MSI package
+        env:
+          WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
+          WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
+        shell: pwsh
+        run: |
+          $installer = "release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi"
+          python scripts/sign_windows_release.py --path $installer
+
+      - name: Verify signatures in final Windows artifacts
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.metadata.outputs.tag_name }}"
+          $installer = "release-assets/market-sentinel-$tag-win-x64.msi"
+          $portable = "release-assets/market-sentinel-$tag-win-x64.zip"
+          $extractDirectory = Join-Path $env:RUNNER_TEMP "market-sentinel-portable-signature-check"
+          Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
+          $embeddedExecutables = @(
+            Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "market-sentinel.exe"
+          )
+          if ($embeddedExecutables.Count -ne 1) {
+            throw "Expected exactly one embedded market-sentinel.exe; found $($embeddedExecutables.Count)."
           }
-          $arguments = @()
-          foreach ($target in $targets) {
-            $arguments += "--path"
-            $arguments += $target.FullName
+          $signTool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          & $signTool verify /pa /all $embeddedExecutables[0].FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "The executable embedded in the portable ZIP failed Authenticode verification."
           }
-          python scripts/sign_windows_release.py @arguments
+          & $signTool verify /pa /all $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "The final MSI failed Authenticode verification."
+          }
 
       - name: Upload Windows release packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -507,7 +538,7 @@ jobs:
             cd release-assets
             sha256sum * > SHA256SUMS.txt
           )
-          cat > RELEASE_NOTES.md <<EOF
+          cat > release-assets/RELEASE_NOTES.md <<EOF
           ## ${APP_NAME} ${tag}
 
           Automated release for \`${tag}\`.
@@ -543,29 +574,88 @@ jobs:
         with:
           subject-path: release-assets/*
 
-      - name: Publish or update GitHub release
+      - name: Reconcile and publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
           PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
           DRAFT: ${{ needs.metadata.outputs.draft }}
         shell: bash
         run: |
-          release_flags=()
-          if [ "${PRERELEASE}" = "true" ]; then
-            release_flags+=(--prerelease)
-          fi
-          if [ "${DRAFT}" = "true" ]; then
-            release_flags+=(--draft)
-          fi
+          remote_release_json="${RUNNER_TEMP}/market-sentinel-release.json"
+          remote_assets_json="${RUNNER_TEMP}/market-sentinel-release-assets.json"
+          stale_asset_ids="${RUNNER_TEMP}/market-sentinel-stale-release-asset-ids.txt"
+
+          release_state_flags=(
+            "--prerelease=${PRERELEASE}"
+            "--draft=${DRAFT}"
+          )
 
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
-            gh release upload "${TAG_NAME}" release-assets/* --clobber
-            gh release edit "${TAG_NAME}" --title "${TAG_NAME}" --notes-file RELEASE_NOTES.md "${release_flags[@]}"
+            # Never expose a mixture of assets from two workflow attempts.
+            gh release edit "${TAG_NAME}" --draft=true
           else
-            gh release create "${TAG_NAME}" release-assets/* \
+            gh release create "${TAG_NAME}" \
+              --draft \
               --title "${TAG_NAME}" \
-              --notes-file RELEASE_NOTES.md \
-              --target "${GITHUB_SHA}" \
-              "${release_flags[@]}"
+              --notes-file release-assets/RELEASE_NOTES.md \
+              --target "${GITHUB_SHA}"
           fi
+
+          gh release upload "${TAG_NAME}" release-assets/* --clobber
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" > "${remote_release_json}"
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq 'flatten' > "${remote_assets_json}"
+          python scripts/verify_release_assets.py \
+            --asset-dir release-assets \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}" \
+            --remote-release-json "${remote_release_json}" \
+            --remote-assets-json "${remote_assets_json}" \
+            --print-stale-remote-asset-ids > "${stale_asset_ids}"
+
+          while IFS= read -r asset_id; do
+            if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Refusing invalid release asset id: ${asset_id}" >&2
+              exit 1
+            fi
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done < "${stale_asset_ids}"
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" > "${remote_release_json}"
+          reconciled_release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
+          if [ "${reconciled_release_id}" != "${release_id}" ]; then
+            echo "Release identity changed during asset reconciliation." >&2
+            exit 1
+          fi
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq 'flatten' > "${remote_assets_json}"
+          python scripts/verify_release_assets.py \
+            --asset-dir release-assets \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}" \
+            --remote-release-json "${remote_release_json}" \
+            --remote-assets-json "${remote_assets_json}" \
+            --verify-remote-inventory
+
+          downloaded_assets="$(mktemp -d "${RUNNER_TEMP}/market-sentinel-published-assets.XXXXXX")"
+          gh release download "${TAG_NAME}" --dir "${downloaded_assets}"
+          python scripts/verify_release_assets.py \
+            --asset-dir "${downloaded_assets}" \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}"
+          for local_asset in release-assets/*; do
+            cmp -- "${local_asset}" "${downloaded_assets}/$(basename "${local_asset}")"
+          done
+
+          # Publish only after the remote inventory and downloaded bytes match locally.
+          gh release edit "${TAG_NAME}" \
+            --title "${TAG_NAME}" \
+            --notes-file release-assets/RELEASE_NOTES.md \
+            "${release_state_flags[@]}"

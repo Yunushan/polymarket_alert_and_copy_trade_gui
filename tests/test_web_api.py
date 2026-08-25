@@ -3974,10 +3974,16 @@ class WebApiTests(unittest.TestCase):
 
     def test_health_payload_documents_parallel_gui_contract(self) -> None:
         with patch("web_api.project_version", return_value="9.8.7"):
-            payload = health_payload(Path("local-config.json"), Path("frontend-dist"))
+            payload = health_payload(
+                Path("local-config.json"),
+                Path("frontend-dist"),
+                {"source_revision": "a" * 40, "frontend_sha256": "b" * 64},
+            )
 
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["api_version"], "9.8.7")
+        self.assertEqual(payload["runtime_source_revision"], "a" * 40)
+        self.assertEqual(payload["runtime_frontend_sha256"], "b" * 64)
         self.assertEqual(payload["mode"], "parallel")
         self.assertTrue(payload["python_gui_available"])
         self.assertEqual(payload["python_gui_command"], "python app.py")
@@ -4718,6 +4724,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(health_headers.get("Cache-Control"), "no-store")
         health = json.loads(health_body.decode("utf-8"))
         self.assertTrue(health["frontend_build_available"])
+        self.assertRegex(health["runtime_source_revision"], r"^[0-9a-f]{40}$")
+        self.assertRegex(health["runtime_frontend_sha256"], r"^[0-9a-f]{64}$")
 
     def test_static_cache_control_rejects_unknown_relative_path(self) -> None:
         self.assertEqual(static_cache_control(None), "no-store")

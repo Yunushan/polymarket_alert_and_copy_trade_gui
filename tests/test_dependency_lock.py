@@ -19,7 +19,7 @@ class DependencyLockTests(unittest.TestCase):
             "requests>=2.31.0",
             "truststore>=0.10.0",
             "websocket-client>=1.7.0",
-            "tomli>=2.0.0; python_version < '3.11'",
+            "tomli>=2.4.1; python_version < '3.11'",
         ]
         self.assertEqual([], lock_issues(lock.read_text(encoding="utf-8"), dependencies), project.read_text(encoding="utf-8"))
 
@@ -28,6 +28,29 @@ class DependencyLockTests(unittest.TestCase):
         self.assertNotIn("pytest==", lock)
         self.assertNotIn("coverage==", lock)
 
+    def test_repository_locks_satisfy_requirements_file_specifiers(self) -> None:
+        sources = (
+            ("requirements.lock", ("requirements.txt",)),
+            ("requirements-live.lock", ("requirements.txt", "requirements-live.txt")),
+            (
+                "requirements-test.lock",
+                ("requirements.txt", "requirements-live.txt", "requirements-test.txt"),
+            ),
+        )
+        for lock_name, source_names in sources:
+            dependencies = []
+            for source_name in source_names:
+                dependencies.extend(
+                    line.strip()
+                    for line in (ROOT / source_name).read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.lstrip().startswith(("#", "-r"))
+                )
+            with self.subTest(lock=lock_name):
+                self.assertEqual(
+                    [],
+                    lock_issues((ROOT / lock_name).read_text(encoding="utf-8"), dependencies),
+                )
+
     def test_runtime_derived_locks_include_python_310_requirements_with_hashes(self) -> None:
         for name in ("requirements.lock", "requirements-live.lock", "requirements-test.lock"):
             with self.subTest(name=name):
@@ -35,8 +58,8 @@ class DependencyLockTests(unittest.TestCase):
                 self.assertIn('exceptiongroup==1.3.1 ; python_version < "3.11"', lock)
                 self.assertIn("--hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", lock)
                 self.assertIn("--hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598", lock)
-                self.assertIn('tomli==2.2.1 ; python_version < "3.11"', lock)
-                self.assertIn("--hash=sha256:cb55c73c5f4408779d0cf3eef9f762b9c9f147a77de7b258bef0a5628adc85cc", lock)
+                self.assertIn('tomli==2.4.1 ; python_version < "3.11"', lock)
+                self.assertIn("--hash=sha256:01f520d4f53ef97964a240a035ec2a869fe1a37dde002b57ebc4417a27ccd853", lock)
 
     def test_build_lock_includes_hash_pinned_distribution_build_toolchain(self) -> None:
         source = (ROOT / "requirements-build.txt").read_text(encoding="utf-8")
@@ -53,7 +76,7 @@ class DependencyLockTests(unittest.TestCase):
             [],
             lock_issues(
                 lock,
-                ["requests>=2.31.0", "py-clob-client>=0.34.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.16.1"],
+                ["requests>=2.31.0", "py-clob-client>=0.34.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.16.4"],
             ),
         )
 
@@ -85,6 +108,26 @@ class DependencyLockTests(unittest.TestCase):
         issues = lock_issues(lock, ["requests>=2", "truststore>=1"])
         self.assertIn("requests is not hash protected", issues)
         self.assertIn("direct dependency truststore is missing from requirements.lock", issues)
+
+    def test_lock_validation_rejects_ruff_version_outside_source_pin(self) -> None:
+        lock = "ruff==0.16.3 \\\n    --hash=sha256:" + "a" * 64 + "\n"
+
+        issues = lock_issues(lock, ["ruff==0.16.4"])
+
+        self.assertIn(
+            "locked ruff==0.16.3 does not satisfy source requirement ruff==0.16.4",
+            issues,
+        )
+
+    def test_lock_validation_rejects_tomli_version_below_source_minimum(self) -> None:
+        lock = 'tomli==2.2.1 ; python_version < "3.11" \\\n    --hash=sha256:' + "b" * 64 + "\n"
+
+        issues = lock_issues(lock, ['tomli>=2.4.1; python_version < "3.11"'])
+
+        self.assertIn(
+            'locked tomli==2.2.1 does not satisfy source requirement tomli>=2.4.1; python_version < "3.11"',
+            issues,
+        )
 
 
 if __name__ == "__main__":

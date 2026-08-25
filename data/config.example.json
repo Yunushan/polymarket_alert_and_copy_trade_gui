@@ -46,7 +46,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Read-only games, conditions, odds, bettor bet history, WebSocket subscriptions, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting only accepts pre-signed wallet order payloads and stays disabled by default."
+        "notes": "Read-only games, conditions, odds, bettor bet history, WebSocket subscriptions, simulation-first copy previews, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting is deliberately unsupported and fail-closed until signed clientBetData can be decoded and bound to the reviewed market, outcome, stake, and odds."
       }
     },
     "betfair_exchange": {
@@ -65,7 +65,7 @@
         "live_trading_max_notional": 25.0,
         "betfair_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, current/cleared account orders, funds/account/statement/currency-rate reads, local paper orders, and guarded placeOrders plus cancelOrders/updateOrders/replaceOrders support are implemented through Betfair's official Exchange and Accounts APIs. Order management requires betfair_order_management_enabled plus the shared live-safety gates and stays disabled by default; copy trading remains unsupported."
+        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, current/cleared account orders, funds/account/statement/currency-rate reads, local paper orders, guarded placeOrders, and cancelOrders are implemented through Betfair's official Exchange and Accounts APIs. Order management is cancellation-only, requires betfair_order_management_enabled plus the shared live-safety gates, and stays disabled by default. The maximum-exposure cap uses full BACK stake and worst-case LAY liability; copy previews remain simulation-first."
       }
     },
     "betmgm": {
@@ -104,7 +104,7 @@
         "ibkr_order_management_enabled": false,
         "ibkr_manual_indicator": false,
         "ibkr_external_operator": "",
-        "notes": "Official CME event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/modification, alerts, paper orders, and IBKR Web API orders are implemented. An authorized IBKR session, CME/IBKR data and trading entitlements, and funded verification remain external gates."
+        "notes": "Official CME event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/cancel-all, alerts, paper orders, and IBKR Web API limit orders are implemented. Order management cannot modify or reprice an existing order. An authorized IBKR session, CME/IBKR data and trading entitlements, and funded verification remain external gates."
       }
     },
     "context_v2": {
@@ -112,10 +112,10 @@
       "settings": {
         "adapter_status": "implemented",
         "context_api_base_url": "https://api.context.markets/v2",
-        "credential_env_vars": ["CONTEXT_API_KEY"],
+        "credential_env_vars": ["CONTEXT_API_KEY", "CONTEXT_TRADER_ADDRESS"],
         "live_trading_enabled": false,
         "context_order_management_enabled": false,
-        "notes": "Official Context v2 market, price, orderbook, alerts, paper-order, guarded externally signed-order, and guarded signed cancellation paths are implemented. Signed market, outcome, side, price, and size fields must match the preflighted request before transport; cancellation sends only externally signed trader/nonce/signature envelopes to fixed official endpoints. Live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates."
+        "notes": "Official Context v2 market, price, orderbook, alerts, paper-order, guarded externally signed-order, and guarded signed cancellation paths are implemented. Live submission accepts only the documented signed-order field set: market, outcome, side, price, and size must match shared preflight; trader must match the trusted CONTEXT_TRADER_ADDRESS; type is limit; and expiry, maxFee, makerRoleConstraint, and inventoryModeConstraint must be zero. Unknown signed fields fail before transport. Cancellation sends only externally signed trader/nonce/signature envelopes to fixed official endpoints. Live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates."
       }
     },
     "crypto_com_predict": {
@@ -192,7 +192,7 @@
         "ibkr_order_management_enabled": false,
         "ibkr_manual_indicator": false,
         "ibkr_external_operator": "",
-        "notes": "Official ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/modification, alerts, paper orders, and guarded buy-only IBKR Web API orders are implemented. An authorized IBKR session, ForecastEx permissions, and funded verification remain external gates."
+        "notes": "Official ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/cancel-all, alerts, paper orders, and guarded buy-only IBKR Web API limit orders are implemented. Order management cannot modify or reprice an existing order. An authorized IBKR session, ForecastEx permissions, and funded verification remain external gates."
       }
     },
     "frenzy_finance": {
@@ -257,7 +257,7 @@
         "hedgehog_program_id": "PARrVs6F5egaNuz8g6pKJyU4ze3eX5xGZCFb3GLiVvu",
         "hedgehog_amount_scale": 1000000,
         "hedgehog_submit_signed_transactions": false,
-        "notes": "Official Hedgehog HPL Parimutuel/Eclipse MarketV1 accounts support on-chain discovery, pooled prices, alerts, dry-run DepositV1 intents, and a guarded submission boundary for externally signed DepositV1 transactions. Live submission remains off by default and requires reviewed program/market/option/amount metadata, wallet signing, and settlement handling. CLOB depth and copy trading remain unsupported."
+        "notes": "Official Hedgehog HPL Parimutuel/Eclipse MarketV1 accounts support on-chain discovery, pooled prices, alerts, and dry-run DepositV1 intents. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed deposit; hedgehog_submit_signed_transactions cannot enable submission today. CLOB depth and copy trading remain unsupported."
       }
     },
     "hyperliquid": {
@@ -271,7 +271,7 @@
         ],
         "live_trading_enabled": false,
         "hyperliquid_order_management_enabled": false,
-        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, open/historical orders, perpetual and spot account state, portfolio, subaccounts, alerts, paper orders, and simulation-first copy previews are implemented. Guarded signed cancel, cancel-by-cloid, modify, batch-modify, and schedule-cancel actions use the documented POST /exchange contract, remain disabled by default, and require a complete externally signed envelope plus shared live-safety confirmation. Set HYPERLIQUID_ACCOUNT_WALLET for account reads and HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history; the account reader falls back to the trade wallet when needed. Wallet signing, settlement, and funded execution remain external gates."
+        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, open/historical orders, perpetual and spot account state, portfolio, subaccounts, alerts, paper orders, and simulation-first copy previews are implemented. Guarded signed cancel, cancel-by-cloid, and schedule-cancel actions use the documented POST /exchange contract, remain disabled by default, and require a complete externally signed envelope plus shared live-safety confirmation; modify and batch-modify are deliberately unavailable. Set HYPERLIQUID_ACCOUNT_WALLET for account reads and HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history; the account reader falls back to the trade wallet when needed. Wallet signing, settlement, and funded execution remain external gates."
       }
     },
     "hypermind": {
@@ -306,7 +306,7 @@
         "ibkr_order_management_enabled": false,
         "ibkr_manual_indicator": false,
         "ibkr_external_operator": "",
-        "notes": "Official IBKR ForecastTrader/ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/modification, alerts, paper orders, and guarded buy-only IBKR Web API orders are implemented. An authorized IBKR session, account/data entitlements, and funded verification remain external gates."
+        "notes": "Official IBKR ForecastTrader/ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/cancel-all, alerts, paper orders, and guarded buy-only IBKR Web API limit orders are implemented. Order management cannot modify or reprice an existing order. An authorized IBKR session, account/data entitlements, and funded verification remain external gates."
       }
     },
     "infer": {
@@ -357,7 +357,7 @@
         "live_trading_max_notional": 25.0,
         "myriad_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Official grouped event/market discovery via /markets?group_by_event=true and /events/{id}, outcome price reads, orderbooks, alerts, bounded account_activity, portfolio, and market_positions reads from the public wallet endpoints, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded unsigned split/merge/redeem transaction intents, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all/batch-modify mutations are implemented through the official Myriad API. Signed network, market, outcome, side, 1e18-scaled amount, and price must match shared preflight and the trusted configured network before submission. Position intents never sign or submit on-chain; live trading and order management stay disabled by default."
+        "notes": "Official grouped event/market discovery via /markets?group_by_event=true and /events/{id}, outcome price reads, orderbooks, alerts, bounded account_activity, portfolio, and market_positions reads from the public wallet endpoints, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded unsigned split/merge/redeem transaction intents, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all mutations are implemented through the official Myriad API. Batch modification is deliberately unavailable. Signed network, market, outcome, side, 1e18-scaled amount, and price must match shared preflight and the trusted configured network before submission. Position intents never sign or submit on-chain; live trading and order management stay disabled by default."
       }
     },
     "kalshi": {
@@ -377,7 +377,7 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Official market/event discovery, prices/orderbooks, public trades, candles, signed account recovery, guarded live order placement, and guarded V2 cancel/batch-cancel/amend/decrease mutations are supported. Order management requires kalshi_order_management_enabled plus live_trading_enabled, live_trading_confirmed, and exact operator confirmation; live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
+        "notes": "Official market/event discovery, prices/orderbooks, public trades, candles, signed account recovery, guarded live order placement, and guarded V2 cancel/batch-cancel/decrease mutations are supported. Amendment is deliberately unavailable so order management cannot increase or reprice exposure. Order management requires kalshi_order_management_enabled plus live_trading_enabled, live_trading_confirmed, and exact operator confirmation; live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
       }
     },
     "limitless_exchange": {
@@ -495,7 +495,7 @@
         "omen_submit_signed_transactions": false,
         "omen_candle_trade_limit": 1000,
         "min_request_interval_seconds": 0.5,
-        "notes": "Market discovery, outcome listing, AMM marginal-price alerts, public FPMM trades, and bounded derived candles are implemented through the documented Omen subgraph schema. Trade size uses each collateral token's indexed scale; candle derivation rejects ambiguous same-second prices. Configure OMEN_SUBGRAPH_URL or omen_subgraph_url to a maintained GraphQL endpoint. Guarded live submission forwards only an externally signed buy/sell transaction after reviewed FPMM/side/outcome/calldata checks; it remains off by default and requires collateral approval and settlement handling."
+        "notes": "Market discovery, outcome listing, AMM marginal-price alerts, public FPMM trades, and bounded derived candles are implemented through the documented Omen subgraph schema. Trade size uses each collateral token's indexed scale; candle derivation rejects ambiguous same-second prices. Configure OMEN_SUBGRAPH_URL or omen_subgraph_url to a maintained GraphQL endpoint. Live submission is deliberately unsupported and fail-closed until signed calldata can be decoded and bound to the reviewed FPMM order; omen_submit_signed_transactions cannot enable submission today."
       }
     },
     "polymarket": {
@@ -622,7 +622,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "thales_submit_signed_transactions": false,
-        "notes": "Official Thales AMM market/quote reads, positional prices, alerts, local paper orders, and account-scoped positions/option-transaction reads are implemented. Configure THALES_SUBGRAPH_URL (or thales_subgraph_url) for the official positional-market subgraph and provide a wallet at request time or via THALES_ACCOUNT_ADDRESS. Guarded live submission accepts only an externally signed transaction whose reviewed chain, AMM target, method, calldata, market, and position metadata match configuration; wallet signing, collateral approval, and settlement remain operator responsibilities."
+        "notes": "Official Thales AMM market/quote reads, positional prices, alerts, local paper orders, and account-scoped positions/option-transaction reads are implemented. Configure THALES_SUBGRAPH_URL (or thales_subgraph_url) for the official positional-market subgraph and provide a wallet at request time or via THALES_ACCOUNT_ADDRESS. Live submission is deliberately unsupported and fail-closed until signed calldata can be decoded and bound to the reviewed order; thales_submit_signed_transactions cannot enable submission today."
       }
     },
     "underdog_sports": {
@@ -662,7 +662,7 @@
         "credential_env_vars": ["ZEITGEIST_RPC_URL", "SUBSTRATE_RPC_URL"],
         "live_trading_enabled": false,
         "min_request_interval_seconds": 0.5,
-        "notes": "Official Zeitgeist Subsquid/indexer market and asset discovery, outcome prices, alerts, and local paper orders are implemented. Guarded live forwarding accepts only an externally signed HybridRouter buy/sell extrinsic after reviewed market/asset/order metadata and runtime-version checks through zeitgeist_rpc_url; wallet signing, approvals, and settlement remain external and the gate is off by default."
+        "notes": "Official Zeitgeist Subsquid/indexer market and asset discovery, outcome prices, alerts, and local paper orders are implemented. Live submission is deliberately unsupported and fail-closed until the signed extrinsic can be decoded and bound to the reviewed HybridRouter order; zeitgeist_submit_signed_extrinsics cannot enable submission today."
       }
     },
     "coinbase_prediction_markets": {
@@ -683,8 +683,11 @@
         "credential_env_vars": ["PROB_ADDRESS", "PROB_API_KEY", "PROB_API_SECRET", "PROB_PASSPHRASE"],
         "probable_chain_id": 56,
         "probable_amount_decimals": 18,
+        "probable_fee_rate_bps": 0,
+        "probable_order_nonce": 0,
+        "probable_signature_type": 0,
         "live_trading_enabled": false,
-        "notes": "Official Probable market/CLOB discovery, prices, orderbooks, alerts, paper orders, and guarded externally signed-order submission are implemented. Signed token, side, price, and size must match shared preflight using the trusted collateral precision; BNB mainnet defaults to 18 decimals and other chains require an explicit reviewed scale. Live execution requires credentials, a signed order, BSC account readiness, and explicit opt-in."
+        "notes": "Official Probable market/CLOB discovery, prices, orderbooks, alerts, paper orders, and guarded externally signed-order submission are implemented. Live submission accepts only the documented outer and signed-order fields. Signed token, side, price, and size must match shared preflight using the trusted collateral precision; maker, signer, and owner must match PROB_ADDRESS; taker and expiration must be zero; feeRateBps, nonce, and signatureType must match the trusted settings above; and the outer envelope is fixed to GTC with deferExec=true and no slippage modifier. Unknown fields fail before transport. BNB mainnet defaults to 18 decimals and other chains require an explicit reviewed scale. Live execution requires credentials, a signed order, BSC account readiness, and explicit opt-in."
       }
     },
     "kalshi_via_robinhood": {
@@ -717,7 +720,7 @@
         "seer_trading_contract_addresses": [],
         "seer_submit_signed_transactions": false,
         "live_trading_enabled": false,
-        "notes": "Official Seer markets-search/get-market discovery, chain-qualified outcome prices, alerts, and local paper orders are implemented. Guarded live forwarding accepts only an externally signed transaction to an explicitly reviewed third-party DEX allow-list through seer_rpc_url; wallet signing, approvals, settlement, depth, and copy trading remain operator-owned or disabled."
+        "notes": "Official Seer markets-search/get-market discovery, chain-qualified outcome prices, alerts, and local paper orders are implemented. Live submission is deliberately unsupported and fail-closed until signed DEX calldata can be decoded and bound to the reviewed order; seer_submit_signed_transactions cannot enable submission today. Wallet signing, approvals, settlement, depth, and copy trading remain operator-owned or unsupported."
       }
     },
     "dflow": {
@@ -726,7 +729,7 @@
         "adapter_status": "implemented",
         "credential_env_vars": ["DFLOW_API_KEY", "DFLOW_WALLET_ADDRESS", "DFLOW_USER_PUBLIC_KEY", "DFLOW_SOLANA_RPC_URL"],
         "live_trading_enabled": false,
-        "notes": "Official DFlow nested event/market discovery, outcome mints, prices, orderbooks, alerts, wallet-filtered on-chain fills, simulation-first copy previews, paper trade requests, and guarded wallet-signed Solana transaction submission are implemented. Credentials, Proof/KYC, wallet, balance, redemption, and order-status evidence remain external gates."
+        "notes": "Official DFlow nested event/market discovery, outcome mints, prices, orderbooks, alerts, wallet-filtered on-chain fills, simulation-first copy previews, and paper trade requests are implemented. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed order. Credentials, Proof/KYC, wallet, balance, redemption, and order-status evidence remain external gates."
       }
     },
     "space": {
@@ -756,7 +759,7 @@
         "xmarket_order_management_enabled": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.6,
-        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key order submission, authenticated positions/order reads, bounded account-scoped filled-order history with derived candles, simulation-first copy previews from complete authenticated fills, and fixed batch create/cancel mutations are implemented through the official Xmarket API. Public trade history remains unsupported. Live trading and order management stay disabled by default; copy previews never submit live orders; order management additionally requires xmarket_order_management_enabled and the shared safety gates."
+        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key single-order submission, authenticated positions/order reads, bounded account-scoped filled-order history with derived candles, simulation-first copy previews from complete authenticated fills, and fixed batch cancellation are implemented through the official Xmarket API. Order-management batch creation is deliberately unavailable. Public trade history remains unsupported. Live trading and order management stay disabled by default; copy previews never submit live orders; order management additionally requires xmarket_order_management_enabled and the shared safety gates."
       }
     },
     "trueo": {
@@ -771,7 +774,7 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Official Base TruthMarketManager/TruthMarket and documented Uniswap pool reads, discovery, prices, alerts, paper orders, and guarded externally signed transactions are implemented. Live forwarding also requires an explicit reviewed target allow-list and exact decoded transaction/order metadata. CLOB depth and copy trading remain unsupported."
+        "notes": "Official Base TruthMarketManager/TruthMarket and documented Uniswap pool reads, discovery, prices, alerts, paper orders, and transaction-envelope decoding are implemented. Live submission is deliberately unsupported and fail-closed until router calldata can be ABI-decoded and bound to the reviewed order; trueo_submit_signed_transactions cannot enable submission today. CLOB depth and copy trading remain unsupported."
       }
     },
     "prdt_finance": {
@@ -805,7 +808,7 @@
         "live_trading_enabled": false,
         "gnosis_submit_signed_transactions": false,
         "gnosis_candle_trade_limit": 1000,
-        "notes": "Official Gnosis/Omen FixedProductMarketMaker GraphQL alias; configure a current Gnosis/Omen subgraph endpoint. Discovery, prices, public FPMM trades, per-collateral indexed scaling, bounded derived candles with ambiguous same-second OHLC rejection, alerts, paper orders, and a guarded externally signed buy/sell transaction boundary are supported; live submission remains off by default and CLOB depth, collateral approval, settlement, and copy trading remain unsupported."
+        "notes": "Official Gnosis/Omen FixedProductMarketMaker GraphQL alias; configure a current Gnosis/Omen subgraph endpoint. Discovery, prices, public FPMM trades, per-collateral indexed scaling, bounded derived candles with ambiguous same-second OHLC rejection, alerts, and paper orders are supported. Live submission is deliberately unsupported and fail-closed until signed calldata can be decoded and bound to the reviewed FPMM order; gnosis_submit_signed_transactions cannot enable submission today. CLOB depth, collateral approval, settlement, and live copy trading remain unsupported."
       }
     },
     "zeitgeist_sdk_markets": {
@@ -817,7 +820,7 @@
         "zeitgeist_submit_signed_extrinsics": false,
         "credential_env_vars": ["ZEITGEIST_SDK_INDEXER_URL", "ZEITGEIST_RPC_URL", "SUBSTRATE_RPC_URL"],
         "live_trading_enabled": false,
-        "notes": "The official Zeitgeist SDK/Markets Subsquid GraphQL schema is implemented as an explicit alias with independent discovery, outcome prices, alerts, and dry-run paper orders. The alias shares the guarded HybridRouter signed-extrinsic boundary and remains off by default; signing, settlement, CLOB depth, and copy trading remain external or unsupported."
+        "notes": "The official Zeitgeist SDK/Markets Subsquid GraphQL schema is implemented as an explicit alias with independent discovery, outcome prices, alerts, and dry-run paper orders. Live submission is deliberately unsupported and fail-closed until the signed extrinsic can be decoded and bound to the reviewed HybridRouter order; zeitgeist_submit_signed_extrinsics cannot enable submission today. Settlement, CLOB depth, and copy trading remain unsupported."
       }
     },
     "metadao": {
@@ -834,7 +837,7 @@
         "metadao_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Official MetaDAO Futarchy DEX /api/tickers discovery, bid/ask/last prices, bounded recent public spot-swap history, derived OHLCV candles, alerts, and local paper orders are implemented. History scans are capped per call by metadao_history_slot_window (1..500000), metadao_history_max_windows (1..50; per-call scan/request cap), metadao_history_event_cap (1..250000; total decoded rows per call), and metadao_history_response_byte_cap (1024..67108864; streamed response bytes before JSON decoding). Calls without timestamp bounds intentionally return only the bounded recent slice and may return fewer rows or omit the earliest partial candle bucket; every retained candle from a truncated scan is marked partial with bounded-slot coverage. Timestamp-complete requests must reach pair creation and verify its declared creation swap within the configured scan horizon or fail closed, and arbitrary full-history completeness is not claimed. Guarded live forwarding accepts only an externally signed transaction to an explicitly reviewed Solana router allow-list through metadao_solana_rpc_url; wallet signing, approvals, settlement, depth, and copy trading remain operator-owned or disabled."
+        "notes": "Official MetaDAO Futarchy DEX /api/tickers discovery, bid/ask/last prices, bounded recent public spot-swap history, derived OHLCV candles, alerts, and local paper orders are implemented. History scans are capped per call by metadao_history_slot_window (1..500000), metadao_history_max_windows (1..50; per-call scan/request cap), metadao_history_event_cap (1..250000; total decoded rows per call), and metadao_history_response_byte_cap (1024..67108864; streamed response bytes before JSON decoding). Calls without timestamp bounds intentionally return only the bounded recent slice and may return fewer rows or omit the earliest partial candle bucket; every retained candle from a truncated scan is marked partial with bounded-slot coverage. Timestamp-complete requests must reach pair creation and verify its declared creation swap within the configured scan horizon or fail closed, and arbitrary full-history completeness is not claimed. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed order; metadao_submit_signed_transactions cannot enable submission today. Wallet signing, approvals, settlement, depth, and live copy trading remain unsupported."
       }
     },
     "levr_bet": {
@@ -870,7 +873,7 @@
         "lamas_finance_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Official Lamas Finance Anchor PricePredict and UpOrDown programs are mapped to Solana JSON-RPC discovery, pooled prices, alerts, local paper intents, and a guarded externally signed predict boundary. The default deployment is the documented devnet example; confirm any production program/mint inventory before enabling it. CLOB depth, settlement, and copy trading remain unsupported."
+        "notes": "Official Lamas Finance Anchor PricePredict and UpOrDown programs are mapped to Solana JSON-RPC discovery, pooled prices, alerts, and local paper intents. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed prediction; lamas_finance_submit_signed_transactions cannot enable submission today. The default deployment is the documented devnet example; confirm any production program/mint inventory before use. CLOB depth, settlement, and copy trading remain unsupported."
       }
     },
     "zetarium_world": {
@@ -908,7 +911,7 @@
         "zeitgeist_submit_signed_extrinsics": false,
         "credential_env_vars": ["ZEITGEIST_POOLS_INDEXER_URL", "ZEITGEIST_INDEXER_URL", "ZEITGEIST_RPC_URL", "SUBSTRATE_RPC_URL"],
         "live_trading_enabled": false,
-        "notes": "Pool-scoped Zeitgeist market/pool/asset GraphQL adapter with guarded HybridRouter signed-extrinsic forwarding that requires reviewed pool_id metadata; the gate is off by default and pool accounting, settlement, signing, CLOB depth, and copy trading remain external or unsupported."
+        "notes": "Pool-scoped Zeitgeist market/pool/asset GraphQL adapter for discovery, prices, alerts, and paper orders. Live submission is deliberately unsupported and fail-closed until the signed extrinsic can be decoded and bound to the reviewed pool-scoped HybridRouter order; zeitgeist_submit_signed_extrinsics cannot enable submission today. Pool accounting, settlement, CLOB depth, and copy trading remain unsupported."
       }
     },
     "reality_eth_markets": {
@@ -967,7 +970,7 @@
         "credential_env_vars": ["MATCHBOOK_SESSION_TOKEN", "MATCHBOOK_USERNAME", "MATCHBOOK_PASSWORD", "MATCHBOOK_MFA_CODE"],
         "live_trading_enabled": false,
         "matchbook_order_management_enabled": false,
-        "notes": "Official Matchbook event/market/runner discovery, decimal-odds prices, orderbooks, alerts, paper orders, guarded session-authenticated offer submission, and fixed cancel/edit offer mutations are implemented. Account session, region eligibility, API terms, and funded execution remain external gates; order management is opt-in and disabled by default."
+        "notes": "Official Matchbook event/market/runner discovery, decimal-odds prices, orderbooks, alerts, paper orders, guarded session-authenticated offer submission, and fixed single/batch/global cancellation are implemented. Edit mutations are deliberately unavailable. The maximum-exposure cap uses full BACK stake and worst-case LAY liability. Account session, region eligibility, API terms, and funded execution remain external gates; order management is opt-in and disabled by default."
       }
     },
     "meta_arena": {
