@@ -112,10 +112,10 @@ TRUEO_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
-    # Trueo's documented Uniswap V3 pools emit canonical Swap events.  The
-    # adapter decodes bounded, public pool fills into normalized trade rows and
-    # derives candles locally; router-level wallet identity remains unavailable
-    # so copy trading stays disabled.
+    # Trueo's documented Uniswap V3 and V4 pools emit canonical Swap events.
+    # The adapter decodes bounded, public pool fills into normalized trade rows
+    # and derives candles locally; router-level wallet identity remains
+    # unavailable so copy trading stays disabled.
     trade_history=True,
     candle_history=True,
     alerts=True,
@@ -513,8 +513,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.trueo.com/trading",
         description=(
             "Official Trueo Base on-chain adapter for TruthMarketManager discovery, immutable market fields, "
-            "Uniswap V3 outcome prices, alerts, paper orders, and guarded externally signed transactions; "
-            "CLOB depth and copy trading remain unsupported."
+            "validated Uniswap V3/V4 outcome prices, bounded swap history, derived candles, alerts, paper "
+            "orders, and guarded externally signed transactions; CLOB depth and copy trading remain unsupported."
         ),
         capabilities=TRUEO_CAPABILITIES,
     ),

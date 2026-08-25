@@ -194,6 +194,7 @@ HISTORY_CAPABILITIES = {
     "gnosis_prediction_markets": {"trade_history", "candle_history"},
     "smarkets": {"trade_history", "candle_history"},
     "seer": {"candle_history"},
+    "trueo": {"trade_history", "candle_history"},
     "metadao": {"trade_history", "candle_history"},
     "prophet_exchange": {"trade_history", "candle_history"},
 }

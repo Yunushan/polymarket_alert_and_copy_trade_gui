@@ -68,6 +68,7 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Gemini account required",
     "Region limited",
     "Solana RPC; externally signed wallet transaction required for live orders",
+    "Production Base RPC and externally signed wallet transaction required for live orders",
     "Devnet example; production deployment must be reviewed",
 )
 IMPLEMENTED_MARKETS = {

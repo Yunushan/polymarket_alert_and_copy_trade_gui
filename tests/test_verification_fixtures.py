@@ -749,12 +749,38 @@ class VerificationFixtureTests(unittest.TestCase):
 
     def test_trueo_fixtures_cover_onchain_manager_pool_and_signed_transaction_shapes(self) -> None:
         rpc = json.loads((FIXTURE_ROOT / "trueo" / "rpc.json").read_text(encoding="utf-8"))
+        rpc_v4 = json.loads((FIXTURE_ROOT / "trueo" / "rpc_v4.json").read_text(encoding="utf-8"))
 
         self.assertTrue(rpc["manager"].startswith("0x"))
         self.assertTrue(rpc["market"].startswith("0x"))
         self.assertTrue(rpc["yesPool"].startswith("0x"))
         self.assertGreater(rpc["poolSqrtPriceX96"], "0")
         self.assertTrue(rpc["signedTransaction"].startswith("0x"))
+        self.assertEqual(len(rpc["swapLogs"]), 2)
+        self.assertEqual(set(rpc["blockTimestamps"]), {"0x64", "0x65"})
+        for log in rpc["swapLogs"]:
+            self.assertEqual(log["address"], rpc["yesPool"])
+            self.assertEqual(
+                log["topics"][0],
+                "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+            )
+            self.assertEqual(len(bytes.fromhex(log["data"][2:])), 160)
+            self.assertIn(log["blockNumber"], rpc["blockTimestamps"])
+
+        self.assertTrue(rpc_v4["poolManager"].startswith("0x"))
+        self.assertTrue(rpc_v4["stateView"].startswith("0x"))
+        self.assertEqual(len(bytes.fromhex(rpc_v4["yesPoolId"][2:])), 32)
+        self.assertEqual(len(bytes.fromhex(rpc_v4["noPoolId"][2:])), 32)
+        for pool_key, log_key in (("yesPoolId", "yesSwapLogs"), ("noPoolId", "noSwapLogs")):
+            for log in rpc_v4[log_key]:
+                self.assertEqual(log["address"].lower(), rpc_v4["poolManager"].lower())
+                self.assertEqual(
+                    log["topics"][0],
+                    "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f",
+                )
+                self.assertEqual(log["topics"][1], rpc_v4[pool_key])
+                self.assertEqual(len(bytes.fromhex(log["data"][2:])), 192)
+                self.assertIn(log["blockNumber"], rpc_v4["blockTimestamps"])
 
     def test_prdt_fixture_covers_prediction_contract_rpc_shapes(self) -> None:
         rpc = json.loads((FIXTURE_ROOT / "prdt_finance" / "rpc_responses.json").read_text(encoding="utf-8"))

@@ -31,7 +31,7 @@ from market_adapters import (
     XOMarketAdapter,
     XMarketAdapter,
 )
-from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -353,7 +353,14 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter = HyperliquidAdapter()
         fills = load_fixture("hyperliquid", "user_fills")
 
-        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+        def fake_request_json(
+            method: str,
+            url: str,
+            *,
+            params=None,
+            json_body=None,
+            headers=None,
+        ):
             self.assertEqual(method, "POST")
             self.assertIsNone(params)
             self.assertEqual(headers["Content-Type"], "application/json")
@@ -953,14 +960,57 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         def encoded(types, values):
             return "0x" + encode(types, values).hex()
 
-        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+        def fake_request_json(
+            method: str,
+            url: str,
+            *,
+            params=None,
+            json_body=None,
+            headers=None,
+            max_response_bytes=None,
+        ):
             self.assertEqual(method, "POST")
             self.assertEqual(url, "https://mainnet.base.org")
             self.assertEqual(headers, {})
+            if isinstance(json_body, list):
+                self.assertEqual(max_response_bytes, 2_000_000)
+                responses = []
+                for request in json_body:
+                    response = fake_request_json(
+                        method,
+                        url,
+                        json_body=request,
+                        headers=headers,
+                        max_response_bytes=max_response_bytes,
+                    )
+                    response["id"] = request["id"]
+                    responses.append(response)
+                return responses
             self.assertEqual(json_body["jsonrpc"], "2.0")
             if json_body["method"] == "eth_sendRawTransaction":
                 self.assertEqual(json_body["params"], [fixture["signedTransaction"]])
                 return {"jsonrpc": "2.0", "id": 1, "result": fixture["transactionHash"]}
+            if json_body["method"] == "eth_blockNumber":
+                self.assertEqual(json_body["params"], [])
+                return {"jsonrpc": "2.0", "id": 1, "result": "0x71"}
+            if json_body["method"] == "eth_getLogs":
+                self.assertEqual(max_response_bytes, 2_000_000)
+                log_filter = json_body["params"][0]
+                self.assertEqual(log_filter["address"].lower(), yes_pool.lower())
+                self.assertEqual(log_filter["toBlock"], "0x65")
+                self.assertEqual(
+                    log_filter["topics"],
+                    ["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"],
+                )
+                return {"jsonrpc": "2.0", "id": 1, "result": fixture["swapLogs"]}
+            if json_body["method"] == "eth_getBlockByNumber":
+                block_number = json_body["params"][0]
+                self.assertFalse(json_body["params"][1])
+                return {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"number": block_number, "timestamp": fixture["blockTimestamps"][block_number]},
+                }
             self.assertEqual(json_body["method"], "eth_call")
             call = json_body["params"][0]
             target = call["to"].lower()
@@ -970,6 +1020,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return {"jsonrpc": "2.0", "id": 1, "result": encoded(["uint256"], [1])}
             if target == manager.lower() and selector == "dd5adfa3":
                 return {"jsonrpc": "2.0", "id": 1, "result": encoded(["address"], [market])}
+            if target == manager.lower() and selector == "6ec38a4e":
+                return {"jsonrpc": "2.0", "id": 1, "result": encoded(["bool"], [True])}
+            if target == market.lower() and selector == "ffa1ad74":
+                return {"jsonrpc": "2.0", "id": 1, "result": encoded(["string"], ["1.2.0"])}
             if target == market.lower() and selector == "066f69af":
                 return {"jsonrpc": "2.0", "id": 1, "result": encoded(["string"], [fixture["question"]])}
             if target == market.lower() and selector == "17447836":
@@ -986,6 +1040,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return {"jsonrpc": "2.0", "id": 1, "result": encoded(["address"], [value])}
             if target == market.lower() and selector == "e4b6db4c":
                 return {"jsonrpc": "2.0", "id": 1, "result": encoded(["address", "address"], [yes_pool, no_pool])}
+            if target == market.lower() and selector in {"b4f2bb6d", "d183feee", "32a3cf96"}:
+                return {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted"}}
             if target in {yes_pool.lower(), no_pool.lower()} and selector in {"0dfe1681", "d21220a7"}:
                 value = yes_token if selector == "0dfe1681" else payment_token
                 return {"jsonrpc": "2.0", "id": 1, "result": encoded(["address"], [value])}
@@ -1004,14 +1060,34 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         events = adapter.list_events("BTC")
         contracts = adapter.list_contracts(market)
         price = adapter.get_price(order.contract_id)
+        trades = adapter.list_trades(order.contract_id, limit=10)
+        candles = adapter.list_candles(order.contract_id, resolution="1m")
         paper = adapter.place_paper_order(order)
 
         self.assertEqual(events[0].event_id.lower(), market.lower())
         self.assertEqual([contract.outcome for contract in contracts], ["YES", "NO"])
         self.assertAlmostEqual(price.last or 0.0, 1.0)
+        self.assertEqual([trade.side for trade in trades], ["SELL", "BUY"])
+        self.assertEqual([trade.timestamp for trade in trades], [1700000060.0, 1700000000.0])
+        self.assertAlmostEqual(trades[0].price, 0.6)
+        self.assertAlmostEqual(trades[0].size, 1.0)
+        self.assertAlmostEqual(trades[1].price, 0.5)
+        self.assertAlmostEqual(trades[1].size, 2.0)
+        self.assertEqual(len(candles), 2)
+        self.assertEqual([candle.timestamp for candle in candles], [1699999980.0, 1700000040.0])
+        self.assertAlmostEqual(candles[0].close, 0.5)
+        self.assertAlmostEqual(candles[0].volume or 0.0, 2.0)
+        self.assertTrue(candles[0].raw["partial"])
+        self.assertAlmostEqual(candles[1].close, 0.6)
+        self.assertAlmostEqual(candles[1].volume or 0.0, 1.0)
+        self.assertTrue(candles[1].raw["partial"])
         self.assertTrue(paper.accepted)
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(order.contract_id)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(order.contract_id, after=1700000100, before=1700000000)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(order.contract_id, resolution="30m")
 
         live = TrueoAdapter(
             {
@@ -1085,6 +1161,317 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             )
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
+
+    def test_trueo_v4_market_validates_pool_identity_prices_swaps_and_chunking(self) -> None:
+        from eth_abi import encode
+
+        fixture = load_fixture("trueo", "rpc_v4")
+        manager = fixture["manager"]
+        market = fixture["market"]
+        pool_manager = fixture["poolManager"]
+        state_view = fixture["stateView"]
+        yes_token = fixture["yesToken"]
+        no_token = fixture["noToken"]
+        payment_token = fixture["paymentToken"]
+        yes_pool_id = fixture["yesPoolId"]
+        no_pool_id = fixture["noPoolId"]
+        membership = {"active": True}
+        advertised_ids = {"yes": yes_pool_id, "no": no_pool_id}
+        history_mode = {"include_old_block": False}
+        batch_sizes = []
+        log_ranges = []
+        block_requests = []
+
+        def encoded(types, values):
+            return "0x" + encode(types, values).hex()
+
+        def rpc_response(request):
+            request_id = request["id"]
+
+            def success(result):
+                return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+            def reverted():
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": 3, "message": "execution reverted"},
+                }
+
+            method = request["method"]
+            if method == "eth_getLogs":
+                log_filter = request["params"][0]
+                self.assertEqual(log_filter["address"].lower(), pool_manager.lower())
+                self.assertEqual(
+                    log_filter["topics"][0],
+                    "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f",
+                )
+                start = int(log_filter["fromBlock"], 16)
+                end = int(log_filter["toBlock"], 16)
+                log_ranges.append((start, end))
+                pool_id = log_filter["topics"][1]
+                logs = fixture["yesSwapLogs"] if pool_id == yes_pool_id else fixture["noSwapLogs"]
+                if not start <= 0x65 <= end:
+                    logs = []
+                elif pool_id == yes_pool_id:
+                    if history_mode["include_old_block"]:
+                        old_log = {
+                            **logs[0],
+                            "blockNumber": "0x64",
+                            "transactionHash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        }
+                        logs = [old_log, *logs]
+                    malformed = {
+                        **logs[0],
+                        "data": "0x00",
+                        "transactionHash": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                        "logIndex": "0x3",
+                    }
+                    logs = [*logs, malformed]
+                return success(logs)
+            if method == "eth_getBlockByNumber":
+                block_number = request["params"][0]
+                block_requests.append(block_number)
+                return success(
+                    {"number": block_number, "timestamp": fixture["blockTimestamps"][block_number]}
+                )
+            self.assertEqual(method, "eth_call")
+            call = request["params"][0]
+            target = call["to"].lower()
+            data = call["data"]
+            selector = data[2:10]
+            if target == manager.lower() and selector == "7d6a0d1a":
+                return success(encoded(["uint256"], [1]))
+            if target == manager.lower() and selector == "dd5adfa3":
+                return success(encoded(["address"], [market]))
+            if target == manager.lower() and selector == "6ec38a4e":
+                return success(encoded(["bool"], [membership["active"]]))
+            if target == market.lower() and selector == "ffa1ad74":
+                return success(encoded(["string"], ["2.0.0"]))
+            if target == market.lower() and selector == "066f69af":
+                return success(encoded(["string"], [fixture["question"]]))
+            if target == market.lower() and selector == "17447836":
+                return success(encoded(["string"], [fixture["source"]]))
+            if target == market.lower() and selector == "4063c865":
+                return success(encoded(["string"], [fixture["additionalInfo"]]))
+            if target == market.lower() and selector == "d6a05e67":
+                return success(encoded(["uint256"], [fixture["endOfTrading"]]))
+            if target == market.lower() and selector in {"a3dd2619", "2486d671"}:
+                value = fixture["status"] if selector == "a3dd2619" else fixture["winningPosition"]
+                return success(encoded(["uint256"], [value]))
+            if target == market.lower() and selector in {"f0d9bb20", "11a9f10a", "3013ce29"}:
+                value = {
+                    "f0d9bb20": yes_token,
+                    "11a9f10a": no_token,
+                    "3013ce29": payment_token,
+                }[selector]
+                return success(encoded(["address"], [value]))
+            if target == market.lower() and selector == "e4b6db4c":
+                return reverted()
+            if target == market.lower() and selector == "b4f2bb6d":
+                return success(
+                    encoded(
+                        ["bytes32", "bytes32"],
+                        [bytes.fromhex(advertised_ids["yes"][2:]), bytes.fromhex(advertised_ids["no"][2:])],
+                    )
+                )
+            if target == market.lower() and selector == "d183feee":
+                pool_key = "(address,address,uint24,int24,address)"
+                return success(
+                    encoded(
+                        [pool_key, pool_key],
+                        [
+                            (yes_token, payment_token, fixture["fee"], fixture["tickSpacing"], fixture["hook"]),
+                            (payment_token, no_token, fixture["fee"], fixture["tickSpacing"], fixture["hook"]),
+                        ],
+                    )
+                )
+            if target == market.lower() and selector == "32a3cf96":
+                return success(encoded(["address"], [fixture["hook"]]))
+            if target == state_view.lower() and selector == "dc4c90d3":
+                return success(encoded(["address"], [pool_manager]))
+            if target == state_view.lower() and selector == "c815641c":
+                self.assertIn("0x" + data[10:], {yes_pool_id, no_pool_id})
+                return success(
+                    encoded(
+                        ["uint160", "int24", "uint24", "uint24"],
+                        [int(fixture["poolSqrtPriceX96"]), 0, 0, fixture["fee"]],
+                    )
+                )
+            if target in {yes_token.lower(), no_token.lower(), payment_token.lower()} and selector == "313ce567":
+                return success(encoded(["uint256"], [18]))
+            raise AssertionError(f"unexpected Trueo V4 RPC call: {request}")
+
+        def fake_request_json(
+            method: str,
+            url: str,
+            *,
+            params=None,
+            json_body=None,
+            headers=None,
+            max_response_bytes=None,
+        ):
+            self.assertEqual(method, "POST")
+            self.assertEqual(url, "https://mainnet.base.org")
+            self.assertIsNone(params)
+            self.assertEqual(headers, {})
+            if isinstance(json_body, list):
+                batch_sizes.append(len(json_body))
+                self.assertLessEqual(len(json_body), 10)
+                self.assertEqual(max_response_bytes, 2_000_000)
+                return [rpc_response(request) for request in json_body]
+            if json_body["method"] == "eth_getLogs":
+                self.assertEqual(max_response_bytes, 2_000_000)
+            return rpc_response(json_body)
+
+        config = {
+            "trueo_log_from_block": 0,
+            "trueo_log_to_block": 10_001,
+            "trueo_log_window_blocks": 10_000,
+            "trueo_log_query_blocks": 10_000,
+        }
+        adapter = TrueoAdapter(config)
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+
+        events = adapter.list_events("V4", limit=1)
+        contracts = adapter.list_contracts(market)
+        yes_price = adapter.get_price(f"{market}:0")
+        no_price = adapter.get_price(f"{market}:1")
+        yes_trades = adapter.list_trades(f"{market}:0", limit=10)
+        no_trades = adapter.list_trades(f"{market}:1", limit=10)
+        candles = adapter.list_candles(f"{market}:0", resolution="1m")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual([contract.outcome for contract in contracts], ["YES", "NO"])
+        self.assertEqual(contracts[0].raw["market"]["amm_version"], "v4")
+        self.assertAlmostEqual(yes_price.last or 0.0, 1.0)
+        self.assertAlmostEqual(no_price.last or 0.0, 1.0)
+        self.assertEqual([trade.raw["log_index"] for trade in yes_trades], [1, 0])
+        self.assertEqual([trade.side for trade in yes_trades], ["BUY", "SELL"])
+        self.assertAlmostEqual(yes_trades[0].price, 0.6)
+        self.assertEqual([trade.side for trade in no_trades], ["BUY"])
+        self.assertAlmostEqual(no_trades[0].price, 0.4)
+        self.assertEqual(len(candles), 1)
+        self.assertAlmostEqual(candles[0].open, 0.5)
+        self.assertAlmostEqual(candles[0].close, 0.6)
+        self.assertTrue(batch_sizes)
+        self.assertTrue(all(size <= 10 for size in batch_sizes))
+        self.assertTrue(log_ranges)
+        self.assertTrue(all(end - start + 1 <= 10_000 for start, end in log_ranges))
+
+        history_mode["include_old_block"] = True
+        block_requests.clear()
+        limited = adapter.list_trades(f"{market}:0", limit=1)
+        self.assertEqual(len(limited), 1)
+        self.assertEqual(block_requests, ["0x65"])
+
+        membership["active"] = False
+        unregistered = TrueoAdapter(config)
+        unregistered.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with self.assertRaises(MarketConfigurationError):
+            unregistered.list_contracts(market)
+
+        membership["active"] = True
+        advertised_ids["yes"] = "0x" + "aa" * 32
+        mismatched = TrueoAdapter(config)
+        mismatched.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with self.assertRaises(MarketConfigurationError):
+            mismatched.list_contracts(market)
+
+    def test_trueo_bounded_search_and_history_fail_closed_and_confirm_head(self) -> None:
+        adapter = TrueoAdapter({"trueo_event_scan_limit": 1, "trueo_log_window_blocks": 10})
+        market = "0x" + "12" * 20
+        with (
+            patch.object(adapter, "_call_uint", return_value=2),
+            patch.object(adapter, "_batch_eth_calls", return_value={"market:1": "0x"}),
+            patch.object(adapter, "_call_result_address", return_value=market),
+            patch.object(
+                adapter,
+                "_read_market_summaries",
+                return_value={
+                    market: {
+                        "question": "Unrelated market",
+                        "source": "fixture",
+                        "status_name": "open",
+                    }
+                },
+            ),
+        ):
+            with self.assertRaisesRegex(MarketHTTPError, "bounded event scan"):
+                adapter.list_events("missing", limit=1)
+
+        with patch.object(adapter, "_rpc", return_value="0x64"):
+            self.assertEqual(adapter._trade_log_block_bounds(), (79, 88))
+
+        with patch.object(
+            adapter,
+            "_batch_block_timestamps",
+            return_value={79: 1_000.0, 88: 1_100.0},
+        ):
+            with self.assertRaisesRegex(MarketConfigurationError, "starts before"):
+                adapter._history_coverage(79, 88, after=999.0, before=1_050.0)
+            with self.assertRaisesRegex(MarketConfigurationError, "ends after"):
+                adapter._history_coverage(79, 88, after=1_000.0, before=1_101.0)
+            coverage = adapter._history_coverage(79, 88, after=1_000.0, before=1_100.0)
+
+        self.assertEqual(coverage["confirmation_blocks"], 12)
+        self.assertFalse(coverage["reorg_provisional"])
+
+    def test_trueo_batch_retries_top_level_rate_limit_error_within_bound(self) -> None:
+        adapter = TrueoAdapter(
+            {
+                "trueo_rpc_max_retries": 1,
+                "trueo_rpc_retry_backoff_seconds": 0,
+            }
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "eth_call",
+            "params": [{"to": "0x" + "11" * 20, "data": "0x12345678"}, "latest"],
+        }
+        rate_limit_error = {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32016, "message": "over rate limit"},
+        }
+        payloads = [rate_limit_error, [{"jsonrpc": "2.0", "id": 7, "result": "0x1234"}]]
+        attempted_batches = []
+
+        def fake_request_json(method, url, *, json_body=None, headers=None, max_response_bytes=None):
+            self.assertEqual(method, "POST")
+            self.assertEqual(url, adapter.rpc_url)
+            self.assertEqual(headers, {})
+            self.assertEqual(max_response_bytes, adapter.max_rpc_response_bytes)
+            attempted_batches.append(json_body)
+            return payloads[len(attempted_batches) - 1]
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+
+        self.assertEqual(adapter._batch_rpc_requests([request]), {7: "0x1234"})
+        self.assertEqual(attempted_batches, [[request], [request]])
+
+        exhausted = TrueoAdapter(
+            {
+                "trueo_rpc_max_retries": 1,
+                "trueo_rpc_retry_backoff_seconds": 0,
+            }
+        )
+        exhausted_attempts = []
+
+        def always_rate_limited(method, url, *, json_body=None, headers=None, max_response_bytes=None):
+            self.assertEqual(method, "POST")
+            self.assertEqual(url, exhausted.rpc_url)
+            self.assertEqual(headers, {})
+            self.assertEqual(max_response_bytes, exhausted.max_rpc_response_bytes)
+            exhausted_attempts.append(json_body)
+            return rate_limit_error
+
+        exhausted.runtime.request_json = always_rate_limited  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(MarketHTTPError, "remained rate-limited after bounded retries"):
+            exhausted._batch_rpc_requests([request])
+        self.assertEqual(exhausted_attempts, [[request], [request]])
 
     def test_metadao_adapter_maps_official_tickers_prices_and_paper_orders(self) -> None:
         adapter = MetaDAOAdapter()

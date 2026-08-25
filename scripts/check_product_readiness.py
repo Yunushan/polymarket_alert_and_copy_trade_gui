@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,8 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_LIVE_ATTEMPTS = 2
 PUBLIC_LIVE_RETRY_DELAY_SECONDS = 1.0
+EVIDENCE_MAX_AGE_DAYS = 30
+EVIDENCE_MAX_FUTURE_SKEW_SECONDS = 5 * 60
 
 CATEGORY_WEIGHTS = {
     "architecture_scope": 18,
@@ -198,6 +200,24 @@ def _project_version() -> str:
     return str(metadata.get("project", {}).get("version") or "").strip()
 
 
+def _repository_revision() -> str:
+    """Return the exact checkout revision used by revision-bound evidence."""
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    revision = result.stdout.strip().lower()
+    return revision if result.returncode == 0 and _COMMIT_RE.fullmatch(revision) else ""
+
+
 def _reviewed_evidence(
     path_value: str,
     label: str,
@@ -205,6 +225,9 @@ def _reviewed_evidence(
     evidence_type: str,
     required_fields: tuple[str, ...] = (),
     expected_fields: dict[str, Any] | None = None,
+    revision_field: str = "",
+    expected_revision: str = "",
+    now: datetime | None = None,
 ) -> tuple[bool, str]:
     if not path_value:
         return False, f"Provide reviewed {label} JSON evidence."
@@ -226,9 +249,19 @@ def _reviewed_evidence(
     if not isinstance(payload["reviewed_at"], str):
         return False, f"{label} evidence reviewed_at must be an ISO-8601 string."
     try:
-        datetime.fromisoformat(payload["reviewed_at"].replace("Z", "+00:00"))
+        reviewed_at = datetime.fromisoformat(payload["reviewed_at"].replace("Z", "+00:00"))
     except ValueError:
         return False, f"{label} evidence reviewed_at must be valid ISO-8601."
+    if reviewed_at.tzinfo is None or reviewed_at.utcoffset() is None:
+        return False, f"{label} evidence reviewed_at must include a timezone."
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise ValueError("evidence validation clock must include a timezone")
+    age = current_time.astimezone(timezone.utc) - reviewed_at.astimezone(timezone.utc)
+    if age < -timedelta(seconds=EVIDENCE_MAX_FUTURE_SKEW_SECONDS):
+        return False, f"{label} evidence reviewed_at is in the future."
+    if age > timedelta(days=EVIDENCE_MAX_AGE_DAYS):
+        return False, f"{label} evidence is stale; review it again within {EVIDENCE_MAX_AGE_DAYS} days."
     if not isinstance(payload.get("source"), str) or not payload["source"].strip():
         return False, f"{label} evidence requires a non-empty source."
     missing_fields = [field for field in required_fields if field not in payload or payload[field] in (None, "", [])]
@@ -240,6 +273,14 @@ def _reviewed_evidence(
     for field in ("source_revision", "target_commit"):
         if field in payload and (not isinstance(payload[field], str) or not _COMMIT_RE.fullmatch(payload[field])):
             return False, f"{label} evidence field {field} must be a 40-character commit SHA."
+    if revision_field:
+        if not expected_revision:
+            return False, f"{label} evidence cannot be validated because the repository revision is unavailable."
+        if payload.get(revision_field) != expected_revision:
+            return False, (
+                f"{label} evidence field {revision_field} must match the current repository revision "
+                f"{expected_revision}."
+            )
     if "report_hash" in payload and (
         not isinstance(payload["report_hash"], str) or not _HASH_RE.fullmatch(payload["report_hash"])
     ):
@@ -301,6 +342,8 @@ def _parser() -> argparse.ArgumentParser:
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     local_result = _run_local_gates(args.full_local) if args.run_local else {"status": "not_run"}
     public_result = _run_public_live() if args.run_public_live else {"status": "not_run"}
+    project_version = _project_version()
+    repository_revision = _repository_revision()
 
     architecture_ok = _paths_exist(REQUIRED_ARCHITECTURE_FILES) and _contains(
         "README.md", ("capability", "Polymarket", "credential_live_verified")
@@ -354,13 +397,18 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "release history",
         evidence_type="release-history",
         required_fields=("scope", "tag", "target_commit"),
+        expected_fields={"tag": f"v{project_version}"},
+        revision_field="target_commit",
+        expected_revision=repository_revision,
     )
     release_ok, release_detail = _reviewed_evidence(
         args.release_evidence,
         "release",
         evidence_type="release",
         required_fields=("scope", "tag", "target_commit", "assets"),
-        expected_fields={"tag": f"v{_project_version()}"},
+        expected_fields={"tag": f"v{project_version}"},
+        revision_field="target_commit",
+        expected_revision=repository_revision,
     )
     ci_cd = _category(
         "ci_cd_release",
@@ -392,7 +440,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "deployment",
         evidence_type="deployment",
         required_fields=("scope", "environment", "expected_version", "source_revision"),
-        expected_fields={"expected_version": _project_version()},
+        expected_fields={"expected_version": project_version},
+        revision_field="source_revision",
+        expected_revision=repository_revision,
     )
     operations = _category(
         "operations_recovery",
@@ -414,12 +464,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "platform CI",
         evidence_type="platform-ci",
         required_fields=("scope", "run_id", "source_revision"),
+        revision_field="source_revision",
+        expected_revision=repository_revision,
     )
     platform_evidence_ok, platform_detail = _reviewed_evidence(
         args.platform_evidence,
         "platform",
         evidence_type="platform",
-        required_fields=("scope", "targets"),
+        required_fields=("scope", "targets", "source_revision"),
+        revision_field="source_revision",
+        expected_revision=repository_revision,
     )
     platform = _category(
         "platform_evidence",
@@ -446,15 +500,19 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         args.credentialed_evidence,
         "credentialed Polymarket",
         evidence_type="credentialed-polymarket",
-        required_fields=("scope", "target_tier", "report_hash"),
+        required_fields=("scope", "target_tier", "report_hash", "source_revision"),
         expected_fields={"target_tier": "credential_live_verified"},
+        revision_field="source_revision",
+        expected_revision=repository_revision,
     )
     funded_ok, funded_detail = _reviewed_evidence(
         args.funded_evidence,
         "funded Polymarket",
         evidence_type="funded-polymarket",
-        required_fields=("scope", "target_tier", "report_hash", "live_action"),
+        required_fields=("scope", "target_tier", "report_hash", "live_action", "source_revision"),
         expected_fields={"target_tier": "funded_live_verified"},
+        revision_field="source_revision",
+        expected_revision=repository_revision,
     )
     live = _category(
         "live_acceptance",

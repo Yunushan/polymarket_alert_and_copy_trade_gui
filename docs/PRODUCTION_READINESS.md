@@ -40,11 +40,14 @@ check does not receive local test or security points.
 | Platform evidence | 10 | 5 | Reviewed platform CI and platform JSON evidence |
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
-The latest local audit on 2026-08-24 is **83/100 (not ready)** when no external
-evidence manifests are supplied. Local verification passed all 872 tests (7
-intentionally skipped), Ruff, the adapter catalog (68 markets, 57 implemented
-and 11 explicitly blocked), 343 offline fixtures, documentation, workflow,
-secret-hygiene, and packaging checks; branch coverage was 73% overall.
+The latest local audit on 2026-08-25 is **83/100 (not ready)** when no external
+evidence manifests are supplied. Local verification covers the adapter catalog
+(68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
+files, documentation, workflows, secret hygiene, frontend build/browser smoke,
+and packaging checks. The current verifier passed 879 tests (7 intentionally
+skipped on Windows), reached 76% branch coverage overall while satisfying the
+74% backend floor, and passed Ruff. Counts are reported from this run rather
+than carried forward from an older artifact.
 Metaculus now supports fixture-backed local forecast
 previews and guarded official forecast submission for binary, multiple-choice,
 and numeric/date question shapes; the web form forwards validated metadata JSON.
@@ -59,12 +62,14 @@ blocked. No live evidence is invented to compensate for that gap. The score
 therefore reflects repeatable repository proof plus explicitly supplied
 evidence, not a production certification.
 
-The repository also contains reviewed historical manifests under `evidence/`.
-Passing those manifests explicitly to the scorer raises the arithmetic result
-to **91/100**, but that number includes the manifests' recorded external runs
-and must not be read as a current release or live-market certification. The
-remaining points require a current release artifact, deployment proof, a
-reachable public probe, and real credentialed/funded acceptance evidence.
+The repository also contains historical manifests under `evidence/`; they are
+inputs, not automatically valid current proof. With a passing local verifier,
+the currently accepted checked-in manifests produce **85/100**, while stale or
+revision/tag-mismatched manifests are rejected. Reaching 100 requires fresh
+proof for the current `v1.0.11` commit: release/release history (+2), deployment
+(+3), platform CI/targets (+5), public probe (+3), credentialed read (+1), and
+approved funded audit (+1). No points are awarded merely because an old
+manifest file exists.
 
 The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local
@@ -79,18 +84,22 @@ option. Every manifest must contain `schema_version: 1`, the exact
 and a non-empty `checks` array with unique names whose entries all have
 `status` equal to `pass` or `ok`. Tier-specific fields are also validated so a
 deployment, release, platform, or Polymarket report cannot be relabeled to
-award another category.
+award another category. `reviewed_at` must include a timezone, be no more than
+30 days old, and not be more than five minutes in the future. Revision-bound
+evidence must identify the exact current `git rev-parse HEAD`; release evidence
+must also identify the current project tag (`v1.0.11`).
 
 | Scorer option | Required `evidence_type` | Required identity fields |
 | --- | --- | --- |
-| `--deployment-evidence` | `deployment` | `scope`, `environment`, `expected_version`, `source_revision` |
-| `--platform-ci-evidence` | `platform-ci` | `scope`, `run_id`, `source_revision` |
-| `--platform-evidence` | `platform` | `scope`, `targets` |
+| `--repository-settings-evidence` | `repository-settings` | `source` |
+| `--deployment-evidence` | `deployment` | `scope`, `environment`, `expected_version=v1.0.11`, `source_revision=current HEAD` |
+| `--platform-ci-evidence` | `platform-ci` | `scope`, `run_id`, `source_revision=current HEAD` |
+| `--platform-evidence` | `platform` | `scope`, `targets`, `source_revision=current HEAD` |
 | `--release-environment-evidence` | `release-environment` | `source` |
-| `--release-history-evidence` | `release-history` | `scope`, `tag`, `target_commit` |
-| `--release-evidence` | `release` | `scope`, current `tag`, `target_commit`, `assets` |
-| `--credentialed-evidence` | `credentialed-polymarket` | `scope`, `target_tier=credential_live_verified`, `report_hash` |
-| `--funded-evidence` | `funded-polymarket` | `scope`, `target_tier=funded_live_verified`, `report_hash`, `live_action=true` |
+| `--release-history-evidence` | `release-history` | `scope`, `tag=v1.0.11`, `target_commit=current HEAD` |
+| `--release-evidence` | `release` | `scope`, `tag=v1.0.11`, `target_commit=current HEAD`, `assets` |
+| `--credentialed-evidence` | `credentialed-polymarket` | `scope`, `target_tier=credential_live_verified`, `report_hash`, `source_revision=current HEAD` |
+| `--funded-evidence` | `funded-polymarket` | `scope`, `target_tier=funded_live_verified`, `report_hash`, `live_action=true`, `source_revision=current HEAD` |
 
 The repository currently includes `evidence/release-environment.json`, a
 reviewed snapshot of the GitHub `release` environment's required-reviewer,
@@ -114,6 +123,9 @@ fail-closed until those secrets are configured.
   ]
 }
 ```
+
+The example SHA is a placeholder. Replace every placeholder and ensure each
+`source_revision` or `target_commit` equals the exact checkout being scored.
 
 Example after the evidence has actually been collected and reviewed:
 
