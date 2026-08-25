@@ -98,6 +98,13 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertIn("Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp", enterprise_linux)
         self.assertIn("-v /tmp/.X11-unix:/tmp/.X11-unix", enterprise_linux)
         self.assertIn("CI_DESKTOP_VALIDATION", enterprise_linux)
+        self.assertEqual(
+            enterprise_linux.count(
+                "bootstrap: dnf -y upgrade --refresh && dnf -y install "
+                "python3.12 python3.12-pip python3.12-tkinter git"
+            ),
+            3,
+        )
         self.assertIn("git config --global --add safe.directory /workspace", enterprise_linux)
         self.assertIn('if [ -z "${DISPLAY:-}" ]; then', enterprise_linux)
         self.assertIn("DISPLAY is required for desktop validation but is not configured.", enterprise_linux)
