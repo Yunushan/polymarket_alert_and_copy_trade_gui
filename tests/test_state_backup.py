@@ -342,7 +342,7 @@ class StateBackupTests(unittest.TestCase):
 
     def test_retention_counts_only_verified_pairs_and_preserves_orphans(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             source = root / "state"
             destination = root / "backups"
             source.mkdir()

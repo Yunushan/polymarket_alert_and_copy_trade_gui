@@ -157,8 +157,8 @@ class WindowsReleaseBuildTests(unittest.TestCase):
 
             cleaner.assert_not_called()
             pyinstaller.assert_not_called()
-            portable.assert_called_once_with(package_dir, output_dir.resolve(), "v1.2.3")
-            msi.assert_called_once_with(package_dir, output_dir.resolve(), work_dir.resolve(), "v1.2.3", "1.2.3")
+            portable.assert_called_once_with(package_dir.resolve(), output_dir.resolve(), "v1.2.3")
+            msi.assert_called_once_with(package_dir.resolve(), output_dir.resolve(), work_dir.resolve(), "v1.2.3", "1.2.3")
             self.assertEqual(executable.read_bytes(), b"signed-authenticode-executable")
 
     def test_extract_frontend_archive_extracts_normal_release_assets(self) -> None:

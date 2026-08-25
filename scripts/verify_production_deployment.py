@@ -87,7 +87,6 @@ COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_PRIVATE_PATHS = (
     (Path("/etc/market-sentinel/market-sentinel.env"), S_IFREG, True),
     (Path("/var/lib/market-sentinel"), S_IFDIR, False),
-    (DEFAULT_BACKUP_DIRECTORY, S_IFDIR, False),
 )
 PUBLIC_PROXY_AUTH_PROBES = (
     ("GET", ""),
@@ -244,7 +243,7 @@ def check_filesystem_permissions(
     backup_directory: Path = DEFAULT_BACKUP_DIRECTORY,
 ) -> list[dict[str, Any]]:
     required_paths = (
-        *REQUIRED_PRIVATE_PATHS[:-1],
+        *REQUIRED_PRIVATE_PATHS,
         (Path(backup_directory), S_IFDIR, False),
     )
     return [

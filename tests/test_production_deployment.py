@@ -239,7 +239,7 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_backup_evidence_opens_and_cryptographically_verifies_a_recent_pair(self) -> None:
         now = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             source = root / "state"
             backup_directory = root / "backups"
             source.mkdir()
@@ -276,7 +276,7 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_backup_evidence_rejects_stale_and_untrusted_directories(self) -> None:
         now = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             source = root / "state"
             backup_directory = root / "backups"
             source.mkdir()
@@ -332,7 +332,7 @@ class ProductionDeploymentTests(unittest.TestCase):
             linked.symlink_to(target)
 
             with patch.object(deployment, "REQUIRED_PRIVATE_PATHS", ((linked, S_IFREG, False),)):
-                check = check_filesystem_permissions()[0]
+                check = check_filesystem_permissions(backup_directory=root)[0]
 
         self.assertEqual(check["status"], "fail")
         self.assertIn("expected=file", check["detail"])
