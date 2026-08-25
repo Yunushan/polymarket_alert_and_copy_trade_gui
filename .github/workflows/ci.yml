@@ -180,7 +180,7 @@ jobs:
           - name: Rocky Linux 10 / Python 3.12
             image: rockylinux/rockylinux:10
             python: python3.12
-            bootstrap: dnf -y upgrade --refresh && dnf -y install python3.12 python3.12-pip python3.12-tkinter git
+            bootstrap: dnf -y upgrade --refresh && dnf -y install --allowerasing --nobest python3.12 python3.12-pip python3.12-tkinter git
             desktop_validation: "true"
     steps:
       - name: Checkout

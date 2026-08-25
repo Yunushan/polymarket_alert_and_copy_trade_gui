@@ -103,7 +103,12 @@ class CiCdWorkflowTests(unittest.TestCase):
                 "bootstrap: dnf -y upgrade --refresh && dnf -y install "
                 "python3.12 python3.12-pip python3.12-tkinter git"
             ),
-            3,
+            2,
+        )
+        self.assertIn(
+            "bootstrap: dnf -y upgrade --refresh && dnf -y install --allowerasing --nobest "
+            "python3.12 python3.12-pip python3.12-tkinter git",
+            enterprise_linux,
         )
         self.assertIn("git config --global --add safe.directory /workspace", enterprise_linux)
         self.assertIn('if [ -z "${DISPLAY:-}" ]; then', enterprise_linux)
