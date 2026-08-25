@@ -22,5 +22,35 @@
   "transactionData": "0x12345678",
   "transactionValue": 0,
   "signedTransaction": "0x02f87182210580843b9aca008477359400830186a094372fd7254f578939f433c9d04ca8a098ad09500a808412345678c001a0d69c8adde4c769d9d30c26a5d897142f2ed19ba84ca4c4a5bd815b7c065b2c99a0575f68251d4c73a843a568dce465d6a1d08edc08a1168d809d2e875586e007f7",
-  "transactionHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  "transactionHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "swapLogs": [
+    {
+      "address": "0x4444444444444444444444444444444444444444",
+      "topics": [
+        "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+        "0x000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "0x000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "data": "0xffffffffffffffffffffffffffffffffffffffffffffffffe43e9298b13800000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000000",
+      "blockNumber": "0x64",
+      "transactionHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "logIndex": "0x0"
+    },
+    {
+      "address": "0x4444444444444444444444444444444444444444",
+      "topics": [
+        "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+        "0x000000000000000000000000cccccccccccccccccccccccccccccccccccccccc",
+        "0x000000000000000000000000dddddddddddddddddddddddddddddddddddddddd"
+      ],
+      "data": "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000fffffffffffffffffffffffffffffffffffffffffffffffff7ac5f2dcec40000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000000",
+      "blockNumber": "0x65",
+      "transactionHash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "logIndex": "0x1"
+    }
+  ],
+  "blockTimestamps": {
+    "0x64": "0x6553f100",
+    "0x65": "0x6553f13c"
+  }
 }

@@ -8,7 +8,16 @@ from urllib.parse import urlsplit
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
-from .types import MarketContract, MarketEvent, OrderBookSnapshot, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import (
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
+    MarketTrade,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 DEFAULT_TRUEO_RPC_URL = "https://mainnet.base.org"
@@ -43,6 +52,12 @@ SELECTORS = {
     "token1": "d21220a7",
     "decimals": "313ce567",
 }
+
+UNISWAP_V3_SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
+DEFAULT_TRUEO_LOG_WINDOW_BLOCKS = 50_000
+MAX_TRUEO_LOG_WINDOW_BLOCKS = 500_000
+DEFAULT_TRUEO_MAX_TRADE_LOGS = 500
+MAX_TRUEO_MAX_TRADE_LOGS = 5_000
 
 
 class TrueoAdapter(MarketAdapter):
@@ -119,6 +134,10 @@ class TrueoAdapter(MarketAdapter):
                 "allowlisted_live_transaction_target_count": len(self.live_transaction_targets),
                 "wallet_transaction_required": True,
                 "settlement_required": True,
+                "trade_history_source": "uniswap_v3_swap_logs",
+                "trade_history_bounded": True,
+                "log_window_blocks": self.log_window_blocks,
+                "max_trade_logs": self.max_trade_logs,
             }
         )
         return health
@@ -206,6 +225,183 @@ class TrueoAdapter(MarketAdapter):
             "orderbook_reading",
             "Trueo documents Uniswap liquidity pools rather than a CLOB; slot0-derived AMM prices are not an orderbook.",
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return bounded public Uniswap V3 swaps for one Trueo outcome pool.
+
+        Trueo routes outcome trades through the Uniswap V3 pools created by its
+        official market contracts.  The pool ``Swap`` event contains signed
+        token deltas, so this method derives the outcome-side BUY/SELL, filled
+        outcome size, and executed collateral price without pretending that a
+        router ``sender`` is the end-user wallet.  The block range and result
+        count are deliberately bounded to keep a public RPC endpoint from
+        becoming an unbounded history proxy.
+        """
+
+        self.ensure_capability("trade_history")
+        market_address, outcome_index = self._split_contract_id(contract_id)
+        row = self._market_cache.get(market_address.lower()) or self._read_market(market_address)
+        pool = row["yes_pool"] if outcome_index == 0 else row["no_pool"]
+        outcome_token = row["yes_token"] if outcome_index == 0 else row["no_token"]
+        payment_token = row["payment_token"]
+        desired = self._trade_limit(limit)
+        after_ts = self._history_timestamp(after, "after") if after is not None else 0.0
+        before_ts = self._history_timestamp(before, "before") if before is not None else 253_402_300_799.0
+        if before_ts < after_ts:
+            raise MarketConfigurationError("Trueo trade history requires before to be at or after after.")
+
+        from_block, to_block = self._trade_log_block_bounds()
+        logs = self._rpc(
+            "eth_getLogs",
+            [
+                {
+                    "address": pool,
+                    "fromBlock": hex(from_block),
+                    "toBlock": hex(to_block),
+                    "topics": [UNISWAP_V3_SWAP_TOPIC],
+                }
+            ],
+        )
+        if not isinstance(logs, list):
+            raise MarketHTTPError("Trueo eth_getLogs did not return a list.")
+        if len(logs) > self.max_trade_logs:
+            raise MarketHTTPError(
+                f"Trueo RPC returned {len(logs)} swap logs, exceeding the configured safety limit of {self.max_trade_logs}."
+            )
+
+        token0 = self._call_address(pool, SELECTORS["token0"])
+        token1 = self._call_address(pool, SELECTORS["token1"])
+        decimals0 = self._token_decimals(token0)
+        decimals1 = self._token_decimals(token1)
+        if {token0.lower(), token1.lower()} != {outcome_token.lower(), payment_token.lower()}:
+            raise MarketConfigurationError("Trueo swap pool tokens do not match the market outcome/payment tokens.")
+
+        block_timestamps: Dict[int, float] = {}
+        canonical = f"{market_address}:{outcome_index}"
+        trades: List[MarketTrade] = []
+        for log in logs:
+            decoded = self._decode_swap_log(log, pool)
+            if decoded is None:
+                continue
+            timestamp = block_timestamps.get(decoded["block_number"])
+            if timestamp is None:
+                timestamp = self._block_timestamp(decoded["block_number"])
+                block_timestamps[decoded["block_number"]] = timestamp
+            if timestamp < after_ts or timestamp > before_ts:
+                continue
+
+            outcome_delta = decoded["amount0"] if token0.lower() == outcome_token.lower() else decoded["amount1"]
+            payment_delta = decoded["amount1"] if token0.lower() == outcome_token.lower() else decoded["amount0"]
+            if outcome_delta == 0 or payment_delta == 0:
+                continue
+            scale_outcome = 10**decimals0 if token0.lower() == outcome_token.lower() else 10**decimals1
+            scale_payment = 10**decimals1 if token0.lower() == outcome_token.lower() else 10**decimals0
+            size = abs(outcome_delta) / float(scale_outcome)
+            payment = abs(payment_delta) / float(scale_payment)
+            price = payment / size if size else 0.0
+            if not math.isfinite(size) or not math.isfinite(price) or size <= 0 or price <= 0 or price > 1:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=f"{decoded['transaction_hash']}:{decoded['log_index']}",
+                    side="BUY" if outcome_delta < 0 else "SELL",
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw={
+                        "source": "trueo_uniswap_v3_swap",
+                        "pool": pool,
+                        "market_address": market_address,
+                        "outcome_index": outcome_index,
+                        "sender": decoded["sender"],
+                        "recipient": decoded["recipient"],
+                        "amount0": decoded["amount0"],
+                        "amount1": decoded["amount1"],
+                        "sqrt_price_x96": decoded["sqrt_price_x96"],
+                        "liquidity": decoded["liquidity"],
+                        "tick": decoded["tick"],
+                        "block_number": decoded["block_number"],
+                        "transaction_hash": decoded["transaction_hash"],
+                        "log_index": decoded["log_index"],
+                        "token0": token0,
+                        "token1": token1,
+                        "outcome_token": outcome_token,
+                        "payment_token": payment_token,
+                    },
+                )
+            )
+
+        trades.sort(key=lambda trade: (float(trade.timestamp or 0), trade.trade_id), reverse=True)
+        return trades[:desired]
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Derive bounded OHLCV candles from the public swap event tape."""
+
+        self.ensure_capability("candle_history")
+        resolution_key = str(resolution or "1h").strip().lower()
+        intervals = {"1m": 60, "5m": 300, "15m": 900, "1h": 3_600, "4h": 14_400, "1d": 86_400}
+        if resolution_key not in intervals:
+            raise MarketConfigurationError(
+                "Trueo candle history accepts resolution 1m, 5m, 15m, 1h, 4h, or 1d."
+            )
+        lower = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        upper = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if lower is not None and upper is not None and upper < lower:
+            raise MarketConfigurationError("Trueo candle history requires from_timestamp <= to_timestamp.")
+
+        trades = self.list_trades(
+            contract_id,
+            limit=self.max_trade_logs,
+            after=lower,
+            before=upper,
+        )
+        buckets: Dict[int, List[MarketTrade]] = {}
+        interval = intervals[resolution_key]
+        for trade in trades:
+            if trade.timestamp is None:
+                continue
+            bucket = int(float(trade.timestamp) // interval) * interval
+            buckets.setdefault(bucket, []).append(trade)
+
+        candles: List[MarketCandle] = []
+        for timestamp, bucket_trades in sorted(buckets.items()):
+            ordered = sorted(bucket_trades, key=lambda trade: (float(trade.timestamp or 0), trade.trade_id))
+            prices = [float(trade.price) for trade in ordered]
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=contract_id,
+                    timestamp=float(timestamp),
+                    open=prices[0],
+                    high=max(prices),
+                    low=min(prices),
+                    close=prices[-1],
+                    volume=sum(float(trade.size) for trade in ordered),
+                    raw={
+                        "source": "trueo_uniswap_v3_swap",
+                        "resolution": resolution_key,
+                        "trade_count": len(ordered),
+                        "trade_ids": [trade.trade_id for trade in ordered],
+                    },
+                )
+            )
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -316,6 +512,150 @@ class TrueoAdapter(MarketAdapter):
             "copy_trading",
             "Trueo has no official account-activity mirroring API; copy trading is unsupported.",
         )
+
+    @property
+    def log_window_blocks(self) -> int:
+        value = self.config.get("trueo_log_window_blocks", DEFAULT_TRUEO_LOG_WINDOW_BLOCKS)
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Trueo log window must be a positive integer.")
+        try:
+            parsed = int(str(value).strip(), 0)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Trueo log window must be a positive integer.") from exc
+        if parsed <= 0 or parsed > MAX_TRUEO_LOG_WINDOW_BLOCKS:
+            raise MarketConfigurationError(
+                f"Trueo log window must be between 1 and {MAX_TRUEO_LOG_WINDOW_BLOCKS} blocks."
+            )
+        return parsed
+
+    @property
+    def max_trade_logs(self) -> int:
+        value = self.config.get("trueo_max_trade_logs", DEFAULT_TRUEO_MAX_TRADE_LOGS)
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Trueo max trade logs must be a positive integer.")
+        try:
+            parsed = int(str(value).strip(), 0)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Trueo max trade logs must be a positive integer.") from exc
+        if parsed <= 0 or parsed > MAX_TRUEO_MAX_TRADE_LOGS:
+            raise MarketConfigurationError(
+                f"Trueo max trade logs must be between 1 and {MAX_TRUEO_MAX_TRADE_LOGS}."
+            )
+        return parsed
+
+    def _trade_log_block_bounds(self) -> Tuple[int, int]:
+        configured_to = self.config.get("trueo_log_to_block")
+        to_block = (
+            self._block_number(configured_to, label="trueo_log_to_block")
+            if configured_to not in (None, "")
+            else self._block_number(self._rpc("eth_blockNumber", []), label="latest block")
+        )
+        configured_from = self.config.get("trueo_log_from_block")
+        from_block = (
+            self._block_number(configured_from, label="trueo_log_from_block")
+            if configured_from not in (None, "")
+            else max(0, to_block - self.log_window_blocks + 1)
+        )
+        if from_block > to_block:
+            raise MarketConfigurationError("Trueo log range requires from_block <= to_block.")
+        if to_block - from_block + 1 > MAX_TRUEO_LOG_WINDOW_BLOCKS:
+            raise MarketConfigurationError(
+                f"Trueo log range may span at most {MAX_TRUEO_LOG_WINDOW_BLOCKS} blocks."
+            )
+        return from_block, to_block
+
+    def _decode_swap_log(self, log: Any, pool: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(log, Mapping):
+            return None
+        address = self._address(log.get("address"), label="swap log address")
+        if address.casefold() != pool.casefold():
+            return None
+        topics = log.get("topics")
+        if not isinstance(topics, list) or len(topics) < 3:
+            return None
+        if str(topics[0]).casefold() != UNISWAP_V3_SWAP_TOPIC.casefold():
+            return None
+        sender = self._topic_address(topics[1], label="swap sender")
+        recipient = self._topic_address(topics[2], label="swap recipient")
+        data = log.get("data")
+        if not isinstance(data, str) or not re.fullmatch(r"0x[0-9a-fA-F]+", data) or len(data) % 2:
+            return None
+        try:
+            amount0, amount1, sqrt_price, liquidity, tick = self._decode(
+                data,
+                ("int256", "int256", "uint160", "uint128", "int24"),
+            )
+            block_number = self._block_number(log.get("blockNumber"), label="swap log block number")
+            log_index = self._block_number(log.get("logIndex"), label="swap log index")
+        except (MarketConfigurationError, TypeError, ValueError, OverflowError):
+            return None
+        transaction_hash = str(log.get("transactionHash") or "").strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", transaction_hash):
+            return None
+        return {
+            "sender": sender,
+            "recipient": recipient,
+            "amount0": int(amount0),
+            "amount1": int(amount1),
+            "sqrt_price_x96": int(sqrt_price),
+            "liquidity": int(liquidity),
+            "tick": int(tick),
+            "block_number": block_number,
+            "log_index": log_index,
+            "transaction_hash": transaction_hash,
+        }
+
+    def _block_timestamp(self, block_number: int) -> float:
+        payload = self._rpc("eth_getBlockByNumber", [hex(block_number), False])
+        if not isinstance(payload, Mapping):
+            raise MarketHTTPError("Trueo RPC did not return a block for a swap log.")
+        timestamp = self._block_number(payload.get("timestamp"), label="block timestamp")
+        if timestamp <= 0 or timestamp > 253_402_300_799:
+            raise MarketHTTPError("Trueo swap block timestamp is outside the supported range.")
+        return float(timestamp)
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Trueo {label} must be a finite non-negative timestamp.")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Trueo {label} must be a finite non-negative timestamp.") from exc
+        if not math.isfinite(parsed) or parsed < 0 or parsed > 253_402_300_799:
+            raise MarketConfigurationError(f"Trueo {label} must be a finite non-negative timestamp.")
+        return parsed
+
+    def _trade_limit(self, value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Trueo trade history limit must be a positive integer.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Trueo trade history limit must be a positive integer.") from exc
+        if parsed <= 0:
+            raise MarketConfigurationError("Trueo trade history limit must be a positive integer.")
+        return min(parsed, self.max_trade_logs)
+
+    @classmethod
+    def _block_number(cls, value: Any, *, label: str) -> int:
+        if isinstance(value, bool) or value in (None, ""):
+            raise MarketConfigurationError(f"Trueo {label} must be a non-negative block quantity.")
+        try:
+            text = str(value).strip()
+            parsed = int(text, 0) if text.lower().startswith("0x") else int(text, 10)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Trueo {label} must be a non-negative block quantity.") from exc
+        if parsed < 0:
+            raise MarketConfigurationError(f"Trueo {label} must be a non-negative block quantity.")
+        return parsed
+
+    @classmethod
+    def _topic_address(cls, value: Any, *, label: str) -> str:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", text):
+            raise MarketConfigurationError(f"Trueo {label} must be a 32-byte indexed address topic.")
+        return cls._address("0x" + text[-40:], label=label)
 
     def _read_market(self, address: str) -> Dict[str, Any]:
         row = {

@@ -112,6 +112,12 @@ TRUEO_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    # Trueo's documented Uniswap V3 pools emit canonical Swap events.  The
+    # adapter decodes bounded, public pool fills into normalized trade rows and
+    # derives candles locally; router-level wallet identity remains unavailable
+    # so copy trading stays disabled.
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
