@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# Native command scripts are consumed directly by cmd.exe.
+*.bat text eol=crlf
+*.cmd text eol=crlf

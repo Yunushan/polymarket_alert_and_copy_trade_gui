@@ -882,4 +882,3 @@ class DFlowAdapter(MarketAdapter):
     @staticmethod
     def _url(base: str, path: str) -> str:
         return f"{base.rstrip('/')}/{str(path or '').strip('/')}"
-

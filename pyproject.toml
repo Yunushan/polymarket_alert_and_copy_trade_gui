@@ -71,4 +71,3 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["F", "B", "S608"]
-

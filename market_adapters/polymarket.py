@@ -823,4 +823,3 @@ class PolymarketAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return False
         return math.isfinite(number) and number > 0
-

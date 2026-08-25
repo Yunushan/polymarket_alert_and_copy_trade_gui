@@ -541,4 +541,3 @@ class SpaceAdapter(MarketAdapter):
 
 
 __all__ = ["DEFAULT_SPACE_API_BASE_URL", "SPACE_REFERENCES", "SpaceAdapter"]
-

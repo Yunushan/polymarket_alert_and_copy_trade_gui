@@ -636,4 +636,3 @@ class DriftBetAdapter(MarketAdapter):
         first = next(iter(records), {})
         value = first.get("status") or first.get("state")
         return str(value).lower() if value not in (None, "") else "active"
-

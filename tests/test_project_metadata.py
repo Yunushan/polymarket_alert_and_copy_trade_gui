@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,47 @@ APP_TITLE = "MarketSentinel"
 
 
 class ProjectMetadataTests(unittest.TestCase):
+    def test_repository_hygiene_policy(self) -> None:
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+        self.assertIn("* text=auto eol=lf", attributes)
+        self.assertIn("*.bat text eol=crlf", attributes)
+        self.assertIn("*.cmd text eol=crlf", attributes)
+
+        if not (ROOT / ".git").exists():
+            self.skipTest("Git metadata is unavailable in this source tree")
+
+        try:
+            tracked_result = subprocess.run(
+                ["git", "ls-files", "-z"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            )
+            eol_result = subprocess.run(
+                ["git", "ls-files", "--eol"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        except FileNotFoundError:
+            self.skipTest("Git executable is unavailable")
+
+        tracked = tracked_result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+        generated = sorted(
+            path
+            for path in tracked
+            if "/__pycache__/" in f"/{path}" or path.endswith((".pyc", ".pyo", ".pyd"))
+        )
+        non_normalized = sorted(
+            line for line in eol_result.stdout.splitlines() if line.startswith(("i/crlf", "i/mixed"))
+        )
+
+        self.assertEqual(generated, [], f"generated Python artifacts are tracked: {generated}")
+        self.assertEqual(non_normalized, [], f"non-normalized Git blobs are tracked: {non_normalized}")
+
     def test_project_name_uses_dashes_not_underscores(self) -> None:
         data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         frontend_package = (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")

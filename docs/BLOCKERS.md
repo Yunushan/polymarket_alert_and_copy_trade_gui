@@ -265,4 +265,3 @@ as exchange order execution.
 4. Keep live trading disabled unless the user explicitly enables it in local config.
 5. Never commit credentials, cookies, tokens, API keys, private URLs, IPs, or user data.
 6. Update `README.md`, `data/config.example.json`, and this file when a blocker changes.
-
