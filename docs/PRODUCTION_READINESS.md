@@ -170,7 +170,16 @@ two signing secrets are configured and freshly verified.
   "run_id": 123,
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
   "checks": [
-    {"name": "source_revision", "status": "pass"}
+    {"name": "aggregate_python_package_build", "status": "pass"},
+    {"name": "python_ubuntu_matrix", "status": "pass"},
+    {"name": "python_macos_14_15_26_matrix", "status": "pass"},
+    {"name": "python_windows_2025_vs2026_matrix", "status": "pass"},
+    {"name": "rhel_ubi_8_9_10_and_rhel_7_abi", "status": "pass"},
+    {"name": "rocky_linux_8_9_10", "status": "pass"},
+    {"name": "windows_11_arm", "status": "pass"},
+    {"name": "react_build", "status": "pass"},
+    {"name": "mobile_web_smoke_android_and_ios", "status": "pass"},
+    {"name": "tkinter_gui_lifecycle", "status": "pass"}
   ]
 }
 ```
