@@ -1,0 +1,13 @@
+{
+  "positions": [
+    {
+      "market_id": "us-election-2028",
+      "outcome_id": "vance",
+      "side": "long",
+      "qty": 14285.71,
+      "avg_entry_price": 0.35,
+      "current_price": 0.38,
+      "market_value": 5428.57
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "result": [
+    {
+      "currencyCode": "EUR",
+      "rate": 1.17
+    },
+    {
+      "currencyCode": "USD",
+      "rate": 1.36
+    }
+  ],
+  "id": 1
+}

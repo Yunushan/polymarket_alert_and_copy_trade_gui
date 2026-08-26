@@ -1,0 +1,6 @@
+{
+  "contracts": [
+    {"id": "contract-yes", "name": "Yes", "market_id": "market-1"},
+    {"id": "contract-no", "name": "No", "market_id": "market-1"}
+  ]
+}

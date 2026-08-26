@@ -19,18 +19,24 @@ from core.storage import ConfigLoadError, load_config, save_config
 from market_adapters.base import MarketAdapter
 from market_adapters.types import (
     MarketCapabilities,
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
     MarketMetadata,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
+from market_adapters.errors import UnsupportedFeatureError
 from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
 from polymarket.http_client import PolymarketRateLimitError
 from polymarket.mdd import MDD_METHOD_MARK_REPLAY, MDD_METHOD_V2
 from web_api import (
+    activity_key,
     _fetch_polymarket_leaderboard_scan_rows,
     _read_json_body,
     add_wallet_watch,
@@ -53,6 +59,16 @@ from web_api import (
     live_preflight_payload,
     live_safety_payload,
     markets_payload,
+    market_candles_payload,
+    market_account_payload,
+    market_position_intent_payload,
+    market_order_management_payload,
+    market_contracts_payload,
+    market_events_payload,
+    market_orderbook_payload,
+    market_price_payload,
+    market_trades_payload,
+    market_support_payload,
     paper_payload,
     paper_order_impact,
     paper_order_from_payload,
@@ -193,6 +209,80 @@ class FakePolymarketAdapter(MarketAdapter):
         )
 
 
+class FakeOpinionCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="opinion_labs",
+        display_name="Opinion Labs",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            orderbook_reading=True,
+            paper_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+    def list_activity(self, wallet: str, *, limit: int = 25) -> list[dict]:
+        return [
+            {
+                "transactionHash": "opinion-tx-1",
+                "timestamp": 101,
+                "proxyWallet": wallet,
+                "asset": "77:YES:0xyes",
+                "side": "BUY",
+                "price": "0.44",
+                "size": "10",
+                "slug": "77",
+                "outcome": "Yes",
+            }
+        ][:limit]
+
+
+class FakeMyriadCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="myriad_markets",
+        display_name="Myriad Markets",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            orderbook_reading=True,
+            paper_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+    def list_activity(self, wallet: str, *, limit: int = 25) -> list[dict]:
+        return [
+            {
+                "transactionHash": "myriad-tx-1",
+                "timestamp": 201,
+                "proxyWallet": wallet,
+                "asset": "501:1",
+                "side": "BUY",
+                "price": 0.61,
+                "size": 12.2,
+                "value": 12.2,
+                "shares": 20.0,
+                "slug": "btc-above-100k-2026",
+                "outcome": "Yes",
+            }
+        ][:limit]
+
+
+class FakeAzuroCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="azuro",
+        display_name="Azuro",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            paper_trading=True,
+            live_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+
 class FakeRegistry:
     def __init__(self, adapter: MarketAdapter) -> None:
         self.adapter = adapter
@@ -280,6 +370,13 @@ class WebApiTests(unittest.TestCase):
             finally:
                 exc.close()
 
+    def test_activity_key_prefers_transaction_and_activity_ids(self) -> None:
+        self.assertEqual(activity_key({"transactionHash": "0xABC"}), "tx:0xabc")
+        self.assertEqual(
+            activity_key({"activity_id": "Context:0xabc:0x1"}),
+            "activity-id:context:0xabc:0x1",
+        )
+
     def test_loopback_detection_and_remote_server_token_gate(self) -> None:
         self.assertTrue(is_loopback_host("127.0.0.1"))
         self.assertTrue(is_loopback_host("::1"))
@@ -293,12 +390,14 @@ class WebApiTests(unittest.TestCase):
     def test_server_uses_bounded_connection_and_shutdown_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            server = ReactGuiServer(
-                ("127.0.0.1", 0),
-                ReactGuiHandler,
-                config_path=root / "config.json",
-                frontend_dir=root / "dist",
-            )
+            frontend_dir = root / "dist"
+            with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
+                server = ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=root / "config.json",
+                    frontend_dir=frontend_dir,
+                )
             try:
                 self.assertTrue(server.allow_reuse_address)
                 self.assertTrue(server.daemon_threads)
@@ -306,6 +405,34 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(server.request_queue_size, 32)
             finally:
                 server.server_close()
+
+    def test_custom_frontend_directory_is_confined_to_deployment_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deployment_root = Path(tmpdir)
+            frontend_dir = deployment_root / "frontend" / "dist"
+            frontend_dir.mkdir(parents=True)
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            with patch("web_api._RESOURCE_ROOT", deployment_root):
+                server = ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=deployment_root / "config.json",
+                    frontend_dir=frontend_dir,
+                )
+                try:
+                    self.assertEqual(server.frontend_dir, frontend_dir.resolve())
+                    self.assertEqual(server.static_files["index.html"], (frontend_dir / "index.html").resolve())
+                finally:
+                    server.server_close()
+
+            outside_dir = Path(tmpdir).parent / f"{Path(tmpdir).name}-outside"
+            with self.assertRaisesRegex(ValueError, "deployment resource root"):
+                ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=deployment_root / "config.json",
+                    frontend_dir=outside_dir,
+                )
 
     def test_configured_allowed_origins_merges_cli_and_environment_values(self) -> None:
         with patch.dict(
@@ -445,6 +572,1798 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["selected_market_id"], "kalshi")
         self.assertGreaterEqual(payload["counts"]["total"], 1)
         self.assertGreaterEqual(payload["counts"]["implemented"], 1)
+        self.assertEqual(len(payload["support_matrix"]), payload["counts"]["total"])
+        self.assertEqual(payload["support_summary"]["total_markets"], payload["counts"]["total"])
+        self.assertEqual(payload["support_summary"]["implementation"]["implemented"], 57)
+        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 26)
+        self.assertEqual(kalshi["support"]["operations"]["paper_trading"]["status"], "supported")
+        self.assertEqual(kalshi["support"]["operations"]["live_trading"]["status"], "guarded")
+
+        support = market_support_payload(cfg, market_id="kalshi")
+        self.assertEqual(support["market"]["market_id"], "kalshi")
+        self.assertEqual(support["markets"], [support["market"]])
+        self.assertEqual(support["support_summary"], payload["support_summary"])
+
+    def test_market_history_payloads_serialize_normalized_records(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="space",
+            display_name="Space",
+            capabilities=MarketCapabilities(
+                event_listing=True,
+                price_reading=True,
+                orderbook_reading=True,
+                trade_history=True,
+                candle_history=True,
+            ),
+        )
+        adapter.list_events = lambda query, limit: [  # type: ignore[method-assign]
+            MarketEvent("space", "event-1", query or "event", status="open", raw={"secret": "redact"})
+        ]
+        adapter.list_contracts = lambda event_id: [  # type: ignore[method-assign]
+            MarketContract("space", "m:YES", event_id, "Yes", outcome="Yes", raw={"secret": "redact"})
+        ]
+        adapter.get_price = lambda contract_id: PriceSnapshot(  # type: ignore[method-assign]
+            "space", contract_id, last=0.4, bid=0.39, ask=0.41, source="fixture", raw={"secret": "redact"}
+        )
+        adapter.get_orderbook = lambda contract_id: OrderBookSnapshot(  # type: ignore[method-assign]
+            "space",
+            contract_id,
+            bids=[OrderBookLevel(0.39, 4.0)],
+            asks=[OrderBookLevel(0.41, 3.0)],
+            raw={"secret": "redact"},
+        )
+        adapter.list_trades = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketTrade("space", contract_id, "trade-1", "BUY", 0.4, 3.0, 1700000000.0)
+        ]
+        adapter.list_candles = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketCandle("space", contract_id, 1700000000.0, 0.35, 0.42, 0.34, 0.4, 100.0)
+        ]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["space"].enabled = True
+        registry = Registry()
+        events = market_events_payload(cfg, registry, "space", {"query": ["launch"], "limit": ["1"]})
+        contracts = market_contracts_payload(cfg, registry, "space", {"event_id": ["event-1"]})
+        price = market_price_payload(cfg, registry, "space", {"contract_id": ["m:YES"]})
+        orderbook = market_orderbook_payload(cfg, registry, "space", {"contract_id": ["m:YES"]})
+        trades = market_trades_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "limit": ["1"]})
+        candles = market_candles_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "resolution": ["1h"]})
+
+        self.assertEqual(events["events"][0]["title"], "launch")
+        self.assertNotIn("raw", events["events"][0])
+        self.assertEqual(contracts["contracts"][0]["outcome"], "Yes")
+        self.assertNotIn("raw", contracts["contracts"][0])
+        self.assertEqual(price["price"]["midpoint"], 0.4)
+        self.assertNotIn("raw", price["price"])
+        self.assertEqual(orderbook["orderbook"]["best_ask"], 0.41)
+        self.assertNotIn("raw", orderbook["orderbook"])
+        self.assertEqual(trades["trades"][0]["trade_id"], "trade-1")
+        self.assertEqual(trades["trades"][0]["size"], 3.0)
+        self.assertEqual(candles["candles"][0]["close"], 0.4)
+        self.assertEqual(candles["resolution"], "1h")
+
+    def test_market_account_payload_requires_explicit_operation_allow_list(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="gemini_titan",
+            display_name="Gemini Titan",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("positions",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "positions": [{"symbol": "GEMI-BTC100K26-YES"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["gemini_titan"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "gemini_titan",
+            "positions",
+            {"event_ticker": ["BTC100K2026"], "limit": ["10"]},
+        )
+        self.assertEqual(payload["operation"], "positions")
+        self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
+        self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
+        with self.assertRaises(UnsupportedFeatureError):
+            market_account_payload(cfg, Registry(), "gemini_titan", "arbitrary", {})
+
+    def test_metaculus_account_payload_forwards_forecast_recovery_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="metaculus",
+            display_name="Metaculus",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("forecast_posts",)  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"results": [{"id": 1101}]}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["metaculus"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "metaculus",
+            "forecast_posts",
+            {
+                "forecaster_id": ["123"],
+                "limit": ["10"],
+                "offset": ["20"],
+                "with_cp": ["true"],
+                "include_cp_history": ["true"],
+                "include_descriptions": ["true"],
+            },
+        )
+        self.assertEqual(payload["data"]["results"][0]["id"], 1101)
+        self.assertEqual(
+            calls,
+            [("forecast_posts", {
+                "forecaster_id": "123",
+                "limit": 10,
+                "offset": 20,
+                "with_cp": True,
+                "include_cp_history": True,
+                "include_descriptions": True,
+            })],
+        )
+
+    def test_good_judgment_open_account_payload_forwards_documented_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="good_judgment_open",
+            display_name="Good Judgment Open",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("me", "prediction_sets", "scores")  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"scores": [{"id": 1001}]}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["good_judgment_open"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "good_judgment_open",
+            "scores",
+            {
+                "page": ["2"],
+                "membership_id": ["902"],
+                "score_type": ["question"],
+                "scoreable_id": ["1201"],
+                "predictor_type": ["user"],
+                "include_daily_scores": ["true"],
+                "created_after": ["2026-01-01T00:00:00Z"],
+            },
+        )
+        self.assertEqual(payload["data"]["scores"][0]["id"], 1001)
+        self.assertEqual(
+            calls,
+            [("scores", {
+                "page": 2,
+                "membership_id": "902",
+                "question_id": None,
+                "filter": None,
+                "created_before": None,
+                "created_after": "2026-01-01T00:00:00Z",
+                "updated_before": None,
+                "updated_after": None,
+                "score_type": "question",
+                "scoreable_id": "1201",
+                "predictor_type": "user",
+                "include_daily_scores": True,
+            })],
+        )
+
+    def test_market_position_intent_payload_forwards_allowlisted_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad",
+            capabilities=MarketCapabilities(live_trading=True),
+        )
+        adapter.position_intent_operations = ("split", "neg_risk_split")  # type: ignore[attr-defined]
+        calls = []
+
+        def position_intent(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"intent_only": True}
+
+        adapter.position_intent = position_intent  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        payload = market_position_intent_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            {
+                "operation": "neg_risk_split",
+                "amount": "1000",
+                "network_id": "56",
+                "event_id": "0x" + "ab" * 32,
+                "outcome_index": 2,
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "neg_risk_split")
+        self.assertEqual(calls, [("neg_risk_split", {
+            "amount": "1000",
+            "network_id": "56",
+            "event_id": "0x" + "ab" * 32,
+            "outcome_index": 2,
+        })])
+        with self.assertRaises(UnsupportedFeatureError):
+            market_position_intent_payload(cfg, Registry(), "myriad_markets", {"operation": "redeem"})
+
+    def test_ibkr_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="ibkr_forecasttrader",
+            display_name="IBKR ForecastTrader",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("orders", "order_status")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_all_orders", "modify_order")  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["ibkr_forecasttrader"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "ibkr_forecasttrader",
+            "orders",
+            {"status": ["filled"], "force": ["true"]},
+        )
+        self.assertEqual(account["data"]["operation"], "orders")
+        self.assertEqual(account_calls, [("orders", {"filters": "filled", "force": True})])
+
+        instructions = {
+            "conid": 721095497,
+            "orderType": "LMT",
+            "side": "BUY",
+            "tif": "DAY",
+            "quantity": 5,
+            "price": 0.51,
+        }
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "ibkr_forecasttrader",
+            "modify_order",
+            {
+                "order_id": "987654",
+                "instructions": instructions,
+                "manual_indicator": "false",
+                "external_operator": "desk-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls[0][0], "modify_order")
+        self.assertEqual(order_calls[0][1]["order_id"], "987654")
+        self.assertEqual(order_calls[0][1]["instructions"], instructions)
+        self.assertEqual(order_calls[0][1]["manual_indicator"], "false")
+        self.assertEqual(order_calls[0][1]["external_operator"], "desk-1")
+        self.assertNotIn("unexpected", order_calls[0][1])
+
+    def test_manifold_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="manifold",
+            display_name="Manifold",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("account", "active_orders", "order_history")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["manifold"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "manifold",
+            "active_orders",
+            {
+                "contract_id": ["mf-binary-1:YES"],
+                "limit": ["20"],
+                "before": ["bet-open-1"],
+                "from": ["1760000000"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "active_orders")
+        self.assertEqual(account_calls, [("active_orders", {
+            "contract_id": "mf-binary-1:YES",
+            "limit": 20,
+            "before": "bet-open-1",
+            "after": None,
+            "before_time": None,
+            "after_time": 1760000000.0,
+        })])
+
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "manifold",
+            "cancel_order",
+            {
+                "order_id": "bet-open-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls, [("cancel_order", {
+            "market_id": "",
+            "instructions": None,
+            "customer_ref": "",
+            "market_version": None,
+            "async_request": False,
+            "confirm_global_cancel": "",
+            "order_id": "bet-open-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+
+    def test_prophet_exchange_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="prophet_exchange",
+            display_name="Prophet Exchange",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("balance", "transactions")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_orders")  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["prophet_exchange"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "transactions",
+            {"cursor": ["41"], "limit": ["25"]},
+        )
+        self.assertEqual(account["data"]["operation"], "transactions")
+        self.assertEqual(account_calls, [("transactions", {"cursor": "41", "limit": 25})])
+
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "cancel_order",
+            {
+                "order_id": "order-1",
+                "external_id": "external-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls, [("cancel_order", {
+            "market_id": "",
+            "instructions": None,
+            "customer_ref": "",
+            "market_version": None,
+            "async_request": False,
+            "confirm_global_cancel": "",
+            "order_id": "order-1",
+            "external_id": "external-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+
+        batch = market_order_management_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "cancel_orders",
+            {
+                "orders": [{"order_id": "order-1", "external_id": "external-1"}],
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            },
+        )
+        self.assertEqual(batch["data"], {"status": "accepted"})
+        self.assertEqual(order_calls[-1][1]["orders"], [{"order_id": "order-1", "external_id": "external-1"}])
+
+    def test_azuro_bet_history_account_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="azuro",
+            display_name="Azuro",
+            capabilities=MarketCapabilities(),
+        )
+        adapter.account_recovery_operations = ("bet_history",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["azuro"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "azuro",
+            "bet_history",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "limit": ["25"],
+                "offset": ["4"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "bet_history")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "bet_history",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 25,
+                        "offset": 4,
+                    },
+                )
+            ],
+        )
+
+    def test_thales_account_payload_forwards_wallet_market_and_time_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="thales_market",
+            display_name="Thales Market",
+            capabilities=MarketCapabilities(),
+        )
+        adapter.account_recovery_operations = ("positions", "transactions")  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["thales_market"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "thales_market",
+            "transactions",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "market_id": ["0x1111111111111111111111111111111111111111"],
+                "limit": ["12"],
+                "from": ["100"],
+                "to": ["200"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "transactions")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "transactions",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 12,
+                        "market_id": "0x1111111111111111111111111111111111111111",
+                        "from_timestamp": 100.0,
+                        "to_timestamp": 200.0,
+                    },
+                )
+            ],
+        )
+
+        contract_account = market_account_payload(
+            cfg,
+            Registry(),
+            "thales_market",
+            "transactions",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "contract_id": ["0x1111111111111111111111111111111111111111:1"],
+            },
+        )
+        self.assertEqual(contract_account["data"]["operation"], "transactions")
+        self.assertEqual(account_calls[-1][1]["market_id"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(account_calls[-1][1]["contract_id"], "0x1111111111111111111111111111111111111111:1")
+
+    def test_metadao_activity_account_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="metadao",
+            display_name="MetaDAO",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["metadao"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "metadao",
+            "activity",
+            {
+                "wallet": ["11111111111111111111111111111111"],
+                "limit": ["12"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                    },
+                )
+            ],
+        )
+
+    def test_dflow_account_activity_payload_forwards_wallet_filters_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="dflow",
+            display_name="DFlow",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("account_activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["dflow"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "dflow",
+            "account_activity",
+            {
+                "wallet": ["11111111111111111111111111111111"],
+                "limit": ["12"],
+                "ticker": ["KXBTC-26DEC31-100K"],
+                "mint": ["mint-yes"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "account_activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                        "cursor": "",
+                        "ticker": "KXBTC-26DEC31-100K",
+                        "mint": "mint-yes",
+                    },
+                )
+            ],
+        )
+
+    def test_myriad_account_activity_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad Markets",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("account_activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "account_activity",
+            {
+                "address": ["0x0000000000000000000000000000000000000001"],
+                "limit": ["10"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "account_activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 10,
+                    },
+                )
+            ],
+        )
+
+    def test_myriad_portfolio_payload_forwards_documented_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad Markets",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("portfolio", "market_positions")  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        wallet = "0x0000000000000000000000000000000000000001"
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "portfolio",
+            {
+                "wallet": [wallet],
+                "page": ["2"],
+                "limit": ["10"],
+                "trading_model": ["ob"],
+                "min_shares": ["1.5"],
+                "market_slug": ["btc-above-100k-2026"],
+                "market_id": ["501"],
+                "network_id": ["56"],
+                "token_address": [wallet],
+                "status": ["ongoing"],
+                "keyword": ["btc"],
+                "sort": ["desc"],
+                "sort_by": ["profit"],
+                "exclude_history": ["true"],
+                "group_by_event": ["true"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "portfolio")
+        self.assertEqual(account_calls[0], (
+            "portfolio",
+            {
+                "wallet": wallet,
+                "limit": 10,
+                "page": 2,
+                "trading_model": "ob",
+                "min_shares": "1.5",
+                "market_slug": "btc-above-100k-2026",
+                "market_id": "501",
+                "network_id": "56",
+                "token_address": wallet,
+                "status": "ongoing",
+                "keyword": "btc",
+                "sort": "desc",
+                "sort_by": "profit",
+                "exclude_history": True,
+                "group_by_event": True,
+            },
+        ))
+
+    def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="kalshi",
+            display_name="Kalshi",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("fills",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "fills": [{"fill_id": "fill-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["kalshi"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "kalshi",
+            "fills",
+            {
+                "ticker": ["KXTEST-YES"],
+                "order_id": ["order-1"],
+                "historical": ["true"],
+                "limit": ["12"],
+                "from": ["1700000000"],
+                "to": ["1700000100"],
+                "subaccount": ["2"],
+            },
+        )
+        self.assertEqual(payload["operation"], "fills")
+        self.assertEqual(payload["parameters"]["ticker"], "KXTEST-YES")
+        self.assertEqual(payload["parameters"]["order_id"], "order-1")
+        self.assertTrue(payload["parameters"]["historical"])
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["subaccount"], 2)
+        self.assertEqual(payload["data"]["fills"][0]["fill_id"], "fill-1")
+
+    def test_polymarket_account_payload_forwards_l2_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="polymarket",
+            display_name="Polymarket",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("active_orders", "order_detail", "fills")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "data": [{"id": "order-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        active = market_account_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "active_orders",
+            {"market_id": ["0x" + "b" * 64], "contract_id": ["1234567890"], "cursor": ["MTAw"]},
+        )
+        self.assertEqual(
+            active["parameters"],
+            {"market_id": "0x" + "b" * 64, "contract_id": "1234567890", "next_cursor": "MTAw"},
+        )
+        fills = market_account_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "fills",
+            {
+                "contract_id": ["1234567890"],
+                "trade_id": ["trade-1"],
+                "limit": ["20"],
+                "before": ["1760000300"],
+                "after": ["1760000000"],
+            },
+        )
+        self.assertEqual(fills["parameters"]["trade_id"], "trade-1")
+        self.assertEqual(fills["parameters"]["limit"], 20)
+        self.assertEqual(fills["parameters"]["before"], 1760000300.0)
+        detail = market_account_payload(cfg, Registry(), "polymarket", "order_detail", {"order_id": ["order-1"]})
+        self.assertEqual(detail["parameters"], {"order_id": "order-1"})
+
+    def test_polymarket_order_management_payload_forwards_cancel_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="polymarket",
+            display_name="Polymarket",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_orders", "cancel_all_orders", "cancel_market_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "cancel_market_orders",
+            {
+                "market_id": "0x" + "b" * 64,
+                "asset_id": "1234567890",
+                "contract_id": "1234567890",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_id"], "0x" + "b" * 64)
+        self.assertEqual(calls[0][1]["asset_id"], "1234567890")
+        self.assertEqual(calls[0][1]["contract_id"], "1234567890")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_gemini_order_management_payload_forwards_only_documented_cancel_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="gemini_titan",
+            display_name="Gemini Predictions",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["gemini_titan"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "gemini_titan",
+            "batch_cancel_orders",
+            {
+                "orders": [106817811, "106817812"],
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "batch_cancel_orders")
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["orders"], [106817811, "106817812"])
+        self.assertEqual(
+            calls[0][1]["confirm_order_management"],
+            "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_hyperliquid_account_payload_forwards_safe_dex_and_limit(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="hyperliquid",
+            display_name="Hyperliquid",
+            capabilities=MarketCapabilities(credentials_required=False),
+        )
+        adapter.account_recovery_operations = ("active_orders", "order_history")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "orders": [{"coin": "#10"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["hyperliquid"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "hyperliquid",
+            "active_orders",
+            {"dex": ["xyz"]},
+        )
+        self.assertEqual(payload["operation"], "active_orders")
+        self.assertEqual(payload["parameters"], {"dex": "xyz"})
+        self.assertEqual(payload["data"]["orders"][0]["coin"], "#10")
+        history = market_account_payload(cfg, Registry(), "hyperliquid", "order_history", {"limit": ["12"]})
+        self.assertEqual(
+            history["parameters"],
+            {"limit": 12, "status": "filled", "from_timestamp": None, "to_timestamp": None},
+        )
+
+    def test_opinion_account_payload_forwards_page_filters_and_path_safe_order_id(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="opinion_labs",
+            display_name="Opinion Labs",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("order_history", "order_detail", "positions")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "result": {"list": [{"orderId": "order-1"}]},
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["opinion_labs"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "opinion_labs",
+            "order_history",
+            {
+                "page": ["2"],
+                "limit": ["20"],
+                "market_id": ["77"],
+                "chain_id": ["56"],
+                "status": ["1,2"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {"page": 2, "limit": 20, "market_id": "77", "chain_id": "56", "status": "1,2"},
+        )
+        detail = market_account_payload(
+            cfg, Registry(), "opinion_labs", "order_detail", {"order_id": ["order-1"]}
+        )
+        self.assertEqual(detail["parameters"], {"order_id": "order-1"})
+        clamped = market_account_payload(cfg, Registry(), "opinion_labs", "order_history", {"limit": ["99"]})
+        self.assertEqual(clamped["parameters"]["limit"], 20)
+
+    def test_betfair_account_payload_forwards_cleared_order_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="betfair_exchange",
+            display_name="Betfair Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = (  # type: ignore[attr-defined]
+            "active_orders",
+            "cleared_orders",
+            "funds",
+            "account",
+            "statement",
+            "currency_rates",
+        )
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "clearedOrders": [{"betId": "bet-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["betfair_exchange"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "cleared_orders",
+            {
+                "contract_id": ["1.234:101"],
+                "status": ["SETTLED"],
+                "limit": ["12"],
+                "offset": ["2"],
+                "group_by": ["RUNNER"],
+                "include_item_description": ["true"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "bet_status": "SETTLED",
+                "market_id": "1.234",
+                "event_type_id": "",
+                "event_id": "",
+                "runner_id": "101",
+                "bet_id": "",
+                "group_by": "RUNNER",
+                "include_item_description": True,
+                "limit": 12,
+                "offset": 2,
+                "from_timestamp": None,
+                "to_timestamp": None,
+            },
+        )
+        active = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "active_orders",
+            {
+                "contract_id": ["1.234:101"],
+                "status": ["EXECUTABLE"],
+                "order_by": ["BY_PLACE_TIME"],
+                "sort_dir": ["LATEST_TO_EARLIEST"],
+                "limit": ["8"],
+                "offset": ["3"],
+            },
+        )
+        self.assertEqual(
+            active["parameters"],
+            {
+                "market_id": "1.234",
+                "contract_id": "1.234:101",
+                "status": "EXECUTABLE",
+                "order_by": "BY_PLACE_TIME",
+                "sort_dir": "LATEST_TO_EARLIEST",
+                "include_item_description": False,
+                "limit": 8,
+                "offset": 3,
+                "from_timestamp": None,
+                "to_timestamp": None,
+            },
+        )
+        funds = market_account_payload(cfg, Registry(), "betfair_exchange", "funds", {"wallet": ["UK"]})
+        self.assertEqual(funds["parameters"], {"wallet": "UK"})
+        account = market_account_payload(cfg, Registry(), "betfair_exchange", "account", {})
+        self.assertEqual(account["parameters"], {})
+        statement = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "statement",
+            {
+                "locale": ["en"],
+                "wallet": ["UK"],
+                "limit": ["12"],
+                "offset": ["4"],
+                "from": ["1780272000"],
+                "to": ["1780358400"],
+            },
+        )
+        self.assertEqual(
+            statement["parameters"],
+            {
+                "locale": "en",
+                "limit": 12,
+                "offset": 4,
+                "include_item": True,
+                "wallet": "UK",
+                "from_timestamp": 1780272000.0,
+                "to_timestamp": 1780358400.0,
+            },
+        )
+        rates = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "currency_rates",
+            {"from_currency": ["GBP"]},
+        )
+        self.assertEqual(rates["parameters"], {"from_currency": "GBP"})
+
+    def test_betfair_order_management_payload_forwards_only_allowlisted_mutation_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="betfair_exchange",
+            display_name="Betfair Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.order_management_operations = ("cancel_orders", "update_orders", "replace_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "SUCCESS"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["betfair_exchange"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "cancel_orders",
+            {
+                "exchange_market_id": "1.234",
+                "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                "customerRef": "cancel-1",
+                "async": False,
+                "confirm_global_cancel": "",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "cancel_orders")
+        self.assertEqual(payload["parameters"]["market_id"], "1.234")
+        self.assertEqual(payload["parameters"]["customer_ref"], "cancel-1")
+        self.assertEqual(payload["data"], {"status": "SUCCESS"})
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "cancel_orders",
+                    {
+                        "market_id": "1.234",
+                        "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                        "customer_ref": "cancel-1",
+                        "market_version": None,
+                        "async_request": False,
+                        "confirm_global_cancel": "",
+                    },
+                )
+            ],
+        )
+        with self.assertRaises(UnsupportedFeatureError):
+            market_order_management_payload(cfg, Registry(), "betfair_exchange", "place_orders", {})
+
+    def test_kalshi_order_management_payload_forwards_documented_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="kalshi",
+            display_name="Kalshi",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["kalshi"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "kalshi",
+            "amend_order",
+            {
+                "order_id": "order-1",
+                "ticker": "KXTEST-1",
+                "side": "bid",
+                "price": "0.44",
+                "count": "5",
+                "subaccount": 1,
+                "exchange_index": 0,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "amend_order")
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["order_id"], "order-1")
+        self.assertEqual(calls[0][1]["ticker"], "KXTEST-1")
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_hyperliquid_order_management_payload_forwards_signed_action_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="hyperliquid",
+            display_name="Hyperliquid",
+            capabilities=MarketCapabilities(credentials_required=False, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "schedule_cancel")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["hyperliquid"].enabled = True
+        signed = {
+            "action": {"type": "cancel", "cancels": [{"a": 100000000, "o": 123456789}]},
+            "nonce": 1700000000000,
+            "signature": "0x" + "ab" * 65,
+        }
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "hyperliquid",
+            "cancel_order",
+            {
+                "signed_action": signed,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["signed_action"], signed)
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+        self.assertIsNone(calls[0][1]["instructions"])
+
+    def test_smarkets_account_and_order_management_payloads_forward_bounded_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="smarkets",
+            display_name="Smarkets",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("order_history", "account")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_orders")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+        }
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["smarkets"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "smarkets",
+            "order_history",
+            {"status": ["created,filled"], "limit": ["24"], "unexpected": ["ignored"]},
+        )
+        self.assertEqual(account["parameters"], {"status": "created,filled", "limit": 24})
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "smarkets",
+            "cancel_orders",
+            {
+                "market_id": "market-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "cancel_orders",
+                    {
+                        "market_id": "market-1",
+                        "instructions": None,
+                        "customer_ref": "",
+                        "market_version": None,
+                        "async_request": False,
+                        "confirm_global_cancel": "",
+                        "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                    },
+                )
+            ],
+        )
+
+    def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="matchbook",
+            display_name="Matchbook",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("settled_bets", "current_bets", "current_offers", "balance", "account")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "data": {"operation": operation},
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["matchbook"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "settled_bets",
+            {
+                "sport_id": ["1"],
+                "event_id": ["101"],
+                "market_id": ["202"],
+                "limit": ["12"],
+                "offset": ["2"],
+                "from": ["1780344000"],
+                "to": ["1780347600"],
+                "odds_type": ["DECIMAL"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "offset": 2,
+                "limit": 12,
+                "sport_id": "1",
+                "event_id": "101",
+                "market_id": "202",
+                "odds_type": "DECIMAL",
+                "from_timestamp": 1780344000.0,
+                "to_timestamp": 1780347600.0,
+            },
+        )
+        offers = market_account_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "current_offers",
+            {
+                "side": ["back"],
+                "offer_status": ["open,matched"],
+                "interval": ["30"],
+                "include_edits": ["true"],
+                "aggregation_type": ["average"],
+            },
+        )
+        self.assertEqual(offers["parameters"]["side"], "back")
+        self.assertEqual(offers["parameters"]["status"], "open,matched")
+        self.assertEqual(offers["parameters"]["interval"], 30)
+        self.assertTrue(offers["parameters"]["include_edits"])
+        self.assertEqual(offers["parameters"]["aggregation_type"], "average")
+
+    def test_matchbook_order_management_payload_forwards_only_documented_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="matchbook",
+            display_name="Matchbook",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_offers", "edit_offer")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["matchbook"].enabled = True
+        batch = market_order_management_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "cancel_offers",
+            {
+                "offer_ids": [404, 405],
+                "event_ids": "101",
+                "market_ids": "202",
+                "runner_ids": "303",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(batch["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["offer_ids"], [404, 405])
+        self.assertEqual(calls[0][1]["event_ids"], "101")
+        self.assertNotIn("unexpected", calls[0][1])
+
+        single = market_order_management_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "edit_offer",
+            {
+                "offer_id": 404,
+                "current_odds": 1.5,
+                "new_odds": 2.0,
+                "current_stake": 5,
+                "new_stake": 6,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            },
+        )
+        self.assertEqual(single["operation"], "edit_offer")
+        self.assertEqual(calls[1][1]["offer_id"], 404)
+        self.assertEqual(calls[1][1]["new_stake"], 6)
+
+    def test_myriad_order_management_payload_forwards_signed_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "cancel_order",
+            {
+                "order_hash": "0x" + "12" * 32,
+                "trader": "0x1234567890123456789012345678901234567890",
+                "timestamp": 1719835200,
+                "signature": "0x" + "ab" * 65,
+                "network_id": 56,
+                "allow_partial": True,
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["order_hash"], "0x" + "12" * 32)
+        self.assertEqual(calls[0][1]["network_id"], 56)
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_opinion_order_management_payload_forwards_sdk_filters_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="opinion_labs",
+            display_name="Opinion Labs",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["opinion_labs"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "opinion_labs",
+            "cancel_all_orders",
+            {
+                "market_id": "77",
+                "side": "BUY",
+                "confirm_global_cancel": "CANCEL ALL OPINION ORDERS",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_id"], "77")
+        self.assertEqual(calls[0][1]["side"], "BUY")
+        self.assertEqual(calls[0][1]["confirm_global_cancel"], "CANCEL ALL OPINION ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_limitless_order_management_payload_forwards_fixed_cancellation_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="limitless_exchange",
+            display_name="Limitless Exchange",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["limitless_exchange"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "limitless_exchange",
+            "cancel_all_orders",
+            {
+                "market_slug": "doge-above-021652-sep-1-1200-utc",
+                "confirm_global_cancel": "CANCEL ALL LIMITLESS ORDERS",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_slug"], "doge-above-021652-sep-1-1200-utc")
+        self.assertEqual(calls[0][1]["confirm_global_cancel"], "CANCEL ALL LIMITLESS ORDERS")
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="limitless_exchange",
+            display_name="Limitless Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("user_orders",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "orders": [{"order_id": "order-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["limitless_exchange"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "limitless_exchange",
+            "user_orders",
+            {
+                "market_slug": ["doge-above-021652-sep-1-1200-utc"],
+                "on_behalf_of": ["profile-123"],
+            },
+        )
+        self.assertEqual(payload["operation"], "user_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "on_behalf_of": "profile-123",
+                "market_slug": "doge-above-021652-sep-1-1200-utc",
+            },
+        )
+        self.assertEqual(payload["data"]["orders"][0]["order_id"], "order-1")
+
+    def test_xmarket_account_payload_forwards_bounded_market_order_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="xmarket",
+            display_name="Xmarket",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("positions", "user_orders", "market_orders")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "items": [{"id": "xorder-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["xmarket"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "xmarket",
+            "market_orders",
+            {
+                "market_id": ["market-1"],
+                "status": ["open"],
+                "page": ["2"],
+                "limit": ["25"],
+                "unexpected": ["ignored"],
+            },
+        )
+        self.assertEqual(payload["operation"], "market_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {"status": "open", "page": 2, "limit": 25, "market_id": "market-1"},
+        )
+        self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
+
+    def test_xo_account_payload_forwards_documented_filters_and_path_ids(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="xo_market",
+            display_name="XO Market",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = (
+            "account",
+            "positions",
+            "orders",
+            "trades",
+            "settlement",
+            "settlement_history",
+            "audit_logs",
+        )  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["xo_market"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "xo_market",
+            "trades",
+            {
+                "market_id": ["us-election-2028"],
+                "outcome_id": ["vance"],
+                "from": ["2024-12-01T09:15:00Z"],
+                "to": ["2024-12-01T09:30:00Z"],
+                "limit": ["12"],
+                "unexpected": ["ignored"],
+            },
+        )
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["market_id"], "us-election-2028")
+        self.assertEqual(payload["parameters"]["outcome_id"], "vance")
+        self.assertEqual(payload["parameters"]["start_time"], "2024-12-01T09:15:00Z")
+        self.assertEqual(payload["parameters"]["end_time"], "2024-12-01T09:30:00Z")
+
+        settlement = market_account_payload(
+            cfg,
+            Registry(),
+            "xo_market",
+            "settlement_history",
+            {"contract_id": ["us-election-2028:vance"], "limit": ["5"], "cursor": ["next"]},
+        )
+        self.assertEqual(
+            settlement["parameters"],
+            {"market_id": "us-election-2028", "limit": 5, "cursor": "next"},
+        )
+        self.assertEqual(calls[0][0], "trades")
+        self.assertEqual(calls[1][0], "settlement_history")
 
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()
@@ -806,6 +2725,122 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(preview["live"])
         self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
         self.assertAlmostEqual(preview["order"]["limit_price"], 0.47)
+
+    def test_opinion_wallet_activity_uses_official_feed_and_copy_simulation(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "opinion_labs"
+        cfg.markets["opinion_labs"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+        recent: list[dict] = []
+
+        result = poll_wallet_activity(cfg, FakeRegistry(FakeOpinionCopyAdapter()), recent)
+
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["activity"]), 1)
+        preview = result["activity"][0]["copy_preview"]
+        self.assertEqual(preview["status"], "simulation")
+        self.assertEqual(preview["order"]["market_id"], "opinion_labs")
+        self.assertEqual(preview["order"]["contract_id"], "77:YES:0xyes")
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_myriad_wallet_activity_uses_public_feed_and_collateral_budget_copy(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "myriad_markets"
+        cfg.markets["myriad_markets"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+        recent: list[dict] = []
+
+        result = poll_wallet_activity(cfg, FakeRegistry(FakeMyriadCopyAdapter()), recent)
+
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["activity"]), 1)
+        preview = result["activity"][0]["copy_preview"]
+        self.assertEqual(preview["status"], "simulation")
+        self.assertEqual(preview["order"]["market_id"], "myriad_markets")
+        self.assertEqual(preview["order"]["contract_id"], "501:1")
+        self.assertAlmostEqual(preview["order"]["size"], 1.0)
+        self.assertAlmostEqual(preview["order"]["approx_notional"], 1.0)
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_azuro_wallet_copy_uses_decimal_odds_and_stake_budget(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "azuro"
+        cfg.markets["azuro"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+
+        preview = copy_trade_preview_from_activity(
+            cfg,
+            FakeRegistry(FakeAzuroCopyAdapter()),
+            {
+                "proxyWallet": WALLET,
+                "asset": "30061006000000000029214016:300610060000000000649714110000000000000227249395:29",
+                "side": "BUY",
+                "price": 1 / 1.85,
+                "odds": 1.85,
+                "size": 10.0,
+                "transactionHash": "azuro-tx-1",
+            },
+        )
+
+        self.assertEqual(preview["status"], "simulation")
+        self.assertAlmostEqual(preview["order"]["size"], 1.0)
+        self.assertAlmostEqual(preview["order"]["limit_price"], 1.85 * 0.98)
+        self.assertAlmostEqual(preview["order"]["approx_notional"], 1.0)
+        self.assertEqual(preview["pricing"]["raw_odds"], 1.85)
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_manifold_wallet_and_copy_settings_use_prefixed_public_identity(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "manifold"
+        cfg.markets["manifold"].enabled = True
+
+        wallet = add_wallet_watch(cfg, {"wallet": "Manifold:ForecastUser", "display_name": "ForecastUser"})
+        settings = apply_copy_settings_patch(
+            cfg,
+            {
+                "enabled": True,
+                "follow_wallets": ["MANIFOLD:ForecastUser"],
+                "copy_percentage": 100,
+                "max_usdc_per_trade": 5,
+                "slippage": 0.01,
+            },
+        )
+        payload = copy_payload(cfg, FakeRegistry(FakePolymarketAdapter()))
+
+        self.assertEqual(wallet.wallet, "manifold:forecastuser")
+        self.assertEqual(settings.normalized_follow_wallets(), ["manifold:forecastuser"])
+        self.assertTrue(payload["copy_trading_supported"])
+        self.assertEqual(payload["activity_identity_hint"], "manifold:<username>")
+
+        with self.assertRaises(ValueError):
+            add_wallet_watch(cfg, {"wallet": "ForecastUser"})
 
     def test_copy_settings_and_live_preview_use_shared_preflight_without_ordering(self) -> None:
         cfg = AppConfig()
@@ -1939,10 +3974,16 @@ class WebApiTests(unittest.TestCase):
 
     def test_health_payload_documents_parallel_gui_contract(self) -> None:
         with patch("web_api.project_version", return_value="9.8.7"):
-            payload = health_payload(Path("local-config.json"), Path("frontend-dist"))
+            payload = health_payload(
+                Path("local-config.json"),
+                Path("frontend-dist"),
+                {"source_revision": "a" * 40, "frontend_sha256": "b" * 64},
+            )
 
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["api_version"], "9.8.7")
+        self.assertEqual(payload["runtime_source_revision"], "a" * 40)
+        self.assertEqual(payload["runtime_frontend_sha256"], "b" * 64)
         self.assertEqual(payload["mode"], "parallel")
         self.assertTrue(payload["python_gui_available"])
         self.assertEqual(payload["python_gui_command"], "python app.py")
@@ -1958,6 +3999,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["observability"]["request_logging"], "structured_json")
         self.assertIn("/metrics", payload["routes"]["GET"])
         self.assertIn("/api/state", payload["routes"]["GET"])
+        self.assertIn("/api/markets/support-matrix", payload["routes"]["GET"])
+        self.assertIn("/api/markets/{market_id}/support", payload["routes"]["GET"])
         self.assertIn("/api/live-safety", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/coverage", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/clob-readiness", payload["routes"]["GET"])
@@ -1971,6 +4014,8 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("/api/polymarket/users/mdd/export.csv", payload["routes"]["GET"])
         self.assertIn("/api/config", payload["routes"]["PATCH"])
         self.assertIn("/api/live-safety/preflight", payload["routes"]["POST"])
+        self.assertIn("/api/markets/{market_id}/orders/{operation}", payload["routes"]["POST"])
+        self.assertNotIn("/api/markets/{market_id}/orders/{operation}", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/users/mdd/cache/purge", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/users/mdd/cache/{key}", payload["routes"]["DELETE"])
@@ -2679,6 +4724,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(health_headers.get("Cache-Control"), "no-store")
         health = json.loads(health_body.decode("utf-8"))
         self.assertTrue(health["frontend_build_available"])
+        self.assertRegex(health["runtime_source_revision"], r"^[0-9a-f]{40}$")
+        self.assertRegex(health["runtime_frontend_sha256"], r"^[0-9a-f]{64}$")
 
     def test_static_cache_control_rejects_unknown_relative_path(self) -> None:
         self.assertEqual(static_cache_control(None), "no-store")
@@ -2708,6 +4755,18 @@ class WebApiTests(unittest.TestCase):
                 ReactGuiHandler._resolve_static_path(None, static_files, "/assets/app.js"),
                 asset.resolve(),
             )
+
+    def test_static_file_catalog_uses_packaged_frontend_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frontend_dir = Path(tmpdir) / "dist"
+            frontend_dir.mkdir()
+            index = frontend_dir / "index.html"
+            index.write_text("<html></html>", encoding="utf-8")
+
+            with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
+                static_files = ReactGuiHandler._static_file_catalog()
+
+        self.assertEqual(static_files, {"index.html": index.resolve()})
 
     def test_app_state_payload_combines_initial_react_gui_state(self) -> None:
         cfg = AppConfig()
@@ -2759,6 +4818,28 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["health"]["status"], "ok")
         self.assertEqual(payload["config"]["selected_market_id"], "kalshi")
         self.assertEqual(payload["paper"]["counts"]["history"], 1)
+
+    def test_http_support_matrix_routes_return_full_catalog_and_single_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            try:
+                status, payload = self._request_json(base_url, "/api/markets/support-matrix")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(len(payload["markets"]), 68)
+                self.assertEqual(payload["counts"]["total"], 68)
+
+                status, row_payload = self._request_json(base_url, "/api/markets/kalshi/support")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(row_payload["market"]["market_id"], "kalshi")
+                self.assertEqual(row_payload["markets"], [row_payload["market"]])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
 
 if __name__ == "__main__":

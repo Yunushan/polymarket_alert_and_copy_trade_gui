@@ -1,0 +1,15 @@
+{
+  "offers": [
+    {
+      "id": 405,
+      "event-id": 101,
+      "market-id": 202,
+      "runner-id": 303,
+      "side": "back",
+      "odds": 2.2,
+      "stake": 6.0,
+      "remaining": 6.0,
+      "status": "open"
+    }
+  ]
+}

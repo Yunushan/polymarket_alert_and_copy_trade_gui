@@ -38,6 +38,14 @@ import {
   deleteWallet,
   fillPaperQuoteLimit,
   fetchLiveSafety,
+  fetchMarketAccount,
+  fetchMarketCandles,
+  fetchMarketContracts,
+  fetchMarketEvents,
+  fetchMarketOrderbook,
+  fetchMarketPrice,
+  fetchMarketTrades,
+  manageMarketOrders,
   fetchPolymarketLeaderboard,
   fetchPolymarketLiveValidationDecisions,
   fetchPolymarketLiveValidation,
@@ -73,6 +81,7 @@ import {
   refreshPaperMarks,
   refreshPaperQuote,
   refreshSelectedPaperMark,
+  requestMarketPositionIntent,
   searchPolymarketUsers,
   submitPaperOrder,
   storePolymarketLiveValidationReport,
@@ -100,6 +109,19 @@ import type {
   LivePreflightPayload,
   LiveSafetyPayload,
   Market,
+  MarketCandlesPayload,
+  MarketAccountOperation,
+  MarketAccountPayload,
+  MarketContractsPayload,
+  MarketEventsPayload,
+  MarketOrderbookPayload,
+  MarketOrderManagementOperation,
+  MarketOrderManagementPayload,
+  MarketPositionIntentPayload,
+  MarketPositionOperation,
+  MarketPricePayload,
+  MarketSupportStatus,
+  MarketTradesPayload,
   MarketsPayload,
   PaperOrderForm,
   PaperPayload,
@@ -138,6 +160,151 @@ interface LiveValidationDecisionForm {
   decision: "accepted" | "rejected";
   reviewer: string;
   reviewer_note: string;
+}
+
+interface MarketReadForm {
+  query: string;
+  event_id: string;
+  contract_id: string;
+  account_ticker: string;
+  account_order_id: string;
+  account_trade_id: string;
+  account_forecaster_id: string;
+  account_include_cp: boolean;
+  account_include_cp_history: boolean;
+  account_include_descriptions: boolean;
+  account_membership_id: string;
+  account_question_id: string;
+  account_filter: string;
+  account_created_before: string;
+  account_created_after: string;
+  account_updated_before: string;
+  account_updated_after: string;
+  account_score_type: string;
+  account_scoreable_id: string;
+  account_predictor_type: string;
+  account_include_daily_scores: boolean;
+  account_cursor: string;
+  account_limit: string;
+  account_offset: string;
+  account_wallet: string;
+  account_event_types: string;
+  account_is_resolved: string;
+  account_dex: string;
+  account_market_id: string;
+  account_market_hash: string;
+  account_client_order_id: string;
+  account_start_date: string;
+  account_end_date: string;
+  account_sort_asc: boolean;
+  account_chain_id: string;
+  account_status: string;
+  account_event_type_id: string;
+  account_event_id: string;
+  account_outcome_id: string;
+  account_event_type: string;
+  account_start_time: string;
+  account_end_time: string;
+  account_runner_id: string;
+  account_bet_id: string;
+  account_group_by: string;
+  account_include_item_description: boolean;
+  account_locale: string;
+  account_exclude_item: boolean;
+  account_from_currency: string;
+  account_order_by: string;
+  account_sort_dir: string;
+  account_search: string;
+  account_category: string;
+  account_with_cash_outs: boolean;
+  account_before: string;
+  account_after: string;
+  account_before_time: string;
+  account_after_time: string;
+  account_sport_id: string;
+  account_side: string;
+  account_offer_status: string;
+  account_aggregation_type: string;
+  account_odds_type: string;
+  account_interval: string;
+  account_cancellation_reason: string;
+  account_include_edits: boolean;
+  account_subaccount: string;
+  account_count_filter: string;
+  account_market_slug: string;
+  account_page: string;
+  account_trading_model: string;
+  account_min_shares: string;
+  account_network_id: string;
+  account_token_address: string;
+  account_keyword: string;
+  account_sort: string;
+  account_sort_by: string;
+  account_state: string;
+  account_topics: string;
+  account_market_ids: string;
+  account_exclude_history: boolean;
+  account_group_by_event: boolean;
+  account_on_behalf_of: string;
+  account_historical: boolean;
+  resolution: string;
+  from: string;
+  to: string;
+  account_operation: MarketAccountOperation;
+  position_operation: MarketPositionOperation;
+  position_market_id: string;
+  position_amount: string;
+  position_network_id: string;
+  position_event_id: string;
+  position_outcome_index: string;
+  order_management_operation: MarketOrderManagementOperation;
+  order_management_market_id: string;
+  order_management_market_slug: string;
+  order_management_instructions: string;
+  order_management_customer_ref: string;
+  order_management_market_version: string;
+  order_management_async: boolean;
+  order_management_confirmation: string;
+  order_management_order_id: string;
+  order_management_external_id: string;
+  order_management_offer_ids: string;
+  order_management_event_ids: string;
+  order_management_market_ids: string;
+  order_management_runner_ids: string;
+  order_management_current_odds: string;
+  order_management_new_odds: string;
+  order_management_current_stake: string;
+  order_management_new_stake: string;
+  order_management_order_hash: string;
+  order_management_trader: string;
+  order_management_timestamp: string;
+  order_management_signature: string;
+  order_management_signature_type: string;
+  order_management_network_id: string;
+  order_management_allow_partial: boolean;
+  order_management_ticker: string;
+  order_management_side: string;
+  order_management_price: string;
+  order_management_count: string;
+  order_management_client_order_id: string;
+  order_management_updated_client_order_id: string;
+  order_management_reduce_by: string;
+  order_management_reduce_to: string;
+  order_management_subaccount: string;
+  order_management_exchange_index: string;
+  order_management_operator_confirmation: string;
+}
+
+interface MarketReadState {
+  events: MarketEventsPayload | null;
+  contracts: MarketContractsPayload | null;
+  price: MarketPricePayload | null;
+  orderbook: MarketOrderbookPayload | null;
+  trades: MarketTradesPayload | null;
+  candles: MarketCandlesPayload | null;
+  account: MarketAccountPayload | null;
+  position_intent: MarketPositionIntentPayload | null;
+  order_management: MarketOrderManagementPayload | null;
 }
 
 function isTab(value: string | null): value is Tab {
@@ -261,6 +428,16 @@ function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?
   return <span className={`status-pill ${tone}`}>{children}</span>;
 }
 
+function supportStatusTone(status: MarketSupportStatus): "good" | "warn" | "neutral" {
+  if (status === "supported") {
+    return "good";
+  }
+  if (status === "guarded" || status === "blocked") {
+    return "warn";
+  }
+  return "neutral";
+}
+
 function Metric({ label, value, tone }: { label: string; value: string | number; tone?: "good" | "warn" | "neutral" }) {
   return (
     <div className={`metric ${tone ?? ""}`}>
@@ -313,6 +490,155 @@ function emptyAlertForm(marketId = "polymarket"): AlertForm {
     source: "last_trade",
     once: true,
     enabled: true
+  };
+}
+
+function emptyMarketReadForm(): MarketReadForm {
+  return {
+    query: "",
+    event_id: "",
+    contract_id: "",
+    account_ticker: "",
+    account_order_id: "",
+    account_trade_id: "",
+    account_forecaster_id: "",
+    account_include_cp: false,
+    account_include_cp_history: false,
+    account_include_descriptions: false,
+    account_membership_id: "",
+    account_question_id: "",
+    account_filter: "",
+    account_created_before: "",
+    account_created_after: "",
+    account_updated_before: "",
+    account_updated_after: "",
+    account_score_type: "",
+    account_scoreable_id: "",
+    account_predictor_type: "",
+    account_include_daily_scores: false,
+    account_cursor: "",
+    account_limit: "",
+    account_offset: "",
+    account_wallet: "",
+    account_event_types: "",
+    account_is_resolved: "",
+    account_dex: "",
+    account_market_id: "",
+    account_market_hash: "",
+    account_client_order_id: "",
+    account_start_date: "",
+    account_end_date: "",
+    account_sort_asc: true,
+    account_chain_id: "",
+    account_status: "",
+    account_event_type_id: "",
+    account_event_id: "",
+    account_outcome_id: "",
+    account_event_type: "",
+    account_start_time: "",
+    account_end_time: "",
+    account_runner_id: "",
+    account_bet_id: "",
+    account_group_by: "BET",
+    account_include_item_description: false,
+    account_locale: "en",
+    account_exclude_item: false,
+    account_from_currency: "",
+    account_order_by: "BY_MATCH_TIME",
+    account_sort_dir: "EARLIEST_TO_LATEST",
+    account_search: "",
+    account_category: "",
+    account_with_cash_outs: false,
+    account_before: "",
+    account_after: "",
+    account_before_time: "",
+    account_after_time: "",
+    account_sport_id: "",
+    account_side: "",
+    account_offer_status: "",
+    account_aggregation_type: "none",
+    account_odds_type: "DECIMAL",
+    account_interval: "",
+    account_cancellation_reason: "",
+    account_include_edits: false,
+    account_subaccount: "",
+    account_count_filter: "",
+    account_market_slug: "",
+    account_page: "1",
+    account_trading_model: "all",
+    account_min_shares: "",
+    account_network_id: "",
+    account_token_address: "",
+    account_keyword: "",
+    account_sort: "",
+    account_sort_by: "",
+    account_state: "",
+    account_topics: "",
+    account_market_ids: "",
+    account_exclude_history: false,
+    account_group_by_event: false,
+    account_on_behalf_of: "",
+    account_historical: false,
+    resolution: "1h",
+    from: "",
+    to: "",
+    account_operation: "active_orders",
+    position_operation: "split",
+    position_market_id: "",
+    position_amount: "",
+    position_network_id: "",
+    position_event_id: "",
+    position_outcome_index: "",
+    order_management_operation: "cancel_orders",
+    order_management_market_id: "",
+    order_management_market_slug: "",
+    order_management_instructions: "[{\"bet_id\": \"bet-id\", \"size_reduction\": 1}]",
+    order_management_customer_ref: "",
+    order_management_market_version: "",
+    order_management_async: false,
+    order_management_confirmation: "",
+    order_management_order_id: "",
+    order_management_external_id: "",
+    order_management_offer_ids: "",
+    order_management_event_ids: "",
+    order_management_market_ids: "",
+    order_management_runner_ids: "",
+    order_management_current_odds: "",
+    order_management_new_odds: "",
+    order_management_current_stake: "",
+    order_management_new_stake: "",
+    order_management_order_hash: "",
+    order_management_trader: "",
+    order_management_timestamp: "",
+    order_management_signature: "",
+    order_management_signature_type: "",
+    order_management_network_id: "",
+    order_management_allow_partial: true,
+    order_management_ticker: "",
+    order_management_side: "bid",
+    order_management_price: "",
+    order_management_count: "",
+    order_management_client_order_id: "",
+    order_management_updated_client_order_id: "",
+    order_management_reduce_by: "",
+    order_management_reduce_to: "",
+    order_management_subaccount: "",
+    order_management_exchange_index: "",
+    order_management_operator_confirmation: ""
+  };
+}
+
+function emptyMarketReadState(): MarketReadState {
+  return {
+    events: null,
+    contracts: null,
+    price: null,
+    orderbook: null,
+    trades: null,
+    candles: null,
+    account: null,
+    position_intent: null,
+    order_management: null
   };
 }
 
@@ -484,10 +810,15 @@ export default function App() {
     contract_id: "",
     side: "BUY",
     size: "",
-    limit_price: ""
+    limit_price: "",
+    metadata_json: ""
   });
   const [paperMessage, setPaperMessage] = useState("");
   const [marketQuery, setMarketQuery] = useState("");
+  const [marketReadForm, setMarketReadForm] = useState<MarketReadForm>(emptyMarketReadForm());
+  const [marketRead, setMarketRead] = useState<MarketReadState>(emptyMarketReadState());
+  const [marketReadBusy, setMarketReadBusy] = useState<string | null>(null);
+  const [marketReadMessage, setMarketReadMessage] = useState("");
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsMessage, setAnalyticsMessage] = useState("");
   const [userSearchQuery, setUserSearchQuery] = useState("");
@@ -593,6 +924,83 @@ export default function App() {
       live_trading_max_size: String(form.get("live_trading_max_size") ?? "").trim(),
       live_trading_max_notional: String(form.get("live_trading_max_notional") ?? "").trim()
     };
+    if (selectedMarket.market_id === "betfair_exchange") {
+      patch.settings = {
+        betfair_order_management_enabled: form.get("betfair_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "kalshi") {
+      patch.settings = {
+        kalshi_order_management_enabled: form.get("kalshi_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "polymarket") {
+      patch.settings = {
+        polymarket_order_management_enabled: form.get("polymarket_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "gemini_titan") {
+      patch.settings = {
+        gemini_order_management_enabled: form.get("gemini_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "matchbook") {
+      patch.settings = {
+        matchbook_order_management_enabled: form.get("matchbook_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "myriad_markets") {
+      patch.settings = {
+        myriad_order_management_enabled: form.get("myriad_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "opinion_labs") {
+      patch.settings = {
+        opinion_order_management_enabled: form.get("opinion_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "limitless_exchange") {
+      patch.settings = {
+        limitless_order_management_enabled: form.get("limitless_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "smarkets") {
+      patch.settings = {
+        smarkets_order_management_enabled: form.get("smarkets_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "context_v2") {
+      patch.settings = {
+        context_order_management_enabled: form.get("context_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "probable") {
+      patch.settings = {
+        probable_order_management_enabled: form.get("probable_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "hyperliquid") {
+      patch.settings = {
+        hyperliquid_order_management_enabled: form.get("hyperliquid_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "predict_fun") {
+      patch.settings = {
+        predict_fun_order_management_enabled: form.get("predict_fun_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "xmarket") {
+      patch.settings = {
+        xmarket_order_management_enabled: form.get("xmarket_order_management_enabled") === "on"
+      };
+    } else if (["ibkr_forecasttrader", "forecastex", "cme_prediction_markets"].includes(selectedMarket.market_id)) {
+      patch.settings = {
+        ibkr_order_management_enabled: form.get("ibkr_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "manifold") {
+      patch.settings = {
+        manifold_order_management_enabled: form.get("manifold_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "prophet_exchange") {
+      patch.settings = {
+        prophet_exchange_order_management_enabled: form.get("prophet_exchange_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "sx_bet") {
+      patch.settings = {
+        sx_bet_order_management_enabled: form.get("sx_bet_order_management_enabled") === "on"
+      };
+    } else if (selectedMarket.market_id === "xo_market") {
+      patch.settings = {
+        xo_order_management_enabled: form.get("xo_order_management_enabled") === "on"
+      };
+    }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
     try {
@@ -616,12 +1024,726 @@ export default function App() {
       setConfig(payload);
       setPaperForm((current) => ({ ...current, market_id: marketId }));
       setAlertForm((current) => ({ ...current, market_id: marketId }));
+      setMarketRead(emptyMarketReadState());
+      const nextMarket = markets?.markets.find((market) => market.market_id === marketId);
+      const accountOperations = nextMarket?.health.account_recovery_operations ?? [];
+      const orderOperations = nextMarket?.health.order_management_operations ?? [];
+      setMarketReadForm({
+        ...emptyMarketReadForm(),
+        account_operation: accountOperations[0] as MarketAccountOperation ?? "active_orders",
+        order_management_operation: (orderOperations[0] as MarketOrderManagementOperation) ?? "cancel_orders",
+      });
+      setMarketReadMessage("");
       setLivePreflight(null);
       setLiveMessage("");
       setLiveSafety(await fetchLiveSafety());
       setLiveValidation(await fetchPolymarketLiveValidation());
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
+
+  async function handleMarketRead(action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles" | "account") {
+    const marketId = selectedMarket?.market_id;
+    if (!marketId) {
+      setError("Select an enabled market before reading market data.");
+      return;
+    }
+    const form = marketReadForm;
+    if (action !== "events" && action !== "contracts" && action !== "account" && !form.contract_id.trim()) {
+      setError("Enter a contract id before reading quote or history data.");
+      return;
+    }
+    if (action === "contracts" && !form.event_id.trim()) {
+      setError("Enter an event id before loading contracts.");
+      return;
+    }
+    if (action === "candles" && !form.resolution.trim()) {
+      setError("Enter a candle resolution before loading history.");
+      return;
+    }
+    setMarketReadBusy(action);
+    setMarketReadMessage("");
+    setError(null);
+    try {
+      if (action === "events") {
+        const payload = await fetchMarketEvents(marketId, form.query);
+        setMarketRead((current) => ({ ...current, events: payload }));
+        setMarketReadMessage(`${payload.events.length} event(s) loaded.`);
+      } else if (action === "contracts") {
+        const payload = await fetchMarketContracts(marketId, form.event_id.trim());
+        setMarketRead((current) => ({ ...current, contracts: payload }));
+        setMarketReadMessage(`${payload.contracts.length} contract(s) loaded.`);
+      } else if (action === "price") {
+        const payload = await fetchMarketPrice(marketId, form.contract_id.trim());
+        setMarketRead((current) => ({ ...current, price: payload }));
+        setMarketReadMessage("Price snapshot loaded.");
+      } else if (action === "orderbook") {
+        const payload = await fetchMarketOrderbook(marketId, form.contract_id.trim());
+        setMarketRead((current) => ({ ...current, orderbook: payload }));
+        setMarketReadMessage("Orderbook loaded.");
+      } else if (action === "trades") {
+        const payload = await fetchMarketTrades(
+          marketId,
+          form.contract_id.trim(),
+          50,
+          form.to.trim(),
+          form.from.trim()
+        );
+        setMarketRead((current) => ({ ...current, trades: payload }));
+        setMarketReadMessage(`${payload.trades.length} trade(s) loaded.`);
+      } else {
+        if (action === "candles") {
+          const payload = await fetchMarketCandles(
+            marketId,
+            form.contract_id.trim(),
+            form.resolution.trim(),
+            form.from.trim(),
+            form.to.trim()
+          );
+          setMarketRead((current) => ({ ...current, candles: payload }));
+          setMarketReadMessage(`${payload.candles.length} candle(s) loaded.`);
+        } else {
+          const payload = await fetchMarketAccount(marketId, form.account_operation, {
+            contract_id: form.contract_id.trim() || undefined,
+            ticker: form.account_ticker.trim() || undefined,
+            order_id: form.account_order_id.trim() || undefined,
+            forecaster_id: form.account_forecaster_id.trim() || undefined,
+            with_cp: form.account_include_cp,
+            include_cp_history: form.account_include_cp_history,
+            include_descriptions: form.account_include_descriptions,
+            membership_id: form.account_membership_id.trim() || undefined,
+            question_id: form.account_question_id.trim() || undefined,
+            filter: form.account_filter.trim() || undefined,
+            created_before: form.account_created_before.trim() || undefined,
+            created_after: form.account_created_after.trim() || undefined,
+            updated_before: form.account_updated_before.trim() || undefined,
+            updated_after: form.account_updated_after.trim() || undefined,
+            score_type: form.account_score_type.trim() || undefined,
+            scoreable_id: form.account_scoreable_id.trim() || undefined,
+            predictor_type: form.account_predictor_type.trim() || undefined,
+            include_daily_scores: form.account_include_daily_scores,
+            wallet: form.account_wallet.trim() || undefined,
+            address: form.account_wallet.trim() || undefined,
+            token_id: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
+            token_ids: marketId === "probable" ? (form.contract_id.trim().split(":").pop() || undefined) : undefined,
+            trade_id: form.account_trade_id.trim() || undefined,
+            cursor: form.account_cursor.trim() || undefined,
+            next: form.account_cursor.trim() || undefined,
+            limit: form.account_limit.trim() || (marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : marketId === "matchbook" && form.account_operation === "current_offers" ? 20 : 50),
+            market_hash: form.account_market_hash.trim() || undefined,
+            client_order_id: form.account_client_order_id.trim() || undefined,
+            start_date: form.account_start_date.trim() || undefined,
+            end_date: form.account_end_date.trim() || undefined,
+            sort_asc: form.account_sort_asc,
+            offset: form.account_offset.trim() || undefined,
+            dex: form.account_dex.trim() || undefined,
+            market_id: form.account_market_id.trim() || undefined,
+            chain_id: form.account_chain_id.trim() || undefined,
+            status: form.account_status.trim() || undefined,
+            event_types: form.account_event_types.trim() || undefined,
+            is_resolved: form.account_is_resolved.trim() || undefined,
+            event_type_id: form.account_event_type_id.trim() || undefined,
+            event_id: form.account_event_id.trim() || undefined,
+            outcome_id: form.account_outcome_id.trim() || undefined,
+            event_type: form.account_event_type.trim() || undefined,
+            start_time: form.account_start_time.trim() || undefined,
+            end_time: form.account_end_time.trim() || undefined,
+            runner_id: form.account_runner_id.trim() || undefined,
+            bet_id: form.account_bet_id.trim() || undefined,
+            group_by: form.account_group_by.trim() || undefined,
+            include_item_description: form.account_include_item_description,
+            locale: form.account_locale.trim() || undefined,
+            exclude_item: form.account_exclude_item,
+            from_currency: form.account_from_currency.trim() || undefined,
+            order_by: form.account_order_by.trim() || undefined,
+            sort_dir: form.account_sort_dir.trim() || undefined,
+            search: form.account_search.trim() || undefined,
+            category: form.account_category.trim() || undefined,
+            with_cash_outs: form.account_with_cash_outs,
+            before: form.account_before.trim() || undefined,
+            after: form.account_after.trim() || undefined,
+            before_time: form.account_before_time.trim() || undefined,
+            after_time: form.account_after_time.trim() || undefined,
+            sport_id: form.account_sport_id.trim() || undefined,
+            side: form.account_side.trim() || undefined,
+            offer_status: form.account_offer_status.trim() || undefined,
+            aggregation_type: form.account_aggregation_type.trim() || undefined,
+            odds_type: form.account_odds_type.trim() || undefined,
+            interval: form.account_interval.trim() || undefined,
+            cancellation_reason: form.account_cancellation_reason.trim() || undefined,
+            include_edits: form.account_include_edits,
+            subaccount: form.account_subaccount.trim() || undefined,
+            count_filter: form.account_count_filter.trim() || undefined,
+            market_slug: form.account_market_slug.trim() || undefined,
+            page: form.account_page.trim() || undefined,
+            trading_model: form.account_trading_model.trim() || undefined,
+            min_shares: form.account_min_shares.trim() || undefined,
+            network_id: form.account_network_id.trim() || undefined,
+            token_address: form.account_token_address.trim() || undefined,
+            keyword: form.account_keyword.trim() || undefined,
+            sort: form.account_sort.trim() || undefined,
+            sort_by: form.account_sort_by.trim() || undefined,
+            state: form.account_state.trim() || undefined,
+            topics: form.account_topics.trim() || undefined,
+            market_ids: form.account_market_ids.trim() || undefined,
+            exclude_history: form.account_exclude_history,
+            group_by_event: form.account_group_by_event,
+            on_behalf_of: form.account_on_behalf_of.trim() || undefined,
+            historical: form.account_historical,
+            force: form.account_historical,
+            event_ticker: form.event_id.trim() || undefined,
+            from: form.from.trim() || undefined,
+            to: form.to.trim() || undefined,
+            ...(marketId === "opinion_labs" ? { page: 1 } : {})
+          });
+          setMarketRead((current) => ({ ...current, account: payload }));
+          setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
+        }
+      }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setMarketReadBusy(null);
+    }
+  }
+
+  async function handleMarketPositionIntent() {
+    const marketId = selectedMarket?.market_id;
+    if (marketId !== "myriad_markets") {
+      setError("Unsigned position intents are currently available only for Myriad.");
+      return;
+    }
+    const form = marketReadForm;
+    const operation = form.position_operation;
+    const requiresMarketId = !["neg_risk_split", "neg_risk_merge"].includes(operation);
+    if (requiresMarketId && !form.position_market_id.trim()) {
+      setError("Enter a Myriad on-chain market id.");
+      return;
+    }
+    if (["split", "merge", "neg_risk_split"].includes(operation) && !form.position_amount.trim()) {
+      setError("Enter an amount in the token's smallest unit.");
+      return;
+    }
+    if (["neg_risk_split", "neg_risk_merge"].includes(operation) && (!form.position_event_id.trim() || !form.position_outcome_index.trim())) {
+      setError("NegRisk operations require a bytes32 event id and outcome index.");
+      return;
+    }
+    setMarketReadBusy("position-intent");
+    setMarketReadMessage("");
+    setError(null);
+    try {
+      const requestPayload: Record<string, unknown> = {
+        amount: form.position_amount.trim() || undefined,
+        network_id: form.position_network_id.trim() || undefined,
+        event_id: form.position_event_id.trim() || undefined,
+        outcome_index: form.position_outcome_index.trim() || undefined
+      };
+      if (requiresMarketId) {
+        requestPayload.market_id = form.position_market_id.trim();
+      }
+      const payload = await requestMarketPositionIntent(marketId, operation, requestPayload);
+      setMarketRead((current) => ({ ...current, position_intent: payload }));
+      setMarketReadMessage("Unsigned transaction calldata loaded for external review/signing.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setMarketReadBusy(null);
+    }
+  }
+
+  async function handleMarketOrderManagement() {
+    const marketId = selectedMarket?.market_id;
+    if (!marketId) {
+      setError("Select an enabled market before managing orders.");
+      return;
+    }
+    const supported = selectedMarket.health.order_management_operations ?? [];
+    const operation = marketReadForm.order_management_operation;
+    if (!supported.includes(operation)) {
+      setError(`${selectedMarket.display_name} does not advertise ${operation.replaceAll("_", " ")}.`);
+      return;
+    }
+    const isKalshi = marketId === "kalshi";
+    const isPolymarket = marketId === "polymarket";
+    const isGemini = marketId === "gemini_titan";
+    const isMatchbook = marketId === "matchbook";
+    const isMyriad = marketId === "myriad_markets";
+    const isOpinion = marketId === "opinion_labs";
+    const isLimitless = marketId === "limitless_exchange";
+    const isSmarkets = marketId === "smarkets";
+    const isContext = marketId === "context_v2";
+    const isProbable = marketId === "probable";
+    const isHyperliquid = marketId === "hyperliquid";
+    const isPredictFun = marketId === "predict_fun";
+    const isXmarket = marketId === "xmarket";
+    const isIbkr = ["ibkr_forecasttrader", "forecastex", "cme_prediction_markets"].includes(marketId);
+    const isManifold = marketId === "manifold";
+    const isProphet = marketId === "prophet_exchange";
+    const isSxBet = marketId === "sx_bet";
+    const isXo = marketId === "xo_market";
+    let instructions: unknown = [];
+    const needsInstructions =
+      isHyperliquid ||
+      isPredictFun ||
+      isXmarket ||
+      (isIbkr && operation === "modify_order") ||
+      (isProphet && operation === "cancel_orders") ||
+      (isSxBet && operation === "cancel_orders") ||
+      isContext ||
+      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isProbable && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && !isXo) ||
+      (operation === "cancel_orders" && !isSmarkets && !isProbable && !isProphet) ||
+      (isProbable && operation === "cancel_orders") ||
+      operation === "batch_cancel_orders" ||
+      (isMatchbook && (operation === "cancel_offers" || operation === "edit_offers")) ||
+      (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders"));
+    if (needsInstructions) {
+      try {
+        const defaultJson = (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders")) || isHyperliquid || (isContext && operation === "cancel_order") ? "{}" : "[]";
+        instructions = JSON.parse(marketReadForm.order_management_instructions || defaultJson);
+      } catch (exc) {
+        setError(exc instanceof Error ? `Instructions JSON is invalid: ${exc.message}` : "Instructions JSON is invalid.");
+        return;
+      }
+      const allowsObject = (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders")) || isHyperliquid || (isIbkr && operation === "modify_order") || (isContext && operation === "cancel_order");
+      if (!Array.isArray(instructions) && !(allowsObject && instructions && typeof instructions === "object")) {
+        setError(allowsObject ? "Instructions must be a JSON array or object." : "Instructions must be a JSON array.");
+        return;
+      }
+    }
+    const myriadInstructionObject = instructions && !Array.isArray(instructions) && typeof instructions === "object"
+      ? instructions as Record<string, unknown>
+      : null;
+    const hyperliquidInstructionObject = isHyperliquid && instructions && !Array.isArray(instructions) && typeof instructions === "object"
+      ? instructions as Record<string, unknown>
+      : null;
+    if (isHyperliquid && !hyperliquidInstructionObject) {
+      setError("Hyperliquid order management requires a signed exchange action JSON object.");
+      return;
+    }
+    if (isHyperliquid && operation === "schedule_cancel" &&
+      marketReadForm.order_management_confirmation.trim() !== "SCHEDULE HYPERLIQUID CANCEL") {
+      setError("Hyperliquid schedule_cancel requires exact confirmation: SCHEDULE HYPERLIQUID CANCEL.");
+      return;
+    }
+    if (isPolymarket && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Polymarket order id is required for cancel_order.");
+      return;
+    }
+    if (isPolymarket && operation === "cancel_orders" && (!Array.isArray(instructions) || (instructions as unknown[]).length === 0)) {
+      setError("Polymarket cancel_orders requires at least one order hash.");
+      return;
+    }
+    if (isPolymarket && operation === "cancel_market_orders" && (!marketReadForm.order_management_market_id.trim() || !marketReadForm.contract_id.trim())) {
+      setError("Polymarket cancel_market_orders requires a condition id and token id.");
+      return;
+    }
+    if (isGemini && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Gemini order id is required for cancel_order.");
+      return;
+    }
+    if (isGemini && operation === "batch_cancel_orders" && !(instructions as unknown[]).length) {
+      setError("Gemini batch cancellation requires at least one numeric order id.");
+      return;
+    }
+    if (isMatchbook && operation === "cancel_offer" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Matchbook offer id is required for cancel_offer.");
+      return;
+    }
+    if (isMatchbook && operation === "cancel_offers" && !(instructions as unknown[]).length &&
+      !marketReadForm.order_management_offer_ids.trim() &&
+      !marketReadForm.order_management_event_ids.trim() && !marketReadForm.order_management_market_ids.trim() &&
+      !marketReadForm.order_management_runner_ids.trim()) {
+      setError("Matchbook cancel_offers requires offer ids, offer ids JSON, or a scope filter.");
+      return;
+    }
+    if (isMatchbook && operation === "cancel_all_offers" &&
+      marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL MATCHBOOK OFFERS") {
+      setError("Global Matchbook cancellation requires exact confirmation: CANCEL ALL MATCHBOOK OFFERS.");
+      return;
+    }
+    if (isMatchbook && operation === "edit_offer" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Matchbook offer id is required for edit_offer.");
+      return;
+    }
+    if (isMatchbook && operation === "edit_offers" && !(instructions as unknown[]).length) {
+      setError("Matchbook edit_offers requires an array of offer edit objects.");
+      return;
+    }
+    if (isMyriad && operation === "cancel_order" && (!(marketReadForm.order_management_order_hash || marketReadForm.order_management_order_id).trim() || !myriadInstructionObject?.order || !myriadInstructionObject?.signature)) {
+      setError("Myriad cancel_order requires an order hash/client id and a signed order object with signature.");
+      return;
+    }
+    if (isMyriad && operation === "batch_cancel_orders" && !(instructions as unknown[]).length) {
+      setError("Myriad batch cancellation requires at least one signed order entry.");
+      return;
+    }
+    if (isMyriad && operation === "cancel_all_orders" &&
+      (marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL MYRIAD ORDERS" ||
+        !marketReadForm.order_management_trader.trim() || !marketReadForm.order_management_timestamp.trim() ||
+        !marketReadForm.order_management_signature.trim())) {
+      setError("Myriad global cancellation requires trader, timestamp, signature, and exact confirmation: CANCEL ALL MYRIAD ORDERS.");
+      return;
+    }
+    if (isMyriad && operation === "batch_modify_orders" &&
+      (!myriadInstructionObject || (!Array.isArray(myriadInstructionObject.cancel) && !Array.isArray(myriadInstructionObject.place)))) {
+      setError("Myriad batch_modify_orders requires a JSON object with cancel and/or place arrays.");
+      return;
+    }
+    if (isOpinion && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("An Opinion order id is required for cancel_order.");
+      return;
+    }
+    if (isOpinion && operation === "batch_cancel_orders" && !(instructions as unknown[]).length) {
+      setError("Opinion batch cancellation requires at least one order id.");
+      return;
+    }
+    if (isOpinion && operation === "cancel_all_orders" &&
+      marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL OPINION ORDERS") {
+      setError("Global Opinion cancellation requires exact confirmation: CANCEL ALL OPINION ORDERS.");
+      return;
+    }
+    if (isLimitless && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Limitless order id is required for cancel_order.");
+      return;
+    }
+    if (isLimitless && operation === "batch_cancel_orders" &&
+      (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("Limitless batch cancellation requires at least one order id.");
+      return;
+    }
+    if (isLimitless && operation === "cancel_all_orders" &&
+      (!marketReadForm.order_management_market_slug.trim() ||
+        marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL LIMITLESS ORDERS")) {
+      setError("Limitless cancellation requires a market slug and exact confirmation: CANCEL ALL LIMITLESS ORDERS.");
+      return;
+    }
+    if (isSmarkets && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Smarkets order id is required for cancel_order.");
+      return;
+    }
+    if (isSmarkets && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()) {
+      setError("A Smarkets market id is required for market-scoped cancel_orders.");
+      return;
+    }
+    if (isContext && operation === "cancel_order" && (!instructions || Array.isArray(instructions) || typeof instructions !== "object")) {
+      setError("Context cancel_order requires one signed cancellation JSON object.");
+      return;
+    }
+    if (isContext && operation === "batch_cancel_orders" && (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("Context batch_cancel_orders requires a non-empty signed cancellation JSON array.");
+      return;
+    }
+    if (isContext && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Context order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (isProbable && operation === "cancel_order" &&
+      (!marketReadForm.order_management_order_id.trim() || !marketReadForm.order_management_market_id.trim())) {
+      setError("Probable cancel_order requires an order id and token id.");
+      return;
+    }
+    if (isProbable && operation === "cancel_orders" &&
+      (!Array.isArray(instructions) || !(instructions as unknown[]).length || !marketReadForm.order_management_market_id.trim())) {
+      setError("Probable cancel_orders requires a token id and a JSON array of order ids.");
+      return;
+    }
+    if (isProbable && operation === "cancel_all_orders" &&
+      marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL PROBABLE ORDERS") {
+      setError("Global Probable cancellation requires exact confirmation: CANCEL ALL PROBABLE ORDERS.");
+      return;
+    }
+    if (isPredictFun && (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("Predict.fun removal requires a non-empty JSON array of order ids or hashes.");
+      return;
+    }
+    if (isPredictFun && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Predict.fun removal requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (isXmarket && !(instructions as unknown[]).length) {
+      setError("Xmarket batch order operations require a non-empty JSON array.");
+      return;
+    }
+    if (isXmarket && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Xmarket order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (isManifold && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Manifold bet id is required for cancel_order.");
+      return;
+    }
+    if (isManifold && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Manifold order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (isProphet && operation === "cancel_order" &&
+      (!marketReadForm.order_management_order_id.trim() || !marketReadForm.order_management_external_id.trim())) {
+      setError("Prophet Exchange cancel_order requires both the returned order id and the original external id.");
+      return;
+    }
+    if (isProphet && operation === "cancel_orders" &&
+      (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("Prophet Exchange cancel_orders requires a non-empty JSON array of order_id/external_id entries.");
+      return;
+    }
+    if (isProphet && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("Prophet Exchange order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (isSxBet && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("An SX Bet order id is required for cancel_order.");
+      return;
+    }
+    if (isSxBet && operation === "cancel_orders" && (!Array.isArray(instructions) || !(instructions as unknown[]).length)) {
+      setError("SX Bet cancel_orders requires a non-empty JSON array of order ids or order objects.");
+      return;
+    }
+    if (isSxBet && operation === "cancel_event_orders" && !marketReadForm.order_management_event_ids.trim()) {
+      setError("An SX Bet event id is required for cancel_event_orders.");
+      return;
+    }
+    if (isSxBet && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("SX Bet order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (isXo && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("An XO Market order id is required for cancel_order.");
+      return;
+    }
+    if (isXo && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("XO Market order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (isIbkr && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("An IBKR order id is required for cancel_order.");
+      return;
+    }
+    if (isIbkr && operation === "cancel_all_orders" && marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL IBKR EVENT ORDERS") {
+      setError("Global IBKR cancellation requires exact confirmation: CANCEL ALL IBKR EVENT ORDERS.");
+      return;
+    }
+    if (isIbkr && operation === "modify_order" && (!instructions || Array.isArray(instructions) || typeof instructions !== "object")) {
+      setError("IBKR modify_order requires one JSON order object.");
+      return;
+    }
+    if (isIbkr && marketReadForm.order_management_operator_confirmation.trim() !== "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS") {
+      setError("IBKR order management requires exact confirmation: I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS.");
+      return;
+    }
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isHyperliquid && !isXmarket && !isIbkr && !isProphet && !isSxBet && !isXo && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
+      setError("A Betfair exchange market id is required for update and replace operations.");
+      return;
+    }
+    if (isKalshi && operation === "batch_cancel_orders" && !(instructions as unknown[]).length) {
+      setError("Kalshi batch cancellation requires at least one order object.");
+      return;
+    }
+    if (isKalshi && operation !== "batch_cancel_orders" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Kalshi order id is required for this mutation.");
+      return;
+    }
+    if (isKalshi && operation === "amend_order" && !marketReadForm.order_management_ticker.trim()) {
+      setError("A Kalshi ticker is required for amend_order.");
+      return;
+    }
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isContext && !isProbable && !isHyperliquid && !isPredictFun && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && !isXo && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+      ? "This submits a GLOBAL Betfair cancellation for the account."
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : isContext ? "Context" : isProbable ? "Probable" : isHyperliquid ? "Hyperliquid" : isPredictFun ? "Predict.fun relay-only" : isXmarket ? "Xmarket" : isIbkr ? "IBKR event-contract" : isManifold ? "Manifold" : isProphet ? "Prophet Exchange" : isSxBet ? "SX Bet" : isXo ? "XO Market" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+    if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
+      return;
+    }
+    const payload: Record<string, unknown> = isKalshi
+      ? { instructions }
+      : isPolymarket
+        ? {
+            market_id: marketReadForm.order_management_market_id.trim() || undefined,
+            asset_id: marketReadForm.contract_id.trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            orders: operation === "cancel_orders" ? instructions : undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isGemini
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            orders: operation === "batch_cancel_orders" ? instructions : undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isMyriad
+        ? {
+            order_hash: (marketReadForm.order_management_order_hash || marketReadForm.order_management_order_id).trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            instructions: operation === "cancel_order" ? myriadInstructionObject : undefined,
+            orders: operation === "batch_cancel_orders" ? instructions : undefined,
+            modify: operation === "batch_modify_orders" ? myriadInstructionObject : undefined,
+            market_id: marketReadForm.order_management_market_id.trim() || undefined,
+            trader: marketReadForm.order_management_trader.trim() || undefined,
+            timestamp: marketReadForm.order_management_timestamp.trim() || undefined,
+            signature: marketReadForm.order_management_signature.trim() || (myriadInstructionObject?.signature as string | undefined),
+            signature_type: marketReadForm.order_management_signature_type.trim() || undefined,
+            network_id: marketReadForm.order_management_network_id.trim() || undefined,
+            allow_partial: marketReadForm.order_management_allow_partial,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : isOpinion
+        ? {
+            market_id: marketReadForm.order_management_market_id.trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            orders: operation === "batch_cancel_orders" ? instructions : undefined,
+            side: marketReadForm.order_management_side.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : isLimitless
+        ? {
+            market_slug: marketReadForm.order_management_market_slug.trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            orders: operation === "batch_cancel_orders" ? instructions : undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : isSmarkets
+        ? {
+            market_id: marketReadForm.order_management_market_id.trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isContext
+        ? {
+            signed_cancel: instructions,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isProbable
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            token_id: marketReadForm.order_management_market_id.trim() || undefined,
+            order_ids: operation === "cancel_orders" ? instructions : undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : isHyperliquid
+        ? {
+            signed_action: hyperliquidInstructionObject,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : isPredictFun
+        ? {
+            orders: instructions,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isXmarket
+        ? {
+            orders: instructions,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isManifold
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isProphet
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            external_id: marketReadForm.order_management_external_id.trim() || undefined,
+            orders: operation === "cancel_orders" ? instructions : undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isSxBet
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            order_ids: operation === "cancel_orders" ? instructions : undefined,
+            orders: operation === "cancel_orders" ? instructions : undefined,
+            instructions: operation === "cancel_orders" ? instructions : undefined,
+            event_id: marketReadForm.order_management_event_ids.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isXo
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isIbkr
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            instructions: operation === "modify_order" ? instructions : undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : isMatchbook
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            offer_id: marketReadForm.order_management_order_id.trim() || undefined,
+            offer_ids: marketReadForm.order_management_offer_ids.trim() || undefined,
+            orders: operation === "cancel_offers" && (instructions as unknown[]).length ? instructions : undefined,
+            instructions: operation === "edit_offers" ? instructions : undefined,
+            event_ids: marketReadForm.order_management_event_ids.trim() || undefined,
+            market_ids: marketReadForm.order_management_market_ids.trim() || undefined,
+            runner_ids: marketReadForm.order_management_runner_ids.trim() || undefined,
+            current_odds: marketReadForm.order_management_current_odds.trim() || undefined,
+            new_odds: marketReadForm.order_management_new_odds.trim() || undefined,
+            current_stake: marketReadForm.order_management_current_stake.trim() || undefined,
+            new_stake: marketReadForm.order_management_new_stake.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
+      : {
+          market_id: marketReadForm.order_management_market_id.trim() || undefined,
+          instructions,
+          customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
+          confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+        };
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isContext && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && !isXo && marketReadForm.order_management_market_version.trim()) {
+      const version = Number(marketReadForm.order_management_market_version.trim());
+      if (!Number.isInteger(version) || version < 1) {
+        setError("Market version must be a positive integer.");
+        return;
+      }
+      payload.market_version = version;
+    }
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && !isContext && !isProbable && !isHyperliquid && !isXmarket && !isIbkr && !isManifold && !isProphet && !isSxBet && !isXo && marketReadForm.order_management_async) {
+      payload.async_request = true;
+    }
+    if (isKalshi) {
+      if (operation === "batch_cancel_orders") {
+        payload.orders = instructions;
+      }
+      const optionalText: Array<[string, string]> = [
+        ["order_id", marketReadForm.order_management_order_id],
+        ["ticker", marketReadForm.order_management_ticker],
+        ["side", marketReadForm.order_management_side],
+        ["price", marketReadForm.order_management_price],
+        ["count", marketReadForm.order_management_count],
+        ["client_order_id", marketReadForm.order_management_client_order_id],
+        ["updated_client_order_id", marketReadForm.order_management_updated_client_order_id],
+        ["reduce_by", marketReadForm.order_management_reduce_by],
+        ["reduce_to", marketReadForm.order_management_reduce_to],
+        ["confirm_order_management", marketReadForm.order_management_operator_confirmation]
+      ];
+      optionalText.forEach(([key, value]) => {
+        if (value.trim()) {
+          payload[key] = value.trim();
+        }
+      });
+      if (marketReadForm.order_management_subaccount.trim()) {
+        payload.subaccount = Number(marketReadForm.order_management_subaccount.trim());
+      }
+      if (marketReadForm.order_management_exchange_index.trim()) {
+        payload.exchange_index = Number(marketReadForm.order_management_exchange_index.trim());
+      }
+    }
+    setMarketReadBusy("order_management");
+    setMarketReadMessage("");
+    setError(null);
+    try {
+      const result = await manageMarketOrders(marketId, operation, payload);
+      setMarketRead((current) => ({ ...current, order_management: result }));
+      setMarketReadMessage(`${operation.replaceAll("_", " ")} request accepted by the API.`);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setMarketReadBusy(null);
     }
   }
 
@@ -1238,7 +2360,8 @@ export default function App() {
           contract_id: result.contract_id,
           side: result.side,
           size: String(result.size),
-          limit_price: ""
+          limit_price: "",
+          metadata_json: ""
         });
         setPaperMessage(result.message);
       } else if (action === "use-history" && target?.id) {
@@ -1248,7 +2371,8 @@ export default function App() {
           contract_id: result.contract_id,
           side: result.side,
           size: String(result.size),
-          limit_price: result.limit_price === null ? "" : String(result.limit_price)
+          limit_price: result.limit_price === null ? "" : String(result.limit_price),
+          metadata_json: ""
         });
         setPaperMessage(result.message);
       }
@@ -1324,8 +2448,16 @@ export default function App() {
             busyMarket={busyMarket}
             filteredMarkets={filteredMarkets}
             marketQuery={marketQuery}
+            marketRead={marketRead}
+            marketReadBusy={marketReadBusy}
+            marketReadForm={marketReadForm}
+            marketReadMessage={marketReadMessage}
             markets={markets}
+            onMarketOrderManagement={() => void handleMarketOrderManagement()}
+            onMarketPositionIntent={() => void handleMarketPositionIntent()}
             onQueryChange={setMarketQuery}
+            onMarketRead={(action) => void handleMarketRead(action)}
+            onMarketReadFormChange={(patch) => setMarketReadForm((current) => ({ ...current, ...patch }))}
             onSelectedMarketChange={(marketId) => void handleSelectedMarketChange(marketId)}
             onSettingsSave={(event) => void handleMarketSettingsSave(event)}
             onToggle={(market) => void handleMarketToggle(market)}
@@ -1585,7 +2717,15 @@ function MarketsView({
   busyMarket,
   filteredMarkets,
   marketQuery,
+  marketRead,
+  marketReadBusy,
+  marketReadForm,
+  marketReadMessage,
   markets,
+  onMarketOrderManagement,
+  onMarketPositionIntent,
+  onMarketRead,
+  onMarketReadFormChange,
   onQueryChange,
   onSelectedMarketChange,
   onSettingsSave,
@@ -1596,7 +2736,15 @@ function MarketsView({
   busyMarket: string | null;
   filteredMarkets: Market[];
   marketQuery: string;
+  marketRead: MarketReadState;
+  marketReadBusy: string | null;
+  marketReadForm: MarketReadForm;
+  marketReadMessage: string;
   markets: MarketsPayload | null;
+  onMarketOrderManagement: () => void;
+  onMarketPositionIntent: () => void;
+  onMarketRead: (action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles" | "account") => void;
+  onMarketReadFormChange: (patch: Partial<MarketReadForm>) => void;
   onQueryChange: (value: string) => void;
   onSelectedMarketChange: (marketId: string) => void;
   onSettingsSave: (event: FormEvent<HTMLFormElement>) => void;
@@ -1669,6 +2817,178 @@ function MarketsView({
               <input name="live_trading_kill_switch" type="checkbox" defaultChecked={selectedMarket.safety.live_trading_kill_switch} />
               <span>Kill switch</span>
             </label>
+            {selectedMarket.market_id === "betfair_exchange" ? (
+              <label className="check-row">
+                <input
+                  name="betfair_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Betfair order management</span>
+              </label>
+            ) : selectedMarket.market_id === "kalshi" ? (
+              <label className="check-row">
+                <input
+                  name="kalshi_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Kalshi order management</span>
+              </label>
+            ) : selectedMarket.market_id === "polymarket" ? (
+              <label className="check-row">
+                <input
+                  name="polymarket_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Polymarket order management</span>
+              </label>
+            ) : selectedMarket.market_id === "gemini_titan" ? (
+              <label className="check-row">
+                <input
+                  name="gemini_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Gemini order management</span>
+              </label>
+            ) : selectedMarket.market_id === "matchbook" ? (
+              <label className="check-row">
+                <input
+                  name="matchbook_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Matchbook order management</span>
+              </label>
+            ) : selectedMarket.market_id === "myriad_markets" ? (
+              <label className="check-row">
+                <input
+                  name="myriad_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Myriad order management</span>
+              </label>
+            ) : selectedMarket.market_id === "opinion_labs" ? (
+              <label className="check-row">
+                <input
+                  name="opinion_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Opinion order management</span>
+              </label>
+            ) : selectedMarket.market_id === "limitless_exchange" ? (
+              <label className="check-row">
+                <input
+                  name="limitless_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Limitless order management</span>
+              </label>
+            ) : selectedMarket.market_id === "smarkets" ? (
+              <label className="check-row">
+                <input
+                  name="smarkets_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Smarkets order management</span>
+              </label>
+            ) : selectedMarket.market_id === "context_v2" ? (
+              <label className="check-row">
+                <input
+                  name="context_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Context order management</span>
+              </label>
+            ) : selectedMarket.market_id === "probable" ? (
+              <label className="check-row">
+                <input
+                  name="probable_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Probable order management</span>
+              </label>
+            ) : selectedMarket.market_id === "hyperliquid" ? (
+              <label className="check-row">
+                <input
+                  name="hyperliquid_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Hyperliquid order management</span>
+              </label>
+            ) : selectedMarket.market_id === "predict_fun" ? (
+              <label className="check-row">
+                <input
+                  name="predict_fun_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Predict.fun relay removal</span>
+              </label>
+            ) : selectedMarket.market_id === "xmarket" ? (
+              <label className="check-row">
+                <input
+                  name="xmarket_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Xmarket batch order management</span>
+              </label>
+            ) : ["ibkr_forecasttrader", "forecastex", "cme_prediction_markets"].includes(selectedMarket.market_id) ? (
+              <label className="check-row">
+                <input
+                  name="ibkr_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable IBKR order management</span>
+              </label>
+            ) : selectedMarket.market_id === "manifold" ? (
+              <label className="check-row">
+                <input
+                  name="manifold_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Manifold order management</span>
+              </label>
+            ) : selectedMarket.market_id === "prophet_exchange" ? (
+              <label className="check-row">
+                <input
+                  name="prophet_exchange_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Prophet Exchange order management</span>
+              </label>
+            ) : selectedMarket.market_id === "sx_bet" ? (
+              <label className="check-row">
+                <input
+                  name="sx_bet_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable SX Bet order management</span>
+              </label>
+            ) : selectedMarket.market_id === "xo_market" ? (
+              <label className="check-row">
+                <input
+                  name="xo_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable XO Market order management</span>
+              </label>
+            ) : null}
             <label>
               <span>Max size</span>
               <input name="live_trading_max_size" defaultValue={selectedMarket.safety.live_trading_max_size ?? ""} />
@@ -1682,6 +3002,1943 @@ function MarketsView({
             </button>
           </div>
         </form>
+      ) : null}
+      {selectedMarket ? (
+        <div className="market-detail">
+          <div className="market-detail-main">
+            <div>
+              <h3>Support matrix</h3>
+              <p>Every advertised operation is explicit: supported, safety-guarded, unsupported, or blocked by the reviewed upstream surface.</p>
+            </div>
+            <StatusPill tone={selectedMarket.support.audit.ok ? "good" : "warn"}>
+              {selectedMarket.support.implementation_status.replaceAll("_", " ")}
+            </StatusPill>
+          </div>
+          <div className="diagnostic-grid">
+            {Object.entries(selectedMarket.support.operations).map(([operation, state]) => (
+              <div key={operation}>
+                <span>{operation.replaceAll("_", " ")}</span>
+                <strong><StatusPill tone={supportStatusTone(state.status)}>{state.status}</StatusPill></strong>
+                <small>{state.reason}</small>
+              </div>
+            ))}
+            <div>
+              <span>account recovery</span>
+              <strong><StatusPill tone={supportStatusTone(selectedMarket.support.account_recovery.status)}>{selectedMarket.support.account_recovery.status}</StatusPill></strong>
+              <small>{selectedMarket.support.account_recovery.operations.length ? selectedMarket.support.account_recovery.operations.join(", ") : selectedMarket.support.account_recovery.reason}</small>
+            </div>
+            <div>
+              <span>order management</span>
+              <strong><StatusPill tone={supportStatusTone(selectedMarket.support.order_management.status)}>{selectedMarket.support.order_management.status}</StatusPill></strong>
+              <small>{selectedMarket.support.order_management.operations.length ? selectedMarket.support.order_management.operations.join(", ") : selectedMarket.support.order_management.reason}</small>
+            </div>
+          </div>
+          {selectedMarket.support.blocker ? (
+            <p className="notice warning">
+              {selectedMarket.support.blocker.reason}
+              {selectedMarket.support.blocker.last_reviewed ? ` Last reviewed ${selectedMarket.support.blocker.last_reviewed}.` : ""}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      {selectedMarket ? (
+        <div className="market-detail">
+          <div className="market-detail-main">
+            <div>
+              <h3>Market data</h3>
+              <p>Use the enabled adapter's official discovery, quote, orderbook, trade, candle, and credentialed account feeds.</p>
+            </div>
+            <StatusPill tone={marketReadBusy ? "neutral" : marketReadMessage ? "good" : "neutral"}>
+              {marketReadBusy ? `loading ${marketReadBusy}` : marketReadMessage || "ready"}
+            </StatusPill>
+          </div>
+          <div className="safety-grid">
+            <label>
+              <span>Event search</span>
+              <input
+                value={marketReadForm.query}
+                onChange={(event) => onMarketReadFormChange({ query: event.target.value })}
+                placeholder="Optional search"
+              />
+            </label>
+            <label>
+              <span>Event id</span>
+              <input
+                value={marketReadForm.event_id}
+                onChange={(event) => onMarketReadFormChange({ event_id: event.target.value })}
+                placeholder="For contracts"
+              />
+            </label>
+            <label>
+              <span>Contract id</span>
+              <input
+                value={marketReadForm.contract_id}
+                onChange={(event) => onMarketReadFormChange({ contract_id: event.target.value })}
+                placeholder="For quotes/history"
+              />
+            </label>
+            <label>
+              <span>Account ticker</span>
+              <input
+                value={marketReadForm.account_ticker}
+                onChange={(event) => onMarketReadFormChange({ account_ticker: event.target.value })}
+                placeholder="Kalshi ticker"
+              />
+            </label>
+            <label>
+              <span>Account order id</span>
+              <input
+                value={marketReadForm.account_order_id}
+                onChange={(event) => onMarketReadFormChange({ account_order_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            {selectedMarket.market_id === "metaculus" ? (
+              <>
+                <label>
+                  <span>Metaculus forecaster id</span>
+                  <input
+                    value={marketReadForm.account_forecaster_id}
+                    onChange={(event) => onMarketReadFormChange({ account_forecaster_id: event.target.value })}
+                    placeholder="Required unless configured"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_cp}
+                    onChange={(event) => onMarketReadFormChange({ account_include_cp: event.target.checked })}
+                  />
+                  <span>Include Community Prediction data</span>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_cp_history}
+                    onChange={(event) => onMarketReadFormChange({ account_include_cp_history: event.target.checked })}
+                  />
+                  <span>Include full aggregation history</span>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_descriptions}
+                    onChange={(event) => onMarketReadFormChange({ account_include_descriptions: event.target.checked })}
+                  />
+                  <span>Include question descriptions</span>
+                </label>
+              </>
+            ) : null}
+            {selectedMarket.market_id === "good_judgment_open" ? (
+              <>
+                <label>
+                  <span>GJ Open membership id</span>
+                  <input
+                    value={marketReadForm.account_membership_id}
+                    onChange={(event) => onMarketReadFormChange({ account_membership_id: event.target.value })}
+                    placeholder="Optional forecast owner"
+                  />
+                </label>
+                <label>
+                  <span>GJ Open question id</span>
+                  <input
+                    value={marketReadForm.account_question_id}
+                    onChange={(event) => onMarketReadFormChange({ account_question_id: event.target.value })}
+                    placeholder="Prediction-set filter"
+                  />
+                </label>
+                <label>
+                  <span>GJ Open account filter</span>
+                  <select
+                    value={marketReadForm.account_filter}
+                    onChange={(event) => onMarketReadFormChange({ account_filter: event.target.value })}
+                  >
+                    <option value="">None</option>
+                    <option value="comments_with_links">Comments with links</option>
+                    <option value="comments_following">Comments following</option>
+                  </select>
+                </label>
+                <label>
+                  <span>GJ Open score type</span>
+                  <select
+                    value={marketReadForm.account_score_type}
+                    onChange={(event) => onMarketReadFormChange({ account_score_type: event.target.value })}
+                  >
+                    <option value="">Any</option>
+                    <option value="question">Question</option>
+                    <option value="challenge">Challenge</option>
+                    <option value="site">Site</option>
+                  </select>
+                </label>
+                <label>
+                  <span>GJ Open scoreable id</span>
+                  <input
+                    value={marketReadForm.account_scoreable_id}
+                    onChange={(event) => onMarketReadFormChange({ account_scoreable_id: event.target.value })}
+                    placeholder="Requires score type"
+                  />
+                </label>
+                <label>
+                  <span>GJ Open predictor type</span>
+                  <select
+                    value={marketReadForm.account_predictor_type}
+                    onChange={(event) => onMarketReadFormChange({ account_predictor_type: event.target.value })}
+                  >
+                    <option value="">Any</option>
+                    <option value="user">User</option>
+                    <option value="team">Team</option>
+                  </select>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_include_daily_scores}
+                    onChange={(event) => onMarketReadFormChange({ account_include_daily_scores: event.target.checked })}
+                  />
+                  <span>Include daily score breakdown</span>
+                </label>
+                <label>
+                  <span>Created after (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_created_after}
+                    onChange={(event) => onMarketReadFormChange({ account_created_after: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>Created before (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_created_before}
+                    onChange={(event) => onMarketReadFormChange({ account_created_before: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>Updated after (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_updated_after}
+                    onChange={(event) => onMarketReadFormChange({ account_updated_after: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>Updated before (ISO-8601)</span>
+                  <input
+                    value={marketReadForm.account_updated_before}
+                    onChange={(event) => onMarketReadFormChange({ account_updated_before: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+              </>
+            ) : null}
+            <label>
+              <span>Account client order id</span>
+              <input
+                value={marketReadForm.account_client_order_id}
+                onChange={(event) => onMarketReadFormChange({ account_client_order_id: event.target.value })}
+                placeholder="Probable / SX Bet lookup"
+              />
+            </label>
+            <label>
+              <span>Polymarket trade id</span>
+              <input
+                value={marketReadForm.account_trade_id}
+                onChange={(event) => onMarketReadFormChange({ account_trade_id: event.target.value })}
+                placeholder="Optional fill id"
+              />
+            </label>
+            <label>
+              <span>Account cursor</span>
+              <input
+                value={marketReadForm.account_cursor}
+                onChange={(event) => onMarketReadFormChange({ account_cursor: event.target.value })}
+                placeholder="Next page cursor"
+              />
+            </label>
+            <label>
+              <span>Account page size</span>
+              <input
+                value={marketReadForm.account_limit}
+                onChange={(event) => onMarketReadFormChange({ account_limit: event.target.value })}
+                placeholder="Optional, default 50"
+              />
+            </label>
+            <label>
+              <span>Account offset</span>
+              <input
+                value={marketReadForm.account_offset}
+                onChange={(event) => onMarketReadFormChange({ account_offset: event.target.value })}
+                placeholder="Optional numeric offset"
+              />
+            </label>
+            <label>
+              <span>Account wallet / address</span>
+              <input
+                value={marketReadForm.account_wallet}
+                onChange={(event) => onMarketReadFormChange({ account_wallet: event.target.value })}
+                placeholder="Wallet / activity identity"
+              />
+            </label>
+            <label>
+              <span>Perp DEX</span>
+              <input
+                value={marketReadForm.account_dex}
+                onChange={(event) => onMarketReadFormChange({ account_dex: event.target.value })}
+                placeholder="Optional Hyperliquid DEX"
+              />
+            </label>
+            <label>
+              <span>Account market id</span>
+              <input
+                value={marketReadForm.account_market_id}
+                onChange={(event) => onMarketReadFormChange({ account_market_id: event.target.value })}
+                placeholder="Opinion / Betfair / Xmarket market id"
+              />
+            </label>
+            {selectedMarket.market_id === "betfair_exchange" ? (
+              <>
+                <label>
+                  <span>Betfair statement locale</span>
+                  <input
+                    value={marketReadForm.account_locale}
+                    onChange={(event) => onMarketReadFormChange({ account_locale: event.target.value })}
+                    placeholder="en"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_exclude_item}
+                    onChange={(event) => onMarketReadFormChange({ account_exclude_item: event.target.checked })}
+                  />
+                  <span>Exclude Betfair statement item details</span>
+                </label>
+                <label>
+                  <span>Betfair source currency</span>
+                  <input
+                    value={marketReadForm.account_from_currency}
+                    onChange={(event) => onMarketReadFormChange({ account_from_currency: event.target.value })}
+                    placeholder="Optional, e.g. EUR"
+                  />
+                </label>
+                <label>
+                  <span>Betfair order by</span>
+                  <input
+                    value={marketReadForm.account_order_by}
+                    onChange={(event) => onMarketReadFormChange({ account_order_by: event.target.value })}
+                    placeholder="BY_MATCH_TIME"
+                  />
+                </label>
+                <label>
+                  <span>Betfair sort direction</span>
+                  <input
+                    value={marketReadForm.account_sort_dir}
+                    onChange={(event) => onMarketReadFormChange({ account_sort_dir: event.target.value })}
+                    placeholder="EARLIEST_TO_LATEST"
+                  />
+                </label>
+              </>
+            ) : null}
+            {marketReadForm.account_operation === "settled_positions" ? (
+              <>
+                <label>
+                  <span>Settled-position search</span>
+                  <input
+                    value={marketReadForm.account_search}
+                    onChange={(event) => onMarketReadFormChange({ account_search: event.target.value })}
+                    placeholder="Optional search text"
+                  />
+                </label>
+                <label>
+                  <span>Settled-position category</span>
+                  <input
+                    value={marketReadForm.account_category}
+                    onChange={(event) => onMarketReadFormChange({ account_category: event.target.value })}
+                    placeholder="Optional category"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_with_cash_outs}
+                    onChange={(event) => onMarketReadFormChange({ account_with_cash_outs: event.target.checked })}
+                  />
+                  <span>Include settled-position cash-outs</span>
+                </label>
+              </>
+            ) : null}
+            {(selectedMarket.market_id === "polymarket" || selectedMarket.market_id === "manifold") ? (
+              <>
+                <label>
+                  <span>Account before cursor/time</span>
+                  <input
+                    value={marketReadForm.account_before}
+                    onChange={(event) => onMarketReadFormChange({ account_before: event.target.value })}
+                    placeholder="Optional venue cursor or timestamp"
+                  />
+                </label>
+                <label>
+                  <span>Account after cursor/time</span>
+                  <input
+                    value={marketReadForm.account_after}
+                    onChange={(event) => onMarketReadFormChange({ account_after: event.target.value })}
+                    placeholder="Optional venue cursor or timestamp"
+                  />
+                </label>
+                {selectedMarket.market_id === "manifold" ? (
+                  <>
+                    <label>
+                      <span>Manifold before timestamp</span>
+                      <input
+                        value={marketReadForm.account_before_time}
+                        onChange={(event) => onMarketReadFormChange({ account_before_time: event.target.value })}
+                        placeholder="Optional Unix seconds"
+                      />
+                    </label>
+                    <label>
+                      <span>Manifold after timestamp</span>
+                      <input
+                        value={marketReadForm.account_after_time}
+                        onChange={(event) => onMarketReadFormChange({ account_after_time: event.target.value })}
+                        placeholder="Optional Unix seconds"
+                      />
+                    </label>
+                  </>
+                ) : null}
+              </>
+            ) : null}
+            {selectedMarket.market_id === "sx_bet" ? (
+              <>
+                <label>
+                  <span>SX Bet market hash</span>
+                  <input
+                    value={marketReadForm.account_market_hash}
+                    onChange={(event) => onMarketReadFormChange({ account_market_hash: event.target.value })}
+                    placeholder="0x + 64 hex chars"
+                  />
+                </label>
+                <label>
+                  <span>SX Bet start date</span>
+                  <input
+                    value={marketReadForm.account_start_date}
+                    onChange={(event) => onMarketReadFormChange({ account_start_date: event.target.value })}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </label>
+                <label>
+                  <span>SX Bet end date</span>
+                  <input
+                    value={marketReadForm.account_end_date}
+                    onChange={(event) => onMarketReadFormChange({ account_end_date: event.target.value })}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_sort_asc}
+                    onChange={(event) => onMarketReadFormChange({ account_sort_asc: event.target.checked })}
+                  />
+                  <span>Sort SX Bet account reads ascending</span>
+                </label>
+              </>
+            ) : null}
+            {selectedMarket.market_id === "xo_market" ? (
+              <>
+                <label>
+                  <span>XO outcome id</span>
+                  <input
+                    value={marketReadForm.account_outcome_id}
+                    onChange={(event) => onMarketReadFormChange({ account_outcome_id: event.target.value })}
+                    placeholder="Optional outcome filter"
+                  />
+                </label>
+                <label>
+                  <span>XO audit event type</span>
+                  <input
+                    value={marketReadForm.account_event_type}
+                    onChange={(event) => onMarketReadFormChange({ account_event_type: event.target.value })}
+                    placeholder="order_filled, balance_change"
+                  />
+                </label>
+                <label>
+                  <span>XO start time</span>
+                  <input
+                    value={marketReadForm.account_start_time}
+                    onChange={(event) => onMarketReadFormChange({ account_start_time: event.target.value })}
+                    placeholder="ISO-8601 or Unix seconds"
+                  />
+                </label>
+                <label>
+                  <span>XO end time</span>
+                  <input
+                    value={marketReadForm.account_end_time}
+                    onChange={(event) => onMarketReadFormChange({ account_end_time: event.target.value })}
+                    placeholder="ISO-8601 or Unix seconds"
+                  />
+                </label>
+              </>
+            ) : null}
+            <label>
+              <span>Opinion chain id</span>
+              <input
+                value={marketReadForm.account_chain_id}
+                onChange={(event) => onMarketReadFormChange({ account_chain_id: event.target.value })}
+                placeholder="Optional numeric id"
+              />
+            </label>
+            <label>
+              <span>Account status</span>
+              <input
+                value={marketReadForm.account_status}
+                onChange={(event) => onMarketReadFormChange({ account_status: event.target.value })}
+                placeholder="Opinion 1,2,3,4,5 / Betfair SETTLED"
+              />
+            </label>
+            <label>
+              <span>Account activity event types</span>
+              <input
+                value={marketReadForm.account_event_types}
+                onChange={(event) => onMarketReadFormChange({ account_event_types: event.target.value })}
+                placeholder="ORDER_MATCHED,ORDER_CREATED"
+              />
+            </label>
+            <label>
+              <span>Predict.fun resolved filter</span>
+              <input
+                value={marketReadForm.account_is_resolved}
+                onChange={(event) => onMarketReadFormChange({ account_is_resolved: event.target.value })}
+                placeholder="true or false"
+              />
+            </label>
+            <label>
+              <span>Betfair event type id</span>
+              <input
+                value={marketReadForm.account_event_type_id}
+                onChange={(event) => onMarketReadFormChange({ account_event_type_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair event id</span>
+              <input
+                value={marketReadForm.account_event_id}
+                onChange={(event) => onMarketReadFormChange({ account_event_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair runner id</span>
+              <input
+                value={marketReadForm.account_runner_id}
+                onChange={(event) => onMarketReadFormChange({ account_runner_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair bet id</span>
+              <input
+                value={marketReadForm.account_bet_id}
+                onChange={(event) => onMarketReadFormChange({ account_bet_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair group by</span>
+              <input
+                value={marketReadForm.account_group_by}
+                onChange={(event) => onMarketReadFormChange({ account_group_by: event.target.value })}
+                placeholder="BET, MARKET, RUNNER"
+              />
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={marketReadForm.account_include_item_description}
+                onChange={(event) => onMarketReadFormChange({ account_include_item_description: event.target.checked })}
+              />
+              <span>Include Betfair item descriptions</span>
+            </label>
+            <label>
+              <span>Matchbook sport id</span>
+              <input
+                value={marketReadForm.account_sport_id}
+                onChange={(event) => onMarketReadFormChange({ account_sport_id: event.target.value })}
+                placeholder="Optional numeric id(s)"
+              />
+            </label>
+            <label>
+              <span>Matchbook offer side</span>
+              <input
+                value={marketReadForm.account_side}
+                onChange={(event) => onMarketReadFormChange({ account_side: event.target.value })}
+                placeholder="back, lay, win, lose"
+              />
+            </label>
+            <label>
+              <span>Matchbook offer status</span>
+              <input
+                value={marketReadForm.account_offer_status}
+                onChange={(event) => onMarketReadFormChange({ account_offer_status: event.target.value })}
+                placeholder="open, matched, unmatched"
+              />
+            </label>
+            <label>
+              <span>Matchbook aggregation</span>
+              <input
+                value={marketReadForm.account_aggregation_type}
+                onChange={(event) => onMarketReadFormChange({ account_aggregation_type: event.target.value })}
+                placeholder="none, summary, average"
+              />
+            </label>
+            <label>
+              <span>Matchbook odds type</span>
+              <input
+                value={marketReadForm.account_odds_type}
+                onChange={(event) => onMarketReadFormChange({ account_odds_type: event.target.value })}
+                placeholder="DECIMAL, US, HK, MALAY, INDO, %"
+              />
+            </label>
+            <label>
+              <span>Matchbook interval</span>
+              <input
+                value={marketReadForm.account_interval}
+                onChange={(event) => onMarketReadFormChange({ account_interval: event.target.value })}
+                placeholder="Seconds (optional)"
+              />
+            </label>
+            <label>
+              <span>Cancellation reason</span>
+              <input
+                value={marketReadForm.account_cancellation_reason}
+                onChange={(event) => onMarketReadFormChange({ account_cancellation_reason: event.target.value })}
+                placeholder="user_request or heartbeat_expiry"
+              />
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={marketReadForm.account_include_edits}
+                onChange={(event) => onMarketReadFormChange({ account_include_edits: event.target.checked })}
+              />
+              <span>Include Matchbook offer edits</span>
+            </label>
+            <label>
+              <span>Subaccount</span>
+              <input
+                value={marketReadForm.account_subaccount}
+                onChange={(event) => onMarketReadFormChange({ account_subaccount: event.target.value })}
+                placeholder="Kalshi 0–63"
+              />
+            </label>
+            <label>
+              <span>Position count filter</span>
+              <input
+                value={marketReadForm.account_count_filter}
+                onChange={(event) => onMarketReadFormChange({ account_count_filter: event.target.value })}
+                placeholder="position,total_traded"
+              />
+            </label>
+            <label>
+              <span>Limitless market slug</span>
+              <input
+                value={marketReadForm.account_market_slug}
+                onChange={(event) => onMarketReadFormChange({ account_market_slug: event.target.value })}
+                placeholder="For Limitless user orders"
+              />
+            </label>
+            {selectedMarket.market_id === "myriad_markets" ? (
+              <>
+                <label>
+                  <span>Myriad account page</span>
+                  <input
+                    value={marketReadForm.account_page}
+                    onChange={(event) => onMarketReadFormChange({ account_page: event.target.value })}
+                    placeholder="1–10000"
+                  />
+                </label>
+                <label>
+                  <span>Myriad trading model</span>
+                  <input
+                    value={marketReadForm.account_trading_model}
+                    onChange={(event) => onMarketReadFormChange({ account_trading_model: event.target.value })}
+                    placeholder="amm, ob, all"
+                  />
+                </label>
+                <label>
+                  <span>Myriad minimum shares</span>
+                  <input
+                    value={marketReadForm.account_min_shares}
+                    onChange={(event) => onMarketReadFormChange({ account_min_shares: event.target.value })}
+                    placeholder="Optional non-negative number"
+                  />
+                </label>
+                <label>
+                  <span>Myriad network id</span>
+                  <input
+                    value={marketReadForm.account_network_id}
+                    onChange={(event) => onMarketReadFormChange({ account_network_id: event.target.value })}
+                    placeholder="Optional chain id"
+                  />
+                </label>
+                <label>
+                  <span>Myriad token address</span>
+                  <input
+                    value={marketReadForm.account_token_address}
+                    onChange={(event) => onMarketReadFormChange({ account_token_address: event.target.value })}
+                    placeholder="0x…"
+                  />
+                </label>
+                <label>
+                  <span>Myriad keyword</span>
+                  <input
+                    value={marketReadForm.account_keyword}
+                    onChange={(event) => onMarketReadFormChange({ account_keyword: event.target.value })}
+                    placeholder="Optional search"
+                  />
+                </label>
+                <label>
+                  <span>Myriad sort</span>
+                  <input
+                    value={marketReadForm.account_sort}
+                    onChange={(event) => onMarketReadFormChange({ account_sort: event.target.value })}
+                    placeholder="asc or desc"
+                  />
+                </label>
+                <label>
+                  <span>Myriad sort by</span>
+                  <input
+                    value={marketReadForm.account_sort_by}
+                    onChange={(event) => onMarketReadFormChange({ account_sort_by: event.target.value })}
+                    placeholder="Documented portfolio field"
+                  />
+                </label>
+                <label>
+                  <span>Myriad position state</span>
+                  <input
+                    value={marketReadForm.account_state}
+                    onChange={(event) => onMarketReadFormChange({ account_state: event.target.value })}
+                    placeholder="For market_positions"
+                  />
+                </label>
+                <label>
+                  <span>Myriad topics</span>
+                  <input
+                    value={marketReadForm.account_topics}
+                    onChange={(event) => onMarketReadFormChange({ account_topics: event.target.value })}
+                    placeholder="Comma-separated"
+                  />
+                </label>
+                <label>
+                  <span>Myriad market ids</span>
+                  <input
+                    value={marketReadForm.account_market_ids}
+                    onChange={(event) => onMarketReadFormChange({ account_market_ids: event.target.value })}
+                    placeholder="Comma-separated"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_exclude_history}
+                    onChange={(event) => onMarketReadFormChange({ account_exclude_history: event.target.checked })}
+                  />
+                  <span>Exclude Myriad portfolio history</span>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.account_group_by_event}
+                    onChange={(event) => onMarketReadFormChange({ account_group_by_event: event.target.checked })}
+                  />
+                  <span>Group Myriad portfolio by event</span>
+                </label>
+              </>
+            ) : null}
+            <label>
+              <span>Delegated profile</span>
+              <input
+                value={marketReadForm.account_on_behalf_of}
+                onChange={(event) => onMarketReadFormChange({ account_on_behalf_of: event.target.value })}
+                placeholder="Optional x-on-behalf-of"
+              />
+            </label>
+            <label>
+              <span>Resolution</span>
+              <input
+                value={marketReadForm.resolution}
+                onChange={(event) => onMarketReadFormChange({ resolution: event.target.value })}
+                placeholder="1h"
+              />
+            </label>
+            <label>
+              <span>From (Unix)</span>
+              <input
+                value={marketReadForm.from}
+                onChange={(event) => onMarketReadFormChange({ from: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>To (Unix)</span>
+              <input
+                value={marketReadForm.to}
+                onChange={(event) => onMarketReadFormChange({ to: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            {selectedMarket.health.account_recovery_operations?.length ? (
+              <label>
+                <span>Account read</span>
+                <select
+                  value={marketReadForm.account_operation}
+                  onChange={(event) => onMarketReadFormChange({ account_operation: event.target.value as MarketAccountOperation })}
+                >
+                  {selectedMarket.health.account_recovery_operations.map((operation) => (
+                    <option key={operation} value={operation}>{operation.replaceAll("_", " ")}</option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {selectedMarket.health.account_recovery_operations?.length ? (
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={marketReadForm.account_historical}
+                  onChange={(event) => onMarketReadFormChange({ account_historical: event.target.checked })}
+                />
+                <span>Use historical account endpoint</span>
+              </label>
+            ) : null}
+          </div>
+          <div className="button-row compact">
+            {(["events", "contracts", "price", "orderbook", "trades", "candles"] as const).map((action) => (
+              <button
+                className="secondary-button"
+                key={action}
+                type="button"
+                disabled={marketReadBusy !== null}
+                onClick={() => onMarketRead(action)}
+              >
+                {action === "events" ? "Discover events" : action === "contracts" ? "Load contracts" : `Read ${action}`}
+              </button>
+            ))}
+            {selectedMarket.health.account_recovery_operations?.length ? (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={marketReadBusy !== null}
+                onClick={() => onMarketRead("account")}
+              >
+                Read account
+              </button>
+            ) : null}
+          </div>
+          {selectedMarket.market_id === "myriad_markets" ? (
+            <div className="order-management-panel">
+              <div className="market-detail-main">
+                <div>
+                  <h4>Unsigned position transaction intent</h4>
+                  <p>Myriad returns calldata only. Review the target and calldata, then sign and submit through your external wallet.</p>
+                </div>
+                <StatusPill tone="neutral">preview only</StatusPill>
+              </div>
+              <div className="safety-grid">
+                <label>
+                  <span>Operation</span>
+                  <select
+                    value={marketReadForm.position_operation}
+                    onChange={(event) => onMarketReadFormChange({ position_operation: event.target.value as MarketPositionOperation })}
+                  >
+                    {(["split", "merge", "redeem", "redeem_voided", "neg_risk_split", "neg_risk_merge"] as const).map((operation) => (
+                      <option key={operation} value={operation}>{operation.replaceAll("_", " ")}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Market id (non-NegRisk)</span>
+                  <input
+                    value={marketReadForm.position_market_id}
+                    onChange={(event) => onMarketReadFormChange({ position_market_id: event.target.value })}
+                    placeholder="Required except NegRisk"
+                  />
+                </label>
+                <label>
+                  <span>Amount (base units)</span>
+                  <input
+                    value={marketReadForm.position_amount}
+                    onChange={(event) => onMarketReadFormChange({ position_amount: event.target.value })}
+                    placeholder="Required for split/merge"
+                  />
+                </label>
+                <label>
+                  <span>Network id</span>
+                  <input
+                    value={marketReadForm.position_network_id}
+                    onChange={(event) => onMarketReadFormChange({ position_network_id: event.target.value })}
+                    placeholder="Optional"
+                  />
+                </label>
+                <label>
+                  <span>NegRisk event id</span>
+                  <input
+                    value={marketReadForm.position_event_id}
+                    onChange={(event) => onMarketReadFormChange({ position_event_id: event.target.value })}
+                    placeholder="0x + 64 hex chars"
+                  />
+                </label>
+                <label>
+                  <span>Outcome index</span>
+                  <input
+                    value={marketReadForm.position_outcome_index}
+                    onChange={(event) => onMarketReadFormChange({ position_outcome_index: event.target.value })}
+                    placeholder="0–255"
+                  />
+                </label>
+                <button className="secondary-button" type="button" disabled={marketReadBusy !== null} onClick={onMarketPositionIntent}>
+                  Build unsigned calldata
+                </button>
+              </div>
+              {marketRead.position_intent ? (
+                <pre className="json-preview">{JSON.stringify(marketRead.position_intent.data, null, 2)}</pre>
+              ) : null}
+            </div>
+          ) : null}
+          {selectedMarket.health.order_management_operations?.length ? (
+            <div className="order-management-panel">
+              <div className="market-detail-main">
+                <div>
+                  <h4>Guarded live order management</h4>
+                  <p>
+                    {selectedMarket.market_id === "kalshi"
+                      ? "Kalshi mutations are disabled by default and require the shared live-safety gates, Kalshi-specific opt-in, and exact operator confirmation."
+                      : selectedMarket.market_id === "polymarket"
+                        ? "Polymarket CLOB cancellations are disabled by default and require the shared live-safety gates, explicit L2 headers, a separate opt-in, and exact operator confirmation."
+                          : selectedMarket.market_id === "gemini_titan"
+                            ? "Gemini cancellations are disabled by default and require the shared live-safety gates, Gemini-specific opt-in, authenticated Trader credentials, and exact operator confirmation."
+                            : selectedMarket.market_id === "matchbook"
+                              ? "Matchbook offer cancellation and edits are disabled by default and require the shared live-safety gates, Matchbook-specific opt-in, a session, and exact operator confirmation."
+                              : selectedMarket.market_id === "myriad_markets"
+                                ? "Myriad signed-order cancellation and replacement are disabled by default and require HMAC/JWT account authentication, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "opinion_labs"
+                                ? "Opinion CLOB cancellations are disabled by default and require the official SDK, wallet credentials, shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "limitless_exchange"
+                                ? "Limitless cancellations are disabled by default and require HMAC token credentials, shared live-safety gates, a separate opt-in, and exact operator/global confirmation."
+                              : selectedMarket.market_id === "smarkets"
+                                ? "Smarkets cancellations are disabled by default and require an approved session token, shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "context_v2"
+                                ? "Context signed cancellations are disabled by default and require an externally signed trader/nonce/signature envelope, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "probable"
+                                ? "Probable cancellations are disabled by default and require HMAC L2 credentials, shared live-safety gates, a separate opt-in, and exact operator/global confirmation."
+                              : selectedMarket.market_id === "predict_fun"
+                                ? "Predict.fun relay removal is disabled by default and requires the shared live-safety gates, a separate opt-in, JWT credentials, and exact operator confirmation; it does not invalidate orders on-chain."
+                              : selectedMarket.market_id === "hyperliquid"
+                                ? "Hyperliquid signed cancellation, modification, and scheduled-cancel actions are disabled by default and require an externally signed exchange envelope, shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "xmarket"
+                                ? "Xmarket batch creation and cancellation are disabled by default and require the API key, shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : ["ibkr_forecasttrader", "forecastex", "cme_prediction_markets"].includes(selectedMarket.market_id)
+                                ? "IBKR event-contract cancellation and modification are disabled by default and require an authorized session, account entitlements, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                              : selectedMarket.market_id === "manifold"
+                                ? "Manifold limit-bet cancellation is disabled by default and requires MANIFOLD_API_KEY, the shared live-safety gates, a separate opt-in, and exact operator confirmation. Only an unfilled limit bet can be cancelled."
+                               : selectedMarket.market_id === "prophet_exchange"
+                                 ? "ProphetX cancellation is disabled by default and requires approved Trading API credentials, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
+                               : selectedMarket.market_id === "sx_bet"
+                                 ? "SX Bet cancellations are disabled by default and require an API key, sx_bet_order_management_enabled, the shared live-safety gates, and exact operator confirmation."
+                               : selectedMarket.market_id === "xo_market"
+                                 ? "XO Market cancellation is disabled by default and requires HMAC credentials, xo_order_management_enabled, the shared live-safety gates, and exact operator confirmation."
+                               : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
+                  </p>
+                </div>
+                <StatusPill tone={selectedMarket.health.order_management_enabled ? "warn" : "neutral"}>
+                  {selectedMarket.health.order_management_enabled ? "opt-in enabled" : "opt-in disabled"}
+                </StatusPill>
+              </div>
+              <div className="safety-grid">
+                <label>
+                  <span>Operation</span>
+                  <select
+                    value={marketReadForm.order_management_operation}
+                    onChange={(event) => onMarketReadFormChange({ order_management_operation: event.target.value as MarketOrderManagementOperation })}
+                  >
+                    {selectedMarket.health.order_management_operations.map((operation) => (
+                      <option key={operation} value={operation}>{operation.replaceAll("_", " ")}</option>
+                    ))}
+                  </select>
+                </label>
+                {selectedMarket.market_id === "kalshi" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Required except batch cancel"
+                      />
+                    </label>
+                    <label>
+                      <span>Kalshi ticker</span>
+                      <input
+                        value={marketReadForm.order_management_ticker}
+                        onChange={(event) => onMarketReadFormChange({ order_management_ticker: event.target.value })}
+                        placeholder="For amend_order"
+                      />
+                    </label>
+                    <label>
+                      <span>Side</span>
+                      <select
+                        value={marketReadForm.order_management_side}
+                        onChange={(event) => onMarketReadFormChange({ order_management_side: event.target.value })}
+                      >
+                        <option value="bid">bid</option>
+                        <option value="ask">ask</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Price</span>
+                      <input
+                        value={marketReadForm.order_management_price}
+                        onChange={(event) => onMarketReadFormChange({ order_management_price: event.target.value })}
+                        placeholder="0.01–0.99"
+                      />
+                    </label>
+                    <label>
+                      <span>Count</span>
+                      <input
+                        value={marketReadForm.order_management_count}
+                        onChange={(event) => onMarketReadFormChange({ order_management_count: event.target.value })}
+                        placeholder="Amend total count"
+                      />
+                    </label>
+                    <label>
+                      <span>Subaccount</span>
+                      <input
+                        value={marketReadForm.order_management_subaccount}
+                        onChange={(event) => onMarketReadFormChange({ order_management_subaccount: event.target.value })}
+                        placeholder="0–63"
+                      />
+                    </label>
+                    <label>
+                      <span>Exchange index</span>
+                      <input
+                        value={marketReadForm.order_management_exchange_index}
+                        onChange={(event) => onMarketReadFormChange({ order_management_exchange_index: event.target.value })}
+                        placeholder="0 only"
+                      />
+                    </label>
+                    <label>
+                      <span>Reduce by</span>
+                      <input
+                        value={marketReadForm.order_management_reduce_by}
+                        onChange={(event) => onMarketReadFormChange({ order_management_reduce_by: event.target.value })}
+                        placeholder="Decrease only"
+                      />
+                    </label>
+                    <label>
+                      <span>Reduce to</span>
+                      <input
+                        value={marketReadForm.order_management_reduce_to}
+                        onChange={(event) => onMarketReadFormChange({ order_management_reduce_to: event.target.value })}
+                        placeholder="Decrease only"
+                      />
+                    </label>
+                    <label>
+                      <span>Original client id</span>
+                      <input
+                        value={marketReadForm.order_management_client_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_client_order_id: event.target.value })}
+                        placeholder="Optional"
+                      />
+                    </label>
+                    <label>
+                      <span>Updated client id</span>
+                      <input
+                        value={marketReadForm.order_management_updated_client_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_updated_client_order_id: event.target.value })}
+                        placeholder="Optional amend id"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Batch orders JSON</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='[{"order_id":"order-id","subaccount":0}]'
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "polymarket" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="0x… 32-byte order hash"
+                      />
+                    </label>
+                    <label>
+                      <span>Condition id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Required for market cancel"
+                      />
+                    </label>
+                    <label>
+                      <span>Token id</span>
+                      <input
+                        value={marketReadForm.contract_id}
+                        onChange={(event) => onMarketReadFormChange({ contract_id: event.target.value })}
+                        placeholder="Required for market cancel"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Order hashes JSON (cancel_orders)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='["0x…"]'
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "gemini_titan" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Positive numeric Gemini order id"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Order ids JSON (batch_cancel_orders)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='[106817811, 106817812]'
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "myriad_markets" ? (
+                  <>
+                    <label>
+                      <span>Order hash / client id</span>
+                      <input
+                        value={marketReadForm.order_management_order_hash || marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_hash: event.target.value, order_management_order_id: event.target.value })}
+                        placeholder="0x + 64 hex chars or safe client id"
+                      />
+                    </label>
+                    <label>
+                      <span>Network id</span>
+                      <input
+                        value={marketReadForm.order_management_network_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_network_id: event.target.value })}
+                        placeholder="56"
+                      />
+                    </label>
+                    <label>
+                      <span>Trader wallet (cancel-all)</span>
+                      <input
+                        value={marketReadForm.order_management_trader}
+                        onChange={(event) => onMarketReadFormChange({ order_management_trader: event.target.value })}
+                        placeholder="0x…"
+                      />
+                    </label>
+                    <label>
+                      <span>Cancel-all timestamp</span>
+                      <input
+                        value={marketReadForm.order_management_timestamp}
+                        onChange={(event) => onMarketReadFormChange({ order_management_timestamp: event.target.value })}
+                        placeholder="Unix seconds"
+                      />
+                    </label>
+                    <label>
+                      <span>Cancel-all market id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Blank cancels all markets"
+                      />
+                    </label>
+                    <label>
+                      <span>Signature type</span>
+                      <select
+                        value={marketReadForm.order_management_signature_type}
+                        onChange={(event) => onMarketReadFormChange({ order_management_signature_type: event.target.value })}
+                      >
+                        <option value="">Default (0 / EOA)</option>
+                        <option value="0">0 (EOA)</option>
+                        <option value="3">3 (SCW)</option>
+                      </select>
+                    </label>
+                    <label className="wide-field">
+                      <span>Signed order payload JSON</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={5}
+                        spellCheck={false}
+                        placeholder='{"order":{"trader":"0x…","marketId":"42","outcomeId":0,"side":0,"amount":"1000000000000000000","price":"500000000000000000","minFillAmount":"0","nonce":"1","expiration":"0"},"signature":"0x…"}'
+                      />
+                    </label>
+                    <label>
+                      <span>Cancel-all signature</span>
+                      <input
+                        value={marketReadForm.order_management_signature}
+                        onChange={(event) => onMarketReadFormChange({ order_management_signature: event.target.value })}
+                        placeholder="0x…"
+                      />
+                    </label>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={marketReadForm.order_management_allow_partial}
+                        onChange={(event) => onMarketReadFormChange({ order_management_allow_partial: event.target.checked })}
+                      />
+                      <span>Allow partial batch results</span>
+                    </label>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL MYRIAD ORDERS"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "opinion_labs" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Safe Opinion order id"
+                      />
+                    </label>
+                    <label>
+                      <span>Market id (optional cancel-all filter)</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Positive numeric id"
+                      />
+                    </label>
+                    <label>
+                      <span>Side (optional cancel-all filter)</span>
+                      <select
+                        value={marketReadForm.order_management_side}
+                        onChange={(event) => onMarketReadFormChange({ order_management_side: event.target.value })}
+                      >
+                        <option value="">All sides</option>
+                        <option value="BUY">BUY</option>
+                        <option value="SELL">SELL</option>
+                      </select>
+                    </label>
+                    <label className="wide-field">
+                      <span>Order ids JSON (batch_cancel_orders)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='["order-1", "order-2"]'
+                      />
+                    </label>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL OPINION ORDERS"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "limitless_exchange" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Safe Limitless order id"
+                      />
+                    </label>
+                    <label>
+                      <span>Market slug (cancel all)</span>
+                      <input
+                        value={marketReadForm.order_management_market_slug}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_slug: event.target.value })}
+                        placeholder="market-slug"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Order ids JSON (batch_cancel_orders)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='["order-1", "order-2"]'
+                      />
+                    </label>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL LIMITLESS ORDERS"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "smarkets" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Required for cancel_order"
+                      />
+                    </label>
+                    <label>
+                      <span>Market id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Required for cancel_orders"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "context_v2" ? (
+                  <>
+                    <label className="wide-field">
+                      <span>{marketReadForm.order_management_operation === "cancel_order" ? "Signed cancellation JSON" : "Signed cancellations JSON"}</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={6}
+                        spellCheck={false}
+                        placeholder={marketReadForm.order_management_operation === "cancel_order"
+                          ? '{"trader":"0x…40 hex chars…","nonce":"0x…","signature":"0x…"}'
+                          : '[{"trader":"0x…40 hex chars…","nonce":"0x…","signature":"0x…"}]'}
+                      />
+                    </label>
+                    <p className="form-help">The wallet signs the cancellation externally. The app sends only the fixed official Context cancellation body and never handles a private key.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "probable" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Required for cancel_order"
+                      />
+                    </label>
+                    <label>
+                      <span>Token id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Required for cancellation"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Order ids JSON (cancel_orders)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='["123", "124"]'
+                      />
+                    </label>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL PROBABLE ORDERS"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "hyperliquid" ? (
+                  <>
+                    <label className="wide-field">
+                      <span>Signed exchange action JSON</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={8}
+                        spellCheck={false}
+                        placeholder='{"action":{"type":"cancel","cancels":[{"a":100000000,"o":123456789}]},"nonce":1700000000000,"signature":"0x…"}'
+                      />
+                    </label>
+                    {marketReadForm.order_management_operation === "schedule_cancel" ? (
+                      <label>
+                        <span>Schedule-cancel confirmation</span>
+                        <input
+                          value={marketReadForm.order_management_confirmation}
+                          onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                          placeholder="SCHEDULE HYPERLIQUID CANCEL"
+                        />
+                      </label>
+                    ) : null}
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "predict_fun" ? (
+                  <>
+                    <label className="wide-field">
+                      <span>{marketReadForm.order_management_operation === "remove_orders_by_hash" ? "Order hashes JSON" : "Order ids JSON"}</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder={marketReadForm.order_management_operation === "remove_orders_by_hash" ? '["0x…"]' : '["order-id-1", "order-id-2"]'}
+                      />
+                    </label>
+                    <p className="form-help">Predict.fun removal is relay-only; it does not invalidate orders on-chain.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "xmarket" ? (
+                  <>
+                    <label className="wide-field">
+                      <span>{marketReadForm.order_management_operation === "batch_create_orders" ? "Orders JSON (batch_create_orders)" : "Order ids JSON (batch_cancel_orders)"}</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={5}
+                        spellCheck={false}
+                        placeholder={marketReadForm.order_management_operation === "batch_create_orders"
+                          ? '[{"outcomeId":"outcome-uuid","side":"buy","type":"limit","price":0.65,"quantity":100}]'
+                          : '["order-id-1", "order-id-2"]'}
+                      />
+                    </label>
+                    <p className="form-help">Xmarket batch mutations use fixed authenticated API endpoints; live order management remains opt-in and synchronous.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : ["ibkr_forecasttrader", "forecastex", "cme_prediction_markets"].includes(selectedMarket.market_id) ? (
+                  <>
+                    <label>
+                      <span>IBKR order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Positive numeric order id"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Modified order JSON (modify_order)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={6}
+                        spellCheck={false}
+                        placeholder='{"conid":721095497,"orderType":"LMT","side":"BUY","tif":"DAY","quantity":5,"price":0.51}'
+                      />
+                    </label>
+                    <p className="form-help">CME mutations additionally require manualIndicator and extOperator in the JSON or configured IBKR settings. Global cancellation uses the documented -1 order id.</p>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL IBKR EVENT ORDERS"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "manifold" ? (
+                  <>
+                    <label>
+                      <span>Manifold bet id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Open limit bet id"
+                      />
+                    </label>
+                    <p className="form-help">This calls the documented POST /v0/bet/{"{id}"}/cancel endpoint. It cannot cancel a filled or already-cancelled bet.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "prophet_exchange" ? (
+                  <>
+                    <label>
+                      <span>Returned order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="order-1"
+                      />
+                    </label>
+                    <label>
+                      <span>Original external id</span>
+                      <input
+                        value={marketReadForm.order_management_external_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_external_id: event.target.value })}
+                        placeholder="external-1"
+                      />
+                    </label>
+                    {marketReadForm.order_management_operation === "cancel_orders" ? (
+                      <label className="wide-field">
+                        <span>Cancel entries JSON</span>
+                        <textarea
+                          value={marketReadForm.order_management_instructions}
+                          onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                          rows={5}
+                          spellCheck={false}
+                          placeholder='[{"order_id":"order-1","external_id":"external-1"}]'
+                        />
+                      </label>
+                    ) : null}
+                    <p className="form-help">ProphetX cancellation uses fixed POST /mm/cancel_order or /mm/cancel_multiple_orders paths. Each entry must include the exact external_id returned with the original submission.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "sx_bet" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="0x… 32-byte SX Bet order hash"
+                      />
+                    </label>
+                    {marketReadForm.order_management_operation === "cancel_event_orders" ? (
+                      <label>
+                        <span>Event id</span>
+                        <input
+                          value={marketReadForm.order_management_event_ids}
+                          onChange={(event) => onMarketReadFormChange({ order_management_event_ids: event.target.value })}
+                          placeholder="SX event id"
+                        />
+                      </label>
+                    ) : null}
+                    {marketReadForm.order_management_operation === "cancel_orders" ? (
+                      <label className="wide-field">
+                        <span>Order ids JSON</span>
+                        <textarea
+                          value={marketReadForm.order_management_instructions}
+                          onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                          rows={5}
+                          spellCheck={false}
+                          placeholder='["0x…", "0x…"]'
+                        />
+                      </label>
+                    ) : null}
+                    <p className="form-help">SX Bet v3 uses fixed DELETE /orders-v3, /orders-v3/event, and /orders-v3/all routes; no caller-supplied endpoint is accepted.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "xo_market" ? (
+                  <>
+                    <label>
+                      <span>XO order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Order id to cancel"
+                      />
+                    </label>
+                    <p className="form-help">XO Market cancellation uses the documented synchronous DELETE /orders/{"{order_id}"} endpoint and never accepts a caller-supplied path.</p>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "matchbook" ? (
+                  <>
+                    <label>
+                      <span>Offer id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Positive numeric id"
+                      />
+                    </label>
+                    <label>
+                      <span>Offer ids (cancel_offers)</span>
+                      <input
+                        value={marketReadForm.order_management_offer_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_offer_ids: event.target.value })}
+                        placeholder="404,405"
+                      />
+                    </label>
+                    <label>
+                      <span>Event ids filter</span>
+                      <input
+                        value={marketReadForm.order_management_event_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_event_ids: event.target.value })}
+                        placeholder="101"
+                      />
+                    </label>
+                    <label>
+                      <span>Market ids filter</span>
+                      <input
+                        value={marketReadForm.order_management_market_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_ids: event.target.value })}
+                        placeholder="202"
+                      />
+                    </label>
+                    <label>
+                      <span>Runner ids filter</span>
+                      <input
+                        value={marketReadForm.order_management_runner_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_runner_ids: event.target.value })}
+                        placeholder="303"
+                      />
+                    </label>
+                    <label>
+                      <span>Current odds (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_current_odds}
+                        onChange={(event) => onMarketReadFormChange({ order_management_current_odds: event.target.value })}
+                        placeholder="1.50"
+                      />
+                    </label>
+                    <label>
+                      <span>New odds (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_new_odds}
+                        onChange={(event) => onMarketReadFormChange({ order_management_new_odds: event.target.value })}
+                        placeholder="2.00"
+                      />
+                    </label>
+                    <label>
+                      <span>Current stake (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_current_stake}
+                        onChange={(event) => onMarketReadFormChange({ order_management_current_stake: event.target.value })}
+                        placeholder="5"
+                      />
+                    </label>
+                    <label>
+                      <span>New stake (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_new_stake}
+                        onChange={(event) => onMarketReadFormChange({ order_management_new_stake: event.target.value })}
+                        placeholder="6"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Offer edits JSON (edit_offers)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='[{"id":404,"current-odds":1.5,"new-odds":2,"current-stake":5,"new-stake":6}]'
+                      />
+                    </label>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL MATCHBOOK OFFERS"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label>
+                      <span>Exchange market id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="1.234 (blank = global cancel only)"
+                      />
+                    </label>
+                    <label>
+                      <span>Customer reference</span>
+                      <input
+                        value={marketReadForm.order_management_customer_ref}
+                        onChange={(event) => onMarketReadFormChange({ order_management_customer_ref: event.target.value })}
+                        placeholder="Optional, max 32 safe chars"
+                      />
+                    </label>
+                    <label>
+                      <span>Market version (replace)</span>
+                      <input
+                        value={marketReadForm.order_management_market_version}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_version: event.target.value })}
+                        placeholder="Optional positive integer"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Instructions JSON (max 60)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label>
+                      <span>Global-cancel confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="Type CANCEL ALL BETS"
+                      />
+                    </label>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={marketReadForm.order_management_async}
+                        onChange={(event) => onMarketReadFormChange({ order_management_async: event.target.checked })}
+                      />
+                      <span>Async replace request</span>
+                    </label>
+                  </>
+                )}
+              </div>
+              <div className="button-row compact">
+                <button
+                  className="danger-button"
+                  type="button"
+                  disabled={marketReadBusy !== null}
+                  onClick={onMarketOrderManagement}
+                >
+                  Submit guarded live mutation
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {marketRead.events ? (
+            <div className="table-wrap">
+              <h4>Events ({marketRead.events.events.length})</h4>
+              <table>
+                <thead><tr><th>Event</th><th>Title</th><th>Status</th><th /></tr></thead>
+                <tbody>
+                  {marketRead.events.events.map((event) => (
+                    <tr key={event.event_id}>
+                      <td>{event.event_id}</td><td>{event.title}</td><td>{event.status || "-"}</td>
+                      <td><button className="secondary-button" type="button" onClick={() => onMarketReadFormChange({ event_id: event.event_id })}>Use</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {marketRead.contracts ? (
+            <div className="table-wrap">
+              <h4>Contracts ({marketRead.contracts.contracts.length})</h4>
+              <table>
+                <thead><tr><th>Contract</th><th>Title</th><th>Outcome</th><th>Status</th><th /></tr></thead>
+                <tbody>
+                  {marketRead.contracts.contracts.map((contract) => (
+                    <tr key={contract.contract_id}>
+                      <td>{contract.contract_id}</td><td>{contract.title}</td><td>{contract.outcome || "-"}</td><td>{contract.status || "-"}</td>
+                      <td><button className="secondary-button" type="button" onClick={() => onMarketReadFormChange({ contract_id: contract.contract_id })}>Use</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {marketRead.price ? (
+            <div className="diagnostic-grid">
+              <div><span>Last</span><strong>{formatNumber(marketRead.price.price?.last)}</strong></div>
+              <div><span>Bid</span><strong>{formatNumber(marketRead.price.price?.bid)}</strong></div>
+              <div><span>Ask</span><strong>{formatNumber(marketRead.price.price?.ask)}</strong></div>
+              <div><span>Midpoint</span><strong>{formatNumber(marketRead.price.price?.midpoint)}</strong></div>
+            </div>
+          ) : null}
+          {marketRead.orderbook?.orderbook ? (
+            <div className="table-wrap">
+              <h4>Orderbook ({marketRead.orderbook.orderbook.contract_id})</h4>
+              <div className="diagnostic-grid">
+                <div><span>Best bid</span><strong>{formatNumber(marketRead.orderbook.orderbook.best_bid)}</strong></div>
+                <div><span>Best ask</span><strong>{formatNumber(marketRead.orderbook.orderbook.best_ask)}</strong></div>
+              </div>
+              <table>
+                <thead><tr><th>Side</th><th>Price</th><th>Size</th></tr></thead>
+                <tbody>
+                  {[...marketRead.orderbook.orderbook.bids.map((level) => ({ ...level, side: "bid" })), ...marketRead.orderbook.orderbook.asks.map((level) => ({ ...level, side: "ask" }))].map((level, index) => (
+                    <tr key={`${level.side}-${level.price}-${index}`}><td>{level.side}</td><td>{formatNumber(level.price)}</td><td>{formatNumber(level.size)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {marketRead.trades ? (
+            <div className="table-wrap">
+              <h4>Trades ({marketRead.trades.trades.length})</h4>
+              <table>
+                <thead><tr><th>Time</th><th>Side</th><th>Price</th><th>Size</th><th>Trade</th></tr></thead>
+                <tbody>{marketRead.trades.trades.map((trade) => (
+                  <tr key={trade.trade_id}><td>{formatUnknownTime(trade.timestamp)}</td><td>{trade.side}</td><td>{formatNumber(trade.price)}</td><td>{formatNumber(trade.size)}</td><td>{trade.trade_id}</td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : null}
+          {marketRead.candles ? (
+            <div className="table-wrap">
+              <h4>Candles ({marketRead.candles.candles.length})</h4>
+              <table>
+                <thead><tr><th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th></tr></thead>
+                <tbody>{marketRead.candles.candles.map((candle) => (
+                  <tr key={candle.timestamp}><td>{formatUnknownTime(candle.timestamp)}</td><td>{formatNumber(candle.open)}</td><td>{formatNumber(candle.high)}</td><td>{formatNumber(candle.low)}</td><td>{formatNumber(candle.close)}</td><td>{formatNumber(candle.volume)}</td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : null}
+          {marketRead.account ? (
+            <div className="table-wrap">
+              <h4>Account: {marketRead.account.operation.replaceAll("_", " ")}</h4>
+              <pre className="account-json">{JSON.stringify(marketRead.account.data, null, 2)}</pre>
+            </div>
+          ) : null}
+          {marketRead.order_management ? (
+            <div className="table-wrap">
+              <h4>Order-management response: {marketRead.order_management.operation.replaceAll("_", " ")}</h4>
+              <pre className="account-json">{JSON.stringify(marketRead.order_management.data, null, 2)}</pre>
+            </div>
+          ) : null}
+        </div>
       ) : null}
       <div className="table-wrap">
         <table>
@@ -2760,6 +6017,15 @@ function LiveSafetyView({
           <label>
             <span>Limit</span>
             <input value={form.limit_price} onChange={(event) => updateField("limit_price", event.target.value)} />
+          </label>
+          <label className="full-width">
+            <span>Metadata JSON (optional)</span>
+            <textarea
+              value={form.metadata_json}
+              onChange={(event) => updateField("metadata_json", event.target.value)}
+              placeholder='{"probability_yes_per_category":{"Alpha":0.4,"Beta":0.6}}'
+              rows={3}
+            />
           </label>
         </div>
         <div className="button-row">
@@ -4055,6 +7321,7 @@ function WalletsCopyView({
   onWalletSubmit: (event: FormEvent<HTMLFormElement>) => void;
   wallets: WalletsPayload | null;
 }) {
+  const identityHint = copy?.activity_identity_hint ?? "0x wallet address";
   return (
     <div className="content-grid">
       <section className="panel span-2">
@@ -4064,8 +7331,8 @@ function WalletsCopyView({
         </div>
         <form className="wallet-form" onSubmit={onWalletSubmit}>
           <label>
-            <span>Wallet</span>
-            <input value={form.wallet} onChange={(event) => onWalletFormChange({ ...form, wallet: event.target.value })} placeholder="0x..." />
+            <span>Activity identity</span>
+            <input value={form.wallet} onChange={(event) => onWalletFormChange({ ...form, wallet: event.target.value })} placeholder={identityHint} />
           </label>
           <label>
             <span>Name</span>
@@ -4191,12 +7458,12 @@ function WalletsCopyView({
             <span>Live mode</span>
           </label>
           <label>
-            <span>Follow wallets</span>
+            <span>Follow identities</span>
             <input
               list="wallet-choices"
               value={copyForm.follow_wallets}
               onChange={(event) => onCopyFormChange({ ...copyForm, follow_wallets: event.target.value })}
-              placeholder="0x..., 0x..."
+              placeholder={`${identityHint}, ${identityHint}`}
             />
             <datalist id="wallet-choices">
               {(copy?.wallet_choices ?? []).map((wallet) => (
@@ -4263,7 +7530,7 @@ function WalletsCopyView({
         </div>
         <div className="copy-form">
           <label>
-            <span>Proxy wallet</span>
+            <span>{copy?.market_id === "manifold" ? "Activity identity" : "Proxy wallet"}</span>
             <input value={copyPreviewForm.proxyWallet} onChange={(event) => onCopyPreviewFormChange({ ...copyPreviewForm, proxyWallet: event.target.value })} />
           </label>
           <label>
@@ -4436,6 +7703,15 @@ function PaperView({
           <label>
             <span>Limit</span>
             <input value={form.limit_price} onChange={(event) => updateField("limit_price", event.target.value)} />
+          </label>
+          <label className="full-width">
+            <span>Metadata JSON (optional)</span>
+            <textarea
+              value={form.metadata_json}
+              onChange={(event) => updateField("metadata_json", event.target.value)}
+              placeholder='{"probability_yes_per_category":{"Alpha":0.4,"Beta":0.6}}'
+              rows={3}
+            />
           </label>
         </div>
         <div className="button-row">

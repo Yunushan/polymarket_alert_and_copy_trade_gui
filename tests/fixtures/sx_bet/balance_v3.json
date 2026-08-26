@@ -1,0 +1,17 @@
+{
+  "status": "success",
+  "data": {
+    "balances": [
+      {
+        "userAddress": "0xbcc6D643e4159A75ED1dB4e13330230B82F2AEe5",
+        "wallet": "0x4361123dbdc1D812fdf7D27045aF358C9C8AA70A",
+        "tokenAddress": "0x1BC6326EA6aF2aB8E4b6Bc83418044B1923b2956",
+        "escrowAddress": "0x007D30a86366EdA2a410a176329f991565d8CfA4",
+        "availableAmount": "1028000014",
+        "pendingAvailableAmount": "0",
+        "escrowedAmount": "0",
+        "pendingEscrowAmount": "0"
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "markets": [
+    {
+      "ticker": "KXFED-26MAY-TARGET-425",
+      "event_ticker": "KXFED-26MAY",
+      "series_ticker": "KXFED",
+      "market_type": "binary",
+      "title": "Will the Fed target rate be above 4.25% on May 26?",
+      "yes_sub_title": "Above 4.25%",
+      "no_sub_title": "Not above 4.25%",
+      "status": "active",
+      "yes_bid_dollars": "0.4100",
+      "yes_ask_dollars": "0.4300",
+      "no_bid_dollars": "0.5700",
+      "no_ask_dollars": "0.5900",
+      "last_price_dollars": "0.4200"
+    }
+  ],
+  "cursor": ""
+}

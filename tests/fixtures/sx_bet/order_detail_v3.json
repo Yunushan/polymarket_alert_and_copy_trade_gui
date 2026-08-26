@@ -1,0 +1,14 @@
+{
+  "status": "success",
+  "data": {
+    "order": {
+      "id": "0xd9b693a1075ab77c0638fe98fcd3144dbb8f91d0f7ee454d442bf25ca7cbcb66",
+      "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "INACTIVE",
+      "inactiveReason": "FILLED",
+      "eventId": "L18272456",
+      "createdAt": "2026-07-31T18:45:07.437Z",
+      "updatedAt": "2026-07-31T18:46:12.100Z"
+    }
+  }
+}

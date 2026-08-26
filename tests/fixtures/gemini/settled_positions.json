@@ -1,0 +1,14 @@
+{
+  "positions": [
+    {
+      "eventTicker": "BTC100K2025",
+      "symbol": "GEMI-BTC100K25-NO",
+      "outcome": "no",
+      "quantity": "5",
+      "payout": "5.00",
+      "date": "2026-01-03T12:00:00Z",
+      "settlementStatus": "settled"
+    }
+  ],
+  "total": 1
+}

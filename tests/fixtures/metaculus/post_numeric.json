@@ -8,9 +8,27 @@
     "title": "How many users will sign up?",
     "type": "numeric",
     "status": "open",
-    "aggregations": {
-      "recency_weighted": {
-        "latest": {
+      "aggregations": {
+        "recency_weighted": {
+          "history": [
+            {
+              "start_time": 1704067200,
+              "end_time": 1704153600,
+              "centers": [
+                1000
+              ],
+              "forecaster_count": 7
+            },
+            {
+              "start_time": 1704153600,
+              "end_time": null,
+              "centers": [
+                1250
+              ],
+              "forecaster_count": 11
+            }
+          ],
+          "latest": {
           "median": 1250
         }
       }

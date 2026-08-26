@@ -1,0 +1,12 @@
+[
+  {
+    "conid": "658663572",
+    "companyName": "US Fed Funds Target Rate",
+    "symbol": "FF",
+    "description": "US Fed Funds Target Rate",
+    "sections": [
+      {"secType": "IND", "exchange": "FORECASTX"},
+      {"secType": "OPT", "months": "SEP26;OCT26", "exchange": "FORECASTX"}
+    ]
+  }
+]

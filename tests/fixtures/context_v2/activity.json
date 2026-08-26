@@ -1,0 +1,24 @@
+{
+  "marketId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "activity": [
+    {
+      "type": "trade",
+      "marketId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "timestamp": "2026-08-20T12:00:00Z",
+      "data": {"side": "yes", "price": 0.44, "amount": 4.4, "contracts": 10}
+    },
+    {
+      "type": "oracle_update",
+      "marketId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "timestamp": "2026-08-20T11:00:00Z",
+      "data": {"confidence": 0.82, "status": "monitoring"}
+    },
+    {
+      "type": "trade",
+      "marketId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "timestamp": "2026-08-19T12:00:00Z",
+      "data": {"side": "no", "price": 0.56, "amount": 2.8, "contracts": 5}
+    }
+  ],
+  "pagination": {"cursor": null, "hasMore": false}
+}

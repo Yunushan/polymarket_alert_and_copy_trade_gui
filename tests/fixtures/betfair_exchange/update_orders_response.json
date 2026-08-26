@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "status": "SUCCESS",
+    "marketId": "1.234",
+    "instructionReports": [
+      {
+        "status": "SUCCESS",
+        "betId": "bet-1"
+      }
+    ]
+  },
+  "id": 1
+}

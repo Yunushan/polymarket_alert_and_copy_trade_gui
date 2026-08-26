@@ -1,0 +1,11 @@
+{
+  "data": [
+    {
+      "id": "fanatics-cdn-a1",
+      "title": "Who will win the championship?",
+      "status": "active",
+      "contracts_count": 2
+    }
+  ],
+  "pagination": {"limit": 10, "next_cursor": null, "has_more": false}
+}

@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "currencyCode": "GBP",
+    "firstName": "Test",
+    "lastName": "Account",
+    "localeCode": "en",
+    "region": "GB",
+    "timezone": "Europe/London",
+    "discountRate": 0.02,
+    "pointsBalance": 42
+  },
+  "id": 1
+}

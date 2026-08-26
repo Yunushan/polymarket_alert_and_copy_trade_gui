@@ -1,0 +1,30 @@
+{
+  "data": {
+    "positionBalances": [
+      {
+        "id": "position-balance-1",
+        "account": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "amount": "2500000000000000000",
+        "paid": "1000000000000000000",
+        "position": {
+          "id": "position-1",
+          "side": 0,
+          "market": {
+            "id": "0x1111111111111111111111111111111111111111",
+            "result": null,
+            "currencyKey": "0x5553444300000000000000000000000000000000000000000000000000000000",
+            "strikePrice": "0",
+            "maturityDate": "1798761600",
+            "expiryDate": "1798761600",
+            "isOpen": true,
+            "finalPrice": null,
+            "managerAddress": "0x2222222222222222222222222222222222222222"
+          },
+          "managerAddress": "0x2222222222222222222222222222222222222222"
+        },
+        "managerAddress": "0x2222222222222222222222222222222222222222"
+      }
+    ],
+    "rangedPositionBalances": []
+  }
+}

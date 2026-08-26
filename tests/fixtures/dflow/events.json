@@ -1,0 +1,36 @@
+{
+  "events": [
+    {
+      "ticker": "KXBTC-26DEC31",
+      "seriesTicker": "KXBTC",
+      "title": "Bitcoin above $100k",
+      "subtitle": "December 31",
+      "status": "active",
+      "markets": [
+        {
+          "ticker": "KXBTC-26DEC31-100K",
+          "eventTicker": "KXBTC-26DEC31",
+          "title": "Bitcoin above $100k?",
+          "yesSubTitle": "Yes",
+          "noSubTitle": "No",
+          "status": "active",
+          "result": "",
+          "yesBid": "0.42",
+          "yesAsk": "0.45",
+          "noBid": "0.53",
+          "noAsk": "0.58",
+          "accounts": {
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+              "marketLedger": "ledger-1",
+              "yesMint": "mint-yes",
+              "noMint": "mint-no",
+              "isInitialized": true,
+              "redemptionStatus": "pending"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "cursor": null
+}

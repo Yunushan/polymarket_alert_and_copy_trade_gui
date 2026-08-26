@@ -1,0 +1,13 @@
+{
+  "scores": [
+    {
+      "id": 1001,
+      "type": "Forecast::QuestionBrierScore",
+      "value": "0.25",
+      "scoreable_id": 1201,
+      "scoreable_type": "Forecast::Question",
+      "prediction_made_by_id": 902,
+      "prediction_made_by_type": "Ident::Membership"
+    }
+  ]
+}

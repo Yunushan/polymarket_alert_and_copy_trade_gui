@@ -7,10 +7,12 @@ from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .runtime import AdapterRuntime, ResolvedCredential
 from .types import (
     MarketCapabilities,
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketMetadata,
     OrderBookSnapshot,
+    MarketTrade,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -26,6 +28,21 @@ class MarketAdapter:
 
     metadata = MarketMetadata(market_id="base", display_name="Base")
     live_order_sides = ("BUY", "SELL")
+    # The shared cap is deliberately conservative: for binary contracts a
+    # submitted share quantity is also the maximum face-value exposure, while
+    # stake/budget venues already express ``size`` as collateral. Adapters
+    # whose liability can exceed size (for example exchange LAY bets) must
+    # override ``live_order_exposure``.
+    live_order_exposure_model = "full_size_upper_bound"
+    # Account recovery is deliberately separate from public trade history.
+    # Adapters opt in only when the upstream account endpoints are documented
+    # and the implementation has explicit credential/safety tests.
+    account_recovery_operations: tuple[str, ...] = ()
+    # Mutating order-management operations are deliberately separate from
+    # account recovery reads.  Concrete adapters must publish an explicit
+    # allow-list and enforce their own documented request schema and safety
+    # gates before sending a request.
+    order_management_operations: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -131,7 +148,12 @@ class MarketAdapter:
             if limit_price <= 0:
                 raise MarketConfigurationError(f"{self.display_name} live order limit price must be positive.")
 
-        approx_notional = size * limit_price if limit_price is not None else size
+        approx_notional = self._finite_float(
+            self.live_order_exposure(order, size=size, limit_price=limit_price),
+            "maximum exposure",
+        )
+        if approx_notional < 0:
+            raise MarketConfigurationError(f"{self.display_name} live order exposure must not be negative.")
         max_size = self._positive_config_float("live_trading_max_size")
         max_notional = self._positive_config_float("live_trading_max_notional")
 
@@ -165,6 +187,7 @@ class MarketAdapter:
             "size": size,
             "limit_price": limit_price,
             "approx_notional": approx_notional,
+            "exposure_model": self.live_order_exposure_model,
             "max_size": max_size,
             "max_notional": max_notional,
             "live_trading_enabled": True,
@@ -178,6 +201,26 @@ class MarketAdapter:
             "metadata_keys": sorted(str(key) for key in order.metadata.keys()),
             "dry_run_preview": preview,
         }
+
+    def live_order_exposure(
+        self,
+        order: PaperOrderRequest,
+        *,
+        size: float,
+        limit_price: Optional[float],
+    ) -> float:
+        """Return a conservative collateral/maximum-loss bound for preflight.
+
+        The default intentionally charges at least the full submitted size
+        instead of the lower ``size * probability`` transaction notional. If
+        a venue uses prices above one, it also covers ``size * limit_price``.
+        This prevents market orders and naked SELL orders from bypassing the
+        configured live-trading cap. Venue-specific liability models may
+        return a larger value.
+        """
+
+        del order
+        return size * max(1.0, limit_price or 0.0)
 
     def _positive_config_float(self, key: str) -> Optional[float]:
         value = self.config_float(key, None)
@@ -216,6 +259,50 @@ class MarketAdapter:
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
         self.ensure_capability("orderbook_reading")
         raise UnsupportedFeatureError(self.market_id, "orderbook_reading")
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized public trades when an adapter documents that feed."""
+
+        self.ensure_capability("trade_history")
+        raise UnsupportedFeatureError(self.market_id, "trade_history")
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return normalized OHLCV history when an adapter documents that feed."""
+
+        self.ensure_capability("candle_history")
+        raise UnsupportedFeatureError(self.market_id, "candle_history")
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read a documented authenticated account surface, when supported.
+
+        This is intentionally not part of the public market-data capability
+        flags: account payloads are private, credentialed, and vary by venue.
+        Concrete adapters must publish an explicit operation allow-list and
+        validate each operation's parameters before making a request.
+        """
+
+        del operation, kwargs
+        raise UnsupportedFeatureError(self.market_id, "account_recovery")
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Any:
+        """Run a documented authenticated order-management mutation."""
+
+        del operation, kwargs
+        raise UnsupportedFeatureError(self.market_id, "order_management")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")

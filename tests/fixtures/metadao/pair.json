@@ -1,0 +1,12 @@
+{
+  "pair": {
+    "id": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+    "dexKey": "futarchyAMM",
+    "asset0Id": "ZKFHiLAfAFMTcDAuCtjNW54VzpERvoe7PBF9mYgmeta",
+    "asset1Id": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "feeBps": 50,
+    "createdAtBlockNumber": 312000010,
+    "createdAtBlockTimestamp": 1733040060,
+    "createdAtTxnId": "1111111111111111111111111111111111111111111111111111111111111112"
+  }
+}

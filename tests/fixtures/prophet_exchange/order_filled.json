@@ -1,0 +1,23 @@
+{
+  "data": {
+    "created_at": "2026-08-10T13:59:00Z",
+    "external_id": "external-filled-1",
+    "filled_quantity": 5.0,
+    "market_id": 555,
+    "matching_status": "fully_matched",
+    "open_quantity": 0.0,
+    "order_id": "order-filled-1",
+    "original_quantity": 5.0,
+    "outcome_id": 1,
+    "price": 2.0,
+    "profit": 0.0,
+    "quantity": 5.0,
+    "sport_event_id": 101,
+    "status": "settled",
+    "strike": 0.0,
+    "strike_id": "strike_1",
+    "user_id": "user-1",
+    "winning_status": "tbd"
+  },
+  "last_synced_at": "2026-08-10T14:00:03Z"
+}

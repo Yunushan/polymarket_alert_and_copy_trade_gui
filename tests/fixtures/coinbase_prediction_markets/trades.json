@@ -1,0 +1,27 @@
+{
+  "trades": [
+    {
+      "trade_id": "trade-kalshi-1",
+      "ticker": "KXFED-26MAY-TARGET-425",
+      "count_fp": "12.00",
+      "yes_price_dollars": "0.4200",
+      "no_price_dollars": "0.5800",
+      "taker_side": "yes",
+      "taker_outcome_side": "yes",
+      "taker_book_side": "bid",
+      "created_time": "2026-05-01T12:00:00Z"
+    },
+    {
+      "trade_id": "trade-kalshi-2",
+      "ticker": "KXFED-26MAY-TARGET-425",
+      "count_fp": "5.00",
+      "yes_price_dollars": "0.4300",
+      "no_price_dollars": "0.5700",
+      "taker_side": "no",
+      "taker_outcome_side": "no",
+      "taker_book_side": "ask",
+      "created_time": "2026-05-01T12:05:00Z"
+    }
+  ],
+  "cursor": ""
+}

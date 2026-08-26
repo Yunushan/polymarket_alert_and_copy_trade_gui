@@ -1,0 +1,41 @@
+[
+  {
+    "price": "0.55",
+    "priceAfterFees": "0.56",
+    "amount": "2000000000000000000",
+    "side": "buy",
+    "outcome": 1,
+    "txHash": "0xmyriadtradebuy",
+    "timestamp": 1719835200,
+    "fees": {
+      "total": "10000000000000000",
+      "lp": "0",
+      "treasury": "5000000000000000",
+      "distributor": "5000000000000000"
+    }
+  },
+  {
+    "price": "0.44",
+    "amount": "1000000000000000000",
+    "side": "sell",
+    "outcome": 1,
+    "txHash": "0xmyriadtradesell",
+    "timestamp": 1719835100
+  },
+  {
+    "price": "0.50",
+    "amount": "1000000000000000000",
+    "side": "merge",
+    "outcome": 1,
+    "txHash": "0xmyriadtrademerge",
+    "timestamp": 1719835000
+  },
+  {
+    "price": "0.20",
+    "amount": "0",
+    "side": "buy",
+    "outcome": 1,
+    "txHash": "0xmyriadinvalid",
+    "timestamp": 1719834900
+  }
+]

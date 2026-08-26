@@ -1,0 +1,10 @@
+{
+  "data": {
+    "symbol": "NADEX-CDNA-US500-YES",
+    "bid": "0.41",
+    "ask": "0.59",
+    "mid": "0.50",
+    "probability": "50.00",
+    "status": "active"
+  }
+}

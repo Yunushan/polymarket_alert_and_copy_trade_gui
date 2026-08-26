@@ -1,0 +1,33 @@
+{
+  "data": {
+    "fixedProductMarketMaker": {
+      "id": "0xomenfpmm1",
+      "title": "Will Gnosis Chain process more than 1M transactions tomorrow?",
+      "category": "Crypto",
+      "outcomes": ["Yes", "No"],
+      "outcomeTokenMarginalPrices": ["0.62", "0.38"],
+      "outcomeTokenAmounts": ["620000000000000000000", "380000000000000000000"],
+      "outcomeSlotCount": 2,
+      "openingTimestamp": "1798761600",
+      "resolutionTimestamp": null,
+      "currentAnswer": null,
+      "answerFinalizedTimestamp": null,
+      "scaledLiquidityMeasure": "1000.0",
+      "scaledRunningDailyVolume": "25.0",
+      "collateralToken": "0x0000000000000000000000000000000000000001",
+      "curatedByDxDao": true,
+      "question": {
+        "id": "0xomenquestion1",
+        "title": "Will Gnosis Chain process more than 1M transactions tomorrow?",
+        "category": "Crypto",
+        "outcomes": ["Yes", "No"],
+        "openingTimestamp": "1798761600"
+      },
+      "condition": {
+        "id": "0xomencondition1",
+        "resolutionTimestamp": null,
+        "payouts": []
+      }
+    }
+  }
+}

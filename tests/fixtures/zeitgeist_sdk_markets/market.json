@@ -1,0 +1,18 @@
+{
+  "data": {
+    "markets": [
+      {
+        "marketId": 90,
+        "question": "Will the SDK market settle YES?",
+        "description": "Fixture-backed Zeitgeist SDK market",
+        "slug": "sdk-market-90",
+        "status": "Active",
+        "resolvedOutcome": null,
+        "outcomeAssets": ["CategoricalOutcome:90:0", "CategoricalOutcome:90:1"],
+        "marketType": {"categorical": true, "scalar": false},
+        "categories": [{"ticker": "YES", "name": "Yes"}, {"ticker": "NO", "name": "No"}],
+        "pool": {"id": "pool-90", "poolId": 90, "poolStatus": "Active", "baseAsset": "0", "volume": "0", "ztgQty": "0", "weights": []}
+      }
+    ]
+  }
+}

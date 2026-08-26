@@ -84,6 +84,8 @@ Release jobs:
 
 The publish job targets the `release` environment. Treat this as the release environment for production publishing, and configure protection rules for it in GitHub if releases should require manual approval.
 
+Release reruns are fail-closed. An updatable existing release is returned to draft state before its assets change; a new release starts as a draft. After the verified local files are uploaded, the workflow enumerates every remote asset page, removes only numeric asset IDs belonging to that exact release whose names are absent locally, checks the exact remote names and metadata, downloads every asset, and compares the bytes with the attested local files. The requested draft or published state is applied only after those checks pass. If immutable releases are enabled, GitHub rejects modification of a published release instead of allowing a partial rerun.
+
 See `docs/PLATFORM_SUPPORT.md` for the platform support tiers and the gates required before any additional OS or mobile platform is advertised as fully supported.
 
 The normal verifier runs `python scripts/verify_platform_support.py` to ensure platform claims remain documented and honest. `python scripts/verify_platform_support.py --require-full` is the strict 100% platform certification gate; it must fail until every requested desktop, Unix, BSD/Solaris, Android, and iOS target has real repeatable test evidence.

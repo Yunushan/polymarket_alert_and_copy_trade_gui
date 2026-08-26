@@ -1,0 +1,47 @@
+{
+  "data": {
+    "questions": [
+      {
+        "id": "0xreality-question-1",
+        "questionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "contract": "0x0000000000000000000000000000000000000001",
+        "createdBlock": "21000000",
+        "createdTimestamp": "1760000000",
+        "updatedBlock": "21000010",
+        "updatedTimestamp": "1760000100",
+        "data": "0␟Will ETH trade above 5000 USD before 2027?␟crypto␟en",
+        "qJsonStr": "{\"title\":\"Will ETH trade above 5000 USD before 2027?\",\"type\":\"bool\",\"category\":\"crypto\",\"lang\":\"en\"}",
+        "qTitle": "Will ETH trade above 5000 USD before 2027?",
+        "qCategory": "crypto",
+        "qDescription": "Reality.eth question fixture for adapter tests.",
+        "qLang": "en",
+        "qType": "bool",
+        "user": "0x0000000000000000000000000000000000000002",
+        "arbitrator": "0x0000000000000000000000000000000000000003",
+        "openingTimestamp": "1760000000",
+        "timeout": "86400",
+        "bounty": "0",
+        "currentAnswer": null,
+        "currentAnswerBond": "0",
+        "currentAnswerTimestamp": null,
+        "minBond": "0",
+        "lastBond": "0",
+        "cumulativeBonds": "0",
+        "isPendingArbitration": false,
+        "arbitrationOccurred": false,
+        "answerFinalizedTimestamp": null,
+        "currentScheduledFinalizationTimestamp": "1760086400",
+        "outcomes": [
+          {
+            "id": "0xreality-question-1:yes",
+            "answer": "Yes"
+          },
+          {
+            "id": "0xreality-question-1:no",
+            "answer": "No"
+          }
+        ]
+      }
+    ]
+  }
+}

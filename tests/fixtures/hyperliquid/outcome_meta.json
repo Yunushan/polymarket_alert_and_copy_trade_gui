@@ -1,0 +1,14 @@
+{
+  "outcomes": [
+    {
+      "outcome": 1,
+      "name": "BTC daily threshold",
+      "description": "class:priceBinary|underlying:BTC|expiry:20260901-1200|targetPrice:100000|period:1d",
+      "sideSpecs": [
+        {"name": "Yes"},
+        {"name": "No"}
+      ]
+    }
+  ],
+  "questions": []
+}

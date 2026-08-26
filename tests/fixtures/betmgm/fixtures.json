@@ -1,0 +1,66 @@
+{
+  "items": [
+    {
+      "id": {"full": "V2:4:123456", "entityId": 123456},
+      "name": {"text": "Arsenal v Chelsea", "shortText": "Arsenal v Chelsea"},
+      "version": 2,
+      "startDateUtc": "2026-08-23T15:00:00Z",
+      "cutOffDateUtc": "2026-08-23T15:00:00Z",
+      "isInPlay": false,
+      "isDisplayed": true,
+      "isOpenForBetting": true,
+      "state": "not started",
+      "type": "pairgame",
+      "fixtureGroupId": 123456,
+      "competition": {"id": 42, "name": {"text": "Premier League"}},
+      "region": {"id": 1, "name": {"text": "England"}},
+      "participantType": "team",
+      "participants": [
+        {"id": 10, "name": {"text": "Arsenal"}, "participantType": "home"},
+        {"id": 11, "name": {"text": "Chelsea"}, "participantType": "away"}
+      ],
+      "markets": [
+        {
+          "id": 987654,
+          "name": {"text": "Match Result", "shortText": "Result"},
+          "marketTemplateId": 1,
+          "marketType": "one_x_two",
+          "isDisplayed": true,
+          "isOpenForBetting": true,
+          "isBalancedLine": true,
+          "options": [
+            {
+              "id": 1001,
+              "participantId": 10,
+              "name": {"text": "Arsenal", "shortText": "Arsenal"},
+              "price": {"fraction": {"numerator": 1, "denominator": 1}, "odds": 2.0, "usOdds": 100},
+              "priceType": "decimal",
+              "isDisplayed": true,
+              "isOpenForBetting": true
+            },
+            {
+              "id": 1002,
+              "participantId": 11,
+              "name": {"text": "Chelsea", "shortText": "Chelsea"},
+              "price": {"fraction": {"numerator": 3, "denominator": 2}, "odds": 2.5, "usOdds": 150},
+              "priceType": "decimal",
+              "isDisplayed": true,
+              "isOpenForBetting": true
+            },
+            {
+              "id": 1003,
+              "name": {"text": "Draw", "shortText": "Draw"},
+              "price": {"fraction": {"numerator": 2, "denominator": 1}, "odds": 3.0, "usOdds": 200},
+              "priceType": "decimal",
+              "isDisplayed": true,
+              "isOpenForBetting": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "count": 1,
+  "links": {},
+  "type": 0
+}

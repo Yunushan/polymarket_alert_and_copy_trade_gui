@@ -1,0 +1,10 @@
+{
+  "market_id": "1996-powell-nomination",
+  "title": "1996 Powell Nomination Winner Takes All",
+  "status": "closed",
+  "archive_only": true,
+  "contracts": [
+    {"symbol": "P.YES", "title": "Powell's name is placed in nomination"},
+    {"symbol": "P.NO", "title": "Powell's name is not placed in nomination"}
+  ]
+}

@@ -26,6 +26,7 @@ from core.storage import ConfigLoadError, load_config, save_config
 from market_adapters import build_default_registry
 from market_adapters.base import MarketAdapter
 from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.identity import activity_identity_hint, normalize_activity_identity
 from market_adapters.polymarket import PolymarketAdapter
 from market_adapters.types import (
     MarketContract,
@@ -88,6 +89,9 @@ def activity_key(item: Dict[str, Any]) -> str:
     tx = str(item.get("transactionHash") or "").strip().lower()
     if tx:
         return f"tx:{tx}"
+    activity_id = str(item.get("activityId") or item.get("activity_id") or "").strip().lower()
+    if activity_id:
+        return f"activity-id:{activity_id}"
     fields = ("timestamp", "proxyWallet", "asset", "side", "price", "size", "slug", "outcome")
     return "activity:" + "|".join(str(item.get(k) or "").strip().lower() for k in fields)
 
@@ -259,10 +263,17 @@ def _set_windows_titlebar_theme(
 # ---------------------------
 
 class WalletPoller:
-    def __init__(self, ui_queue: "queue.Queue[tuple]", cfg: AppConfig, poll_interval: float = 10.0):
+    def __init__(
+        self,
+        ui_queue: "queue.Queue[tuple]",
+        cfg: AppConfig,
+        poll_interval: float = 10.0,
+        adapter_registry: Any = None,
+    ):
         self.ui_queue = ui_queue
         self.cfg = cfg
         self.poll_interval = poll_interval
+        self.adapter_registry = adapter_registry
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -275,6 +286,25 @@ class WalletPoller:
     def stop(self):
         self._stop.set()
 
+    def _list_activity(self, wallet: str) -> List[Dict[str, Any]]:
+        """Read wallet trades through the selected market's official adapter feed."""
+
+        market_id = str(getattr(self.cfg, "selected_market_id", "polymarket") or "polymarket").strip().lower()
+        market_cfg = self.cfg.markets.get(market_id)
+        if self.adapter_registry is not None:
+            adapter = self.adapter_registry.create(market_id, market_cfg.settings if market_cfg else {})
+            list_activity = getattr(adapter, "list_activity", None)
+            if callable(list_activity):
+                items = list_activity(wallet, limit=25)
+                return list(items or [])
+        if market_id == "polymarket":
+            return list(data_api.get_activity(wallet, limit=25, types=["TRADE"]) or [])
+        raise UnsupportedFeatureError(
+            market_id,
+            "copy_trading",
+            "This market does not expose an official wallet activity feed in the desktop app.",
+        )
+
     def _run(self):
         while not self._stop.is_set():
             for w in list(self.cfg.wallets):
@@ -283,11 +313,7 @@ class WalletPoller:
                 if not w.enabled:
                     continue
                 try:
-                    items = data_api.get_activity(
-                        w.wallet,
-                        limit=25,
-                        types=["TRADE"],  # keep it simple; only trades
-                    )
+                    items = self._list_activity(w.wallet)
                     # Items are sorted DESC per API; process oldest->newest
                     new_items = []
                     seen_keys = set(w.seen_activity_keys or [])
@@ -481,7 +507,12 @@ class App(tk.Tk):
             self.market_ws.start()
 
         # Wallet poller
-        self.wallet_poller = WalletPoller(self.ui_queue, self.cfg, poll_interval=10.0)
+        self.wallet_poller = WalletPoller(
+            self.ui_queue,
+            self.cfg,
+            poll_interval=10.0,
+            adapter_registry=self.adapter_registry,
+        )
         self.adapter_price_poller = AdapterPricePoller(self.ui_queue, self.cfg, self.adapter_registry)
         if self._background_workers_started:
             self.adapter_price_poller.start()
@@ -660,6 +691,28 @@ class App(tk.Tk):
         self.ui_queue.put(("log", f"[market] {message}"))
         messagebox.showinfo("Unsupported market", message)
         return False
+
+    def _require_selected_market_capability(self, feature: str, capability: str) -> bool:
+        """Guard a selected-market workflow using the adapter capability matrix."""
+
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        if not market_config_enabled(self.cfg, market_id):
+            return self._require_market_enabled(market_id, feature)
+        try:
+            adapter = self._get_selected_market_adapter()
+        except Exception as exc:
+            message = f"{feature} is unavailable: {exc}"
+            self.status_var.set(message)
+            self.ui_queue.put(("log", f"[market] {message}"))
+            messagebox.showinfo("Market unavailable", message)
+            return False
+        if not getattr(adapter.capabilities, capability, False):
+            message = f"{feature} is not supported for {adapter.display_name}."
+            self.status_var.set(message)
+            self.ui_queue.put(("log", f"[market] {message}"))
+            messagebox.showinfo("Unsupported market", message)
+            return False
+        return True
 
     def _on_market_change(self):
         market_id = market_id_from_choice(self.market_var.get())
@@ -1964,7 +2017,9 @@ class App(tk.Tk):
         top = ttk.Frame(frm)
         top.pack(fill="x", padx=10, pady=10)
 
-        ttk.Label(top, text="Username/pseudonym or wallet (0x...):").grid(row=0, column=0, sticky="w")
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        identity_hint = activity_identity_hint(market_id)
+        ttk.Label(top, text=f"Activity identity ({identity_hint}):").grid(row=0, column=0, sticky="w")
         self.wallet_search_entry = ttk.Entry(top, width=50)
         self.wallet_search_entry.grid(row=0, column=1, padx=5)
         ttk.Button(top, text="Search/Add", command=self.search_or_add_wallet).grid(row=0, column=2, padx=5)
@@ -2640,7 +2695,8 @@ class App(tk.Tk):
         self.ct_live_var = tk.BooleanVar(value=self.cfg.copytrading.live)
         ttk.Checkbutton(form, text="LIVE mode (places real orders)", variable=self.ct_live_var).grid(row=0, column=1, sticky="w", padx=5, pady=5)
 
-        ttk.Label(form, text="Follow wallets:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        ttk.Label(form, text=f"Follow identities ({activity_identity_hint(market_id)}):").grid(row=1, column=0, sticky="e", padx=5, pady=5)
         self.ct_follow_var = tk.StringVar(value=", ".join(self.cfg.copytrading.normalized_follow_wallets()))
         self.ct_follow_combo = ttk.Combobox(form, textvariable=self.ct_follow_var, values=self._wallet_choices(), width=50)
         self.ct_follow_combo.grid(row=1, column=1, sticky="w", padx=5, pady=5)
@@ -4148,10 +4204,28 @@ class App(tk.Tk):
         self.ui_queue.put(("log", f"Deleted wallet watch {wid}"))
 
     def search_or_add_wallet(self):
-        if not self._require_polymarket_selected("Wallet tracking"):
-            return
         q = (self.wallet_search_entry.get() or "").strip()
         if not q:
+            return
+
+        # Non-Polymarket activity feeds use their documented identity format.
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        if market_id != "polymarket":
+            if not self._require_selected_market_capability("Wallet tracking", "copy_trading"):
+                return
+            wallet = normalize_activity_identity(market_id, q)
+            if not wallet:
+                expected = "manifold:<username>" if market_id == "manifold" else "a 0x wallet address"
+                messagebox.showerror(
+                    "Wallet tracking",
+                    f"The selected market requires {expected}; username search is unavailable.",
+                )
+                return
+            display_name = wallet.split(":", 1)[1] if market_id == "manifold" else wallet[:10] + "..."
+            self._add_wallet_watch(wallet, display_name=display_name)
+            return
+
+        if not self._require_polymarket_selected("Wallet tracking"):
             return
         w = normalize_wallet(q)
         if w:
@@ -4204,10 +4278,13 @@ class App(tk.Tk):
             self.status_var.set("Profile search error.")
 
     def _add_wallet_watch(self, wallet: str, display_name: str = ""):
-        wallet = wallet.lower().strip()
-        if not is_wallet_address(wallet):
-            messagebox.showerror("Error", "Not a valid 0x wallet/proxyWallet address.")
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        normalized = normalize_activity_identity(market_id, wallet)
+        if not normalized:
+            expected = "manifold:<username>" if market_id == "manifold" else "0x wallet/proxyWallet address"
+            messagebox.showerror("Error", f"Not a valid {expected}.")
             return
+        wallet = normalized
         if any(w.wallet == wallet for w in self.cfg.wallets):
             messagebox.showinfo("Already tracked", "This wallet is already being tracked.")
             return
@@ -4224,7 +4301,7 @@ class App(tk.Tk):
             self.status_var.set("Wallet polling stopped.")
             self.ui_queue.put(("log", "Wallet polling stopped."))
             return
-        if not self._require_polymarket_selected("Wallet polling"):
+        if not self._require_selected_market_capability("Wallet polling", "copy_trading"):
             return
 
         iv = safe_float(self.poll_interval_var.get(), default=10.0)
@@ -4258,21 +4335,23 @@ class App(tk.Tk):
 
     def _copy_follow_wallets_from_text(self) -> Optional[List[str]]:
         raw = str(self.ct_follow_var.get() or "")
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
         wallets: List[str] = []
         for part in re.split(r"[,;\s]+", raw):
-            candidate = part.strip().lower()
+            candidate = part.strip()
             if not candidate:
                 continue
-            wallet = normalize_wallet(candidate)
+            wallet = normalize_activity_identity(market_id, candidate)
             if not wallet:
-                messagebox.showerror("Copy trading settings", f"Invalid follow wallet: {candidate}")
+                hint = activity_identity_hint(market_id)
+                messagebox.showerror("Copy trading settings", f"Invalid follow identity: {candidate} (use {hint}).")
                 return None
             if wallet not in wallets:
                 wallets.append(wallet)
         return wallets
 
     def save_copy_settings(self):
-        if not self._require_polymarket_selected("Copy trading settings"):
+        if not self._require_selected_market_capability("Copy trading settings", "copy_trading"):
             return
         follow_wallets = self._copy_follow_wallets_from_text()
         if follow_wallets is None:
@@ -4383,8 +4462,7 @@ class App(tk.Tk):
         return None
 
     def _copy_trade_from_activity(self, item: Dict[str, Any]):
-        if self.cfg.selected_market_id != "polymarket":
-            return
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
         s = self.cfg.copytrading
         if not s.enabled:
             return
@@ -4392,7 +4470,8 @@ class App(tk.Tk):
         if not followed_wallets:
             return
 
-        if str(item.get("proxyWallet") or "").lower() not in followed_wallets:
+        activity_identity = normalize_activity_identity(market_id, item.get("proxyWallet"))
+        if not activity_identity or activity_identity not in followed_wallets:
             return
 
         side = str(item.get("side") or "").upper()
@@ -4402,26 +4481,47 @@ class App(tk.Tk):
             self.ui_queue.put(("log", "[copy] Skipping SELL trade (allow_sells=false)."))
             return
 
-        token_id = str(item.get("asset") or "")
+        token_id = str(item.get("asset") or item.get("contract_id") or "").strip()
         if not token_id:
             return
 
         raw_size = safe_float(item.get("size"), 0.0) or 0.0
         raw_price = safe_float(item.get("price"), None)
         size = max(0.0, raw_size * float(s.scale))
-        adapter = self._get_polymarket_adapter()
+        adapter = (
+            self._get_polymarket_adapter()
+            if market_id == "polymarket"
+            else self._get_selected_market_adapter()
+        )
+        capabilities = getattr(adapter, "capabilities", None)
+        if capabilities is not None and not bool(getattr(capabilities, "copy_trading", False)):
+            self.ui_queue.put(("log", f"[copy] {adapter.display_name} does not support copy trading."))
+            return
 
         # Pull current best bid/ask for safer limit pricing
         best_bid = best_ask = None
-        try:
-            book = adapter.get_orderbook(token_id)
-            best_bid = book.bids[0].price if book.bids else None
-            best_ask = book.asks[0].price if book.asks else None
-        except Exception:
-            pass
+        is_azuro = market_id == "azuro"
+        if not is_azuro:
+            try:
+                book = adapter.get_orderbook(token_id)
+                best_bid = book.bids[0].price if book.bids else None
+                best_ask = book.asks[0].price if book.asks else None
+            except Exception:
+                pass
 
         slip = max(0.0, min(float(s.slippage), 1.0))
-        if side == "BUY":
+        if is_azuro:
+            raw_odds = safe_float(item.get("odds"), None)
+            if raw_odds is None and raw_price is not None and raw_price > 0:
+                raw_odds = 1.0 / raw_price
+            if raw_odds is None or raw_odds <= 0:
+                self.ui_queue.put(("log", "[copy] Azuro activity has no valid decimal odds."))
+                return
+            # Azuro's minimum-odds field is a decimal-odds floor. Allow the
+            # configured slippage to reduce that floor, rather than treating
+            # it as a 0..1 probability cap.
+            limit_price = max(1e-12, float(raw_odds) * (1.0 - slip))
+        elif side == "BUY":
             # pick an ask-based price cap
             ref = best_ask if best_ask is not None else raw_price
             if ref is None:
@@ -4435,7 +4535,11 @@ class App(tk.Tk):
 
         # Enforce max USDC exposure by shrinking share size
         max_usdc = max(0.01, float(s.max_usdc_per_trade))
-        if limit_price > 0:
+        buy_budget_activity = market_id in {"azuro", "manifold", "myriad_markets"} and side == "BUY"
+        if buy_budget_activity:
+            if size > max_usdc:
+                size = max_usdc
+        elif limit_price > 0:
             max_shares = max_usdc / limit_price
             if size > max_shares:
                 size = max_shares
@@ -4448,7 +4552,48 @@ class App(tk.Tk):
             return
 
         if not s.live:
-            self.ui_queue.put(("log", f"[copy SIM] {side} token={token_id[:10]}... size={size:.4f} price<= {limit_price:.4f}"))
+            order_metadata: Dict[str, Any] = {"source": "copy_trading", "activity": dict(item)}
+            if market_id in {"manifold", "myriad_markets"} and side == "SELL":
+                order_metadata["shares"] = item.get("shares") or size
+            order = PaperOrderRequest(
+                market_id=market_id,
+                contract_id=token_id,
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata=order_metadata,
+            )
+            try:
+                paper_result = adapter.place_paper_order(order)
+            except (AttributeError, UnsupportedFeatureError):
+                # Keep compatibility with lightweight adapters used by the
+                # desktop smoke tests; the guarded simulation log is still
+                # useful when no paper ledger is available.
+                paper_result = None
+            except Exception as exc:
+                self.ui_queue.put(("log", f"[copy SIM] {market_id} paper order rejected: {exc}"))
+                return
+            suffix = ""
+            if paper_result is not None:
+                suffix = f" accepted={bool(paper_result.accepted)}"
+            market_prefix = "" if market_id == "polymarket" else f"{market_id} "
+            self.ui_queue.put(
+                (
+                    "log",
+                    f"[copy SIM] {market_prefix}{side} token={token_id[:10]}... "
+                    f"size={size:.4f} price<= {limit_price:.4f}{suffix}",
+                )
+            )
+            return
+
+        if market_id != "polymarket":
+            self.ui_queue.put(
+                (
+                    "log",
+                    f"[copy LIVE] {adapter.display_name} live copy trading is disabled; "
+                    "use simulation until its official signing SDK is integrated.",
+                )
+            )
             return
 
         # LIVE mode safety: geoblock
@@ -4459,7 +4604,7 @@ class App(tk.Tk):
             return
 
         order = PaperOrderRequest(
-            market_id="polymarket",
+            market_id=market_id,
             contract_id=token_id,
             side=side,
             size=size,

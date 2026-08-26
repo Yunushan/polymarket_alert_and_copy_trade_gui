@@ -1,0 +1,19 @@
+{
+  "history": [
+    {
+      "question_id": "q1001",
+      "sampled_at": "2015-05-01T00:00:00Z",
+      "probabilities": [0.40, 0.60]
+    },
+    {
+      "question_id": "q1001",
+      "sampled_at": "2015-06-01T00:00:00Z",
+      "probabilities": [0.72, 0.28]
+    },
+    {
+      "question_id": "q1002",
+      "sampled_at": "2015-05-01T00:00:00Z",
+      "probabilities": [0.20, 0.50, 0.30]
+    }
+  ]
+}

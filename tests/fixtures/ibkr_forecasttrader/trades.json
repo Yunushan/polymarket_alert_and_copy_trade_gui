@@ -1,0 +1,46 @@
+[
+  {
+    "execution_id": "exec-event-buy-1",
+    "symbol": "FF",
+    "side": "B",
+    "order_description": "Bought 5 @ 0.48 on FORECASTX",
+    "trade_time": "20251009-12:00:49",
+    "trade_time_r": 1760011249000,
+    "size": 5.0,
+    "price": "0.48",
+    "order_ref": "EventOrder123",
+    "account": "U1234567",
+    "conid": 721095497,
+    "conidEx": "721095497",
+    "sec_type": "OPT",
+    "is_event_trading": "1"
+  },
+  {
+    "execution_id": "exec-other-contract",
+    "symbol": "FF",
+    "side": "S",
+    "trade_time": "20251009-12:01:49",
+    "trade_time_r": 1760011309000,
+    "size": 4.0,
+    "price": "0.52",
+    "account": "U1234567",
+    "conid": 721095498,
+    "conidEx": "721095498",
+    "sec_type": "OPT",
+    "is_event_trading": "1"
+  },
+  {
+    "execution_id": "exec-event-sell-1",
+    "symbol": "FF",
+    "side": "S",
+    "trade_time": "20251009-11:30:49",
+    "trade_time_r": 1760009449000,
+    "size": 2.0,
+    "price": "0.46",
+    "account": "U1234567",
+    "conid": 721095497,
+    "conidEx": "721095497",
+    "sec_type": "OPT",
+    "is_event_trading": "1"
+  }
+]

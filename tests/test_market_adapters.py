@@ -8,12 +8,33 @@ from market_adapters import (
     AdapterRegistry,
     AugurAdapter,
     AzuroAdapter,
+    BetMGMAdapter,
     BetfairExchangeAdapter,
+    BlinqAdapter,
+    CoinbasePredictionMarketsAdapter,
     CryptoComPredictAdapter,
+    DraftKingsPredictionsAdapter,
+    FanaticsMarketsAdapter,
+    FanDuelPredictsAdapter,
+    ContextV2Adapter,
+    DFlowAdapter,
+    DriftBetAdapter,
+    FrenzyFinanceAdapter,
     GeminiPredictionAdapter,
+    GoodJudgmentOpenAdapter,
+    HypermindAdapter,
+    GnosisPredictionMarketsAdapter,
+    HyperliquidAdapter,
+    HedgehogMarketsAdapter,
+    IBKRForecastTraderAdapter,
+    IowaElectronicMarketsAdapter,
+    ForecastExAdapter,
+    CMEPredictionMarketsAdapter,
     KalshiAdapter,
+    KalshiViaRobinhoodAdapter,
     LimitlessAdapter,
     ManifoldAdapter,
+    MatchbookAdapter,
     MarketAdapter,
     MarketCapabilities,
     MarketMetadata,
@@ -21,20 +42,39 @@ from market_adapters import (
     PaperOrderResult,
     PredictItAdapter,
     PredictFunAdapter,
+    ProbableAdapter,
+    PRDTFinanceAdapter,
+    ProphetExchangeAdapter,
     OmenAdapter,
+    RealityEthMarketsAdapter,
     SxBetAdapter,
+    SmarketsAdapter,
+    SeerAdapter,
+    SciCastAdapter,
+    SpaceAdapter,
+    ThalesMarketAdapter,
+    TrueoAdapter,
+    ZetariumWorldAdapter,
+    LamasFinanceAdapter,
     StubMarketAdapter,
     UnsupportedFeatureError,
     MetaculusAdapter,
+    MetaDAOAdapter,
     MyriadAdapter,
+    NadexAdapter,
     OpinionAdapter,
+    RobinhoodPredictionMarketsAdapter,
     VERIFIED_BLOCKERS,
     VerifiedBlockedAdapter,
     XOMarketAdapter,
     XMarketAdapter,
     ZeitgeistAdapter,
+    ZeitgeistPredictionPoolsAdapter,
     build_default_registry,
+    account_surface_issues,
+    capability_contract_issues,
     create_stub_adapter,
+    support_matrix_entry,
 )
 from market_adapters.errors import MarketConfigurationError
 
@@ -44,6 +84,8 @@ CAPABILITY_KEYS = {
     "event_listing",
     "price_reading",
     "orderbook_reading",
+    "trade_history",
+    "candle_history",
     "alerts",
     "paper_trading",
     "live_trading",
@@ -55,16 +97,23 @@ CAPABILITY_KEYS = {
 }
 
 IMPLEMENTED_MARKETS = {
+    "betmgm",
     "polymarket",
+    "blinq",
+    "coinbase_prediction_markets",
+    "robinhood_prediction_markets",
+    "kalshi_via_robinhood",
     "kalshi",
     "predictit",
     "manifold",
     "metaculus",
+    "good_judgment_open",
     "limitless_exchange",
     "sx_bet",
     "azuro",
     "augur",
     "omen",
+    "gnosis_prediction_markets",
     "zeitgeist",
     "myriad_markets",
     "xo_market",
@@ -73,9 +122,98 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "draftkings_predictions",
+    "fanatics_markets",
+    "fanduel_predicts",
+    "context_v2",
+    "smarkets",
+    "thales_market",
+    "metadao",
+    "seer",
+    "hyperliquid",
+    "trueo",
+    "zeitgeist_sdk_markets",
+    "zeitgeist_prediction_pools",
+    "reality_eth_markets",
+    "ibkr_forecasttrader",
+    "forecastex",
+    "cme_prediction_markets",
+    "dflow",
+    "drift_bet",
+    "frenzy_finance",
+    "space",
+    "hedgehog_markets",
     "xmarket",
+    "probable",
+    "matchbook",
+    "prophet_exchange",
+    "prdt_finance",
+    "zetarium_world",
+    "lamas_finance",
+    "nadex",
+    "iowa_electronic_markets",
+    "hypermind",
+    "scicast",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
+
+HISTORY_CAPABILITIES = {
+    "polymarket": {"trade_history", "candle_history"},
+    "blinq": {"trade_history", "candle_history"},
+    "coinbase_prediction_markets": {"trade_history", "candle_history"},
+    "kalshi": {"trade_history", "candle_history"},
+    "robinhood_prediction_markets": {"trade_history", "candle_history"},
+    "kalshi_via_robinhood": {"trade_history", "candle_history"},
+    "manifold": {"trade_history", "candle_history"},
+    "azuro": {"trade_history", "candle_history"},
+    "metaculus": {"candle_history"},
+    "good_judgment_open": {"candle_history"},
+    "limitless_exchange": {"trade_history", "candle_history"},
+    "hyperliquid": {"trade_history", "candle_history"},
+    "ibkr_forecasttrader": {"trade_history", "candle_history"},
+    "forecastex": {"trade_history", "candle_history"},
+    "cme_prediction_markets": {"trade_history", "candle_history"},
+    "myriad_markets": {"trade_history", "candle_history"},
+    "opinion_labs": {"trade_history", "candle_history"},
+    "betfair_exchange": {"trade_history", "candle_history"},
+    "matchbook": {"trade_history", "candle_history"},
+    "sx_bet": {"trade_history", "candle_history"},
+    "gemini_titan": {"trade_history", "candle_history"},
+    "iowa_electronic_markets": {"candle_history"},
+    "hypermind": {"trade_history", "candle_history"},
+    "space": {"trade_history", "candle_history"},
+    "scicast": {"trade_history", "candle_history"},
+    "xmarket": {"trade_history", "candle_history"},
+    "probable": {"trade_history", "candle_history"},
+    "context_v2": {"trade_history", "candle_history"},
+    "predict_fun": {"trade_history", "candle_history"},
+    "dflow": {"trade_history", "candle_history"},
+    "drift_bet": {"trade_history", "candle_history"},
+    "xo_market": {"trade_history", "candle_history"},
+    "omen": {"trade_history", "candle_history"},
+    "gnosis_prediction_markets": {"trade_history", "candle_history"},
+    "smarkets": {"trade_history", "candle_history"},
+    "seer": {"candle_history"},
+    "trueo": {"trade_history", "candle_history"},
+    "metadao": {"trade_history", "candle_history"},
+    "prophet_exchange": {"trade_history", "candle_history"},
+}
+
+FAIL_CLOSED_SIGNED_FORWARDERS = {
+    "azuro",
+    "dflow",
+    "gnosis_prediction_markets",
+    "hedgehog_markets",
+    "lamas_finance",
+    "metadao",
+    "omen",
+    "seer",
+    "thales_market",
+    "trueo",
+    "zeitgeist",
+    "zeitgeist_prediction_pools",
+    "zeitgeist_sdk_markets",
+}
 
 
 class DummyAdapter(MarketAdapter):
@@ -119,17 +257,40 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertEqual(set(registry.list_market_ids()), set(MARKET_IDS))
         self.assertTrue(all(registry.has_adapter(market_id) for market_id in MARKET_IDS))
         self.assertEqual(registry.get_metadata("polymarket").display_name, "Polymarket")
+        self.assertEqual(registry.get_metadata("betmgm").display_name, "BetMGM")
+        self.assertIsInstance(registry.create("betmgm"), BetMGMAdapter)
         self.assertEqual(registry.create("polymarket").market_id, "polymarket")
+        self.assertEqual(registry.get_metadata("blinq").display_name, "Blinq")
+        self.assertIsInstance(registry.create("blinq"), BlinqAdapter)
         self.assertEqual(registry.get_metadata("kalshi").display_name, "Kalshi")
         self.assertIsInstance(registry.create("kalshi"), KalshiAdapter)
         self.assertEqual(registry.get_metadata("predictit").display_name, "PredictIt")
         self.assertIsInstance(registry.create("predictit"), PredictItAdapter)
         self.assertEqual(registry.get_metadata("crypto_com_predict").display_name, "Crypto.com Predict / CDNA")
         self.assertIsInstance(registry.create("crypto_com_predict"), CryptoComPredictAdapter)
+        self.assertEqual(registry.get_metadata("fanatics_markets").display_name, "Fanatics Markets")
+        self.assertIsInstance(registry.create("fanatics_markets"), FanaticsMarketsAdapter)
+        self.assertEqual(registry.get_metadata("nadex").display_name, "Nadex")
+        self.assertIsInstance(registry.create("nadex"), NadexAdapter)
+        self.assertIsInstance(registry.create("iowa_electronic_markets"), IowaElectronicMarketsAdapter)
+        self.assertEqual(registry.get_metadata("scicast").display_name, "SciCast")
+        self.assertIsInstance(registry.create("scicast"), SciCastAdapter)
+        self.assertEqual(registry.get_metadata("fanduel_predicts").display_name, "FanDuel Predicts")
+        self.assertIsInstance(registry.create("fanduel_predicts"), FanDuelPredictsAdapter)
+        self.assertEqual(registry.get_metadata("coinbase_prediction_markets").display_name, "Coinbase Prediction Markets")
+        self.assertIsInstance(registry.create("coinbase_prediction_markets"), CoinbasePredictionMarketsAdapter)
+        self.assertEqual(registry.get_metadata("robinhood_prediction_markets").display_name, "Robinhood Prediction Markets")
+        self.assertIsInstance(registry.create("robinhood_prediction_markets"), RobinhoodPredictionMarketsAdapter)
+        self.assertIsInstance(registry.create("kalshi_via_robinhood"), KalshiViaRobinhoodAdapter)
+        self.assertEqual(registry.get_metadata("draftkings_predictions").display_name, "DraftKings Predictions")
+        self.assertIsInstance(registry.create("draftkings_predictions"), DraftKingsPredictionsAdapter)
         self.assertEqual(registry.get_metadata("manifold").display_name, "Manifold Markets")
         self.assertIsInstance(registry.create("manifold"), ManifoldAdapter)
         self.assertEqual(registry.get_metadata("metaculus").display_name, "Metaculus")
         self.assertIsInstance(registry.create("metaculus"), MetaculusAdapter)
+        self.assertEqual(registry.get_metadata("good_judgment_open").display_name, "Good Judgment Open")
+        self.assertIsInstance(registry.create("good_judgment_open"), GoodJudgmentOpenAdapter)
+        self.assertIsInstance(registry.create("hypermind"), HypermindAdapter)
         self.assertEqual(registry.get_metadata("limitless_exchange").display_name, "Limitless Exchange")
         self.assertIsInstance(registry.create("limitless_exchange"), LimitlessAdapter)
         self.assertEqual(registry.get_metadata("sx_bet").display_name, "SX Bet / SX Network")
@@ -140,8 +301,22 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("augur"), AugurAdapter)
         self.assertEqual(registry.get_metadata("omen").display_name, "Omen")
         self.assertIsInstance(registry.create("omen"), OmenAdapter)
+        self.assertEqual(registry.get_metadata("gnosis_prediction_markets").display_name, "Gnosis Prediction Markets")
+        self.assertIsInstance(registry.create("gnosis_prediction_markets"), GnosisPredictionMarketsAdapter)
         self.assertEqual(registry.get_metadata("zeitgeist").display_name, "Zeitgeist")
+        self.assertEqual(registry.get_metadata("reality_eth_markets").display_name, "Reality.eth Markets")
+        self.assertIsInstance(registry.create("reality_eth_markets"), RealityEthMarketsAdapter)
+        self.assertEqual(registry.get_metadata("drift_bet").display_name, "Drift BET")
+        self.assertIsInstance(registry.create("drift_bet"), DriftBetAdapter)
+        self.assertEqual(registry.get_metadata("space").display_name, "Space")
+        self.assertIsInstance(registry.create("space"), SpaceAdapter)
+        self.assertEqual(registry.get_metadata("hedgehog_markets").display_name, "Hedgehog Markets")
+        self.assertIsInstance(registry.create("hedgehog_markets"), HedgehogMarketsAdapter)
+        self.assertEqual(registry.get_metadata("frenzy_finance").display_name, "Frenzy Finance")
+        self.assertIsInstance(registry.create("frenzy_finance"), FrenzyFinanceAdapter)
         self.assertIsInstance(registry.create("zeitgeist"), ZeitgeistAdapter)
+        self.assertEqual(registry.get_metadata("zeitgeist_prediction_pools").display_name, "Zeitgeist Prediction Pools")
+        self.assertIsInstance(registry.create("zeitgeist_prediction_pools"), ZeitgeistPredictionPoolsAdapter)
         self.assertEqual(registry.get_metadata("myriad_markets").display_name, "Myriad Markets")
         self.assertIsInstance(registry.create("myriad_markets"), MyriadAdapter)
         self.assertEqual(registry.get_metadata("xo_market").display_name, "XO Market")
@@ -156,6 +331,37 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("betfair_exchange"), BetfairExchangeAdapter)
         self.assertEqual(registry.get_metadata("xmarket").display_name, "Xmarket")
         self.assertIsInstance(registry.create("xmarket"), XMarketAdapter)
+        self.assertEqual(registry.get_metadata("probable").display_name, "Probable")
+        self.assertIsInstance(registry.create("probable"), ProbableAdapter)
+        self.assertEqual(registry.get_metadata("matchbook").display_name, "Matchbook")
+        self.assertIsInstance(registry.create("matchbook"), MatchbookAdapter)
+        self.assertEqual(registry.get_metadata("prophet_exchange").display_name, "Prophet Exchange")
+        self.assertIsInstance(registry.create("prophet_exchange"), ProphetExchangeAdapter)
+        self.assertEqual(registry.get_metadata("prdt_finance").display_name, "PRDT Finance")
+        self.assertIsInstance(registry.create("prdt_finance"), PRDTFinanceAdapter)
+        self.assertEqual(registry.get_metadata("dflow").display_name, "DFlow")
+        self.assertIsInstance(registry.create("dflow"), DFlowAdapter)
+        self.assertEqual(registry.get_metadata("context_v2").display_name, "Context V2")
+        self.assertIsInstance(registry.create("context_v2"), ContextV2Adapter)
+        self.assertEqual(registry.get_metadata("smarkets").display_name, "Smarkets")
+        self.assertIsInstance(registry.create("smarkets"), SmarketsAdapter)
+        self.assertEqual(registry.get_metadata("thales_market").display_name, "Thales Market")
+        self.assertIsInstance(registry.create("thales_market"), ThalesMarketAdapter)
+        self.assertEqual(registry.get_metadata("metadao").display_name, "MetaDAO")
+        self.assertIsInstance(registry.create("metadao"), MetaDAOAdapter)
+        self.assertEqual(registry.get_metadata("seer").display_name, "Seer")
+        self.assertIsInstance(registry.create("seer"), SeerAdapter)
+        self.assertEqual(registry.get_metadata("hyperliquid").display_name, "Hyperliquid")
+        self.assertIsInstance(registry.create("hyperliquid"), HyperliquidAdapter)
+        self.assertEqual(registry.get_metadata("trueo").display_name, "Trueo")
+        self.assertIsInstance(registry.create("trueo"), TrueoAdapter)
+        self.assertEqual(registry.get_metadata("zetarium_world").display_name, "Zetarium World")
+        self.assertIsInstance(registry.create("zetarium_world"), ZetariumWorldAdapter)
+        self.assertEqual(registry.get_metadata("lamas_finance").display_name, "Lamas Finance")
+        self.assertIsInstance(registry.create("lamas_finance"), LamasFinanceAdapter)
+        self.assertIsInstance(registry.create("ibkr_forecasttrader"), IBKRForecastTraderAdapter)
+        self.assertIsInstance(registry.create("forecastex"), ForecastExAdapter)
+        self.assertIsInstance(registry.create("cme_prediction_markets"), CMEPredictionMarketsAdapter)
 
     def test_non_implemented_catalog_entries_create_stub_adapters(self) -> None:
         registry = build_default_registry()
@@ -200,6 +406,23 @@ class AdapterFoundationTests(unittest.TestCase):
                 continue
             self.assertEqual(metadata.capabilities.to_dict(), {key: False for key in CAPABILITY_KEYS})
 
+    def test_history_capability_flags_match_adapters_with_documented_feeds(self) -> None:
+        registry = build_default_registry()
+
+        for market_id, expected in HISTORY_CAPABILITIES.items():
+            with self.subTest(market_id=market_id):
+                capabilities = registry.create(market_id).capabilities.to_dict()
+                self.assertEqual(
+                    {name for name in ("trade_history", "candle_history") if capabilities[name]},
+                    expected,
+                )
+
+        for market_id in set(MARKET_IDS) - set(HISTORY_CAPABILITIES):
+            with self.subTest(market_id=market_id):
+                capabilities = registry.create(market_id).capabilities.to_dict()
+                self.assertFalse(capabilities["trade_history"])
+                self.assertFalse(capabilities["candle_history"])
+
     def test_all_default_adapters_satisfy_basic_contract(self) -> None:
         registry = build_default_registry()
 
@@ -214,6 +437,226 @@ class AdapterFoundationTests(unittest.TestCase):
             self.assertEqual(health["market_id"], market_id)
             self.assertIn("ok", health)
             self.assertIn("message", health)
+
+    def test_advertised_capabilities_have_concrete_operations(self) -> None:
+        registry = build_default_registry()
+
+        for market_id in MARKET_IDS:
+            with self.subTest(market_id=market_id):
+                self.assertEqual(capability_contract_issues(registry.create(market_id)), ())
+
+    def test_opaque_signed_transaction_forwarders_fail_closed_before_runtime_calls(self) -> None:
+        registry = build_default_registry()
+
+        def runtime_guard():
+            calls = []
+
+            def unexpected_runtime_call(*args, **kwargs):
+                calls.append((args, kwargs))
+                raise AssertionError("fail-closed live trading reached the adapter runtime")
+
+            return calls, unexpected_runtime_call
+
+        for market_id in FAIL_CLOSED_SIGNED_FORWARDERS:
+            with self.subTest(market_id=market_id):
+                adapter = registry.create(
+                    market_id,
+                    {"live_trading_enabled": True, "live_trading_confirmed": True},
+                )
+                runtime_calls, unexpected_runtime_call = runtime_guard()
+
+                adapter.runtime.request_json = unexpected_runtime_call  # type: ignore[method-assign]
+                adapter.runtime.get_json = unexpected_runtime_call  # type: ignore[method-assign]
+                contract_id = (
+                    "0x0000000000000000000000000000000000000001:0"
+                    if market_id == "trueo"
+                    else "contract-1"
+                )
+
+                with self.assertRaises(UnsupportedFeatureError) as ctx:
+                    adapter.place_live_order(
+                        PaperOrderRequest(market_id, contract_id, "BUY", 1.0, 0.5)
+                    )
+
+                self.assertEqual(ctx.exception.market_id, market_id)
+                self.assertEqual(ctx.exception.feature, "live_trading")
+                self.assertEqual(runtime_calls, [])
+
+        self.assertTrue(registry.create("zetarium_world").capabilities.live_trading)
+
+    def test_non_live_catalog_adapters_cannot_report_live_submission_health(self) -> None:
+        registry = build_default_registry()
+        config = {
+            "live_trading_enabled": True,
+            "live_trading_confirmed": True,
+            "gnosis_submit_signed_transactions": True,
+            "hedgehog_submit_signed_transactions": True,
+            "lamas_finance_submit_signed_transactions": True,
+            "metadao_submit_signed_transactions": True,
+            "omen_submit_signed_transactions": True,
+            "seer_submit_signed_transactions": True,
+            "thales_submit_signed_transactions": True,
+            "trueo_submit_signed_transactions": True,
+            "zeitgeist_submit_signed_extrinsics": True,
+        }
+
+        for market_id in MARKET_IDS:
+            with self.subTest(market_id=market_id):
+                adapter = registry.create(market_id, config)
+                if adapter.capabilities.live_trading:
+                    continue
+                health = adapter.health_check()
+
+                self.assertFalse(adapter.capabilities.live_trading)
+                self.assertFalse(health.get("live_trading_supported", False))
+                self.assertFalse(health.get("live_trading_enabled", False))
+                self.assertFalse(health.get("signed_transaction_submission_enabled", False))
+                self.assertFalse(health.get("signed_extrinsic_submission_enabled", False))
+
+    def test_order_management_health_inventories_exclude_removed_mutations(self) -> None:
+        registry = build_default_registry()
+        expected = {
+            "betfair_exchange": (
+                "order_management_endpoints",
+                ["cancelOrders"],
+            ),
+            "hyperliquid": (
+                "authenticated_order_management_endpoints",
+                [
+                    "POST /exchange action.cancel/cancelByCloid",
+                    "POST /exchange action.scheduleCancel",
+                ],
+            ),
+            "myriad_markets": (
+                "authenticated_order_management_endpoints",
+                [
+                    "/orders/{orderHash}",
+                    "/orders/cancel-batch",
+                    "/orders/cancel-all",
+                ],
+            ),
+            "xmarket": (
+                "authenticated_order_management_endpoints",
+                ["POST /order/cancel-batch"],
+            ),
+        }
+
+        for market_id, (health_key, endpoints) in expected.items():
+            with self.subTest(market_id=market_id):
+                adapter = registry.create(market_id)
+                self.assertEqual(adapter.health_check()[health_key], endpoints)
+
+    def test_budget_buy_preflight_uses_collateral_size_for_notional_limit(self) -> None:
+        adapter_cases = (
+            (ManifoldAdapter, "manifold", "market:YES"),
+            (MyriadAdapter, "myriad_markets", "501:1"),
+        )
+        config = {
+            "live_trading_enabled": True,
+            "live_trading_confirmed": True,
+            "live_trading_max_notional": 25,
+        }
+
+        for adapter_cls, market_id, contract_id in adapter_cases:
+            with self.subTest(market_id=market_id):
+                adapter = adapter_cls(config)
+                with self.assertRaises(MarketConfigurationError):
+                    adapter.preflight_live_order(
+                        PaperOrderRequest(market_id, contract_id, "BUY", 100, 0.2)
+                    )
+
+                preview = adapter.preflight_live_order(
+                    PaperOrderRequest(market_id, contract_id, "BUY", 20, 0.2)
+                )
+                self.assertEqual(preview["approx_notional"], 20)
+
+    def test_default_live_preflight_uses_full_size_as_conservative_exposure(self) -> None:
+        class ShareSizedLiveAdapter(MarketAdapter):
+            metadata = MarketMetadata(
+                market_id="share_sized_live",
+                display_name="Share-sized Live",
+                capabilities=MarketCapabilities(live_trading=True),
+            )
+
+        adapter = ShareSizedLiveAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_notional": 25,
+            }
+        )
+        with self.assertRaisesRegex(MarketConfigurationError, "notional 100 exceeds configured max 25"):
+            adapter.preflight_live_order(
+                PaperOrderRequest("share_sized_live", "contract-1", "BUY", 100, 0.2)
+            )
+
+    def test_alert_capability_requires_normalized_price_reading(self) -> None:
+        class AlertWithoutPriceAdapter(MarketAdapter):
+            metadata = MarketMetadata(
+                market_id="alert_without_price",
+                display_name="Alert Without Price",
+                capabilities=MarketCapabilities(alerts=True),
+            )
+
+        self.assertEqual(
+            capability_contract_issues(AlertWithoutPriceAdapter()),
+            ("alerts require price_reading for the shared price-trigger engine",),
+        )
+
+    def test_declared_authenticated_operations_have_cli_surfaces(self) -> None:
+        import market_sentinel_cli
+
+        registry = build_default_registry()
+        account_operations = frozenset(market_sentinel_cli.MARKET_ACCOUNT_OPERATIONS)
+        order_operations = frozenset(market_sentinel_cli.MARKET_ORDER_MANAGEMENT_OPERATIONS)
+        for market_id in MARKET_IDS:
+            with self.subTest(market_id=market_id):
+                self.assertEqual(
+                    account_surface_issues(
+                        registry.create(market_id),
+                        cli_account_operations=account_operations,
+                        cli_order_operations=order_operations,
+                    ),
+                    (),
+                )
+
+    def test_support_matrix_covers_every_catalog_market_truthfully(self) -> None:
+        registry = build_default_registry()
+
+        rows = {
+            market_id: support_matrix_entry(
+                registry.get_metadata(market_id),
+                registry.create(market_id),
+                blocker=VERIFIED_BLOCKERS.get(market_id),
+            )
+            for market_id in MARKET_IDS
+        }
+        self.assertEqual(set(rows), set(MARKET_IDS))
+
+        for market_id, row in rows.items():
+            with self.subTest(market_id=market_id):
+                self.assertIn(row["implementation_status"], {"implemented", "verified_blocked"})
+                self.assertEqual(set(row["operations"]), {
+                    "market_discovery",
+                    "event_listing",
+                    "price_reading",
+                    "orderbook_reading",
+                    "trade_history",
+                    "candle_history",
+                    "alerts",
+                    "paper_trading",
+                    "live_trading",
+                    "copy_trading",
+                })
+                self.assertEqual(set(row["counts"]), {"supported", "guarded", "unsupported", "blocked"})
+                self.assertEqual(row["audit"]["ok"], not row["audit"]["capability_contract_issues"])
+                if market_id in VERIFIED_BLOCKED_MARKETS:
+                    self.assertEqual(row["implementation_status"], "verified_blocked")
+                    self.assertIsNotNone(row["blocker"])
+                    self.assertTrue(all(item["status"] == "blocked" for item in row["operations"].values()))
+                else:
+                    self.assertEqual(row["implementation_status"], "implemented")
+                    self.assertIsNone(row["blocker"])
 
     def test_stub_adapters_reject_all_operational_methods(self) -> None:
         registry = build_default_registry()
@@ -235,6 +678,8 @@ class AdapterFoundationTests(unittest.TestCase):
                 ("event_listing", lambda adapter=adapter: adapter.list_contracts("event-1")),
                 ("price_reading", lambda adapter=adapter: adapter.get_price("contract-1")),
                 ("orderbook_reading", lambda adapter=adapter: adapter.get_orderbook("contract-1")),
+                ("trade_history", lambda adapter=adapter: adapter.list_trades("contract-1")),
+                ("candle_history", lambda adapter=adapter: adapter.list_candles("contract-1")),
                 ("paper_trading", lambda adapter=adapter: adapter.place_paper_order(order)),
                 ("live_trading", lambda adapter=adapter: adapter.place_live_order(order)),
                 ("copy_trading", lambda adapter=adapter: adapter.copy_trade_from_activity({})),
@@ -260,6 +705,20 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIn("Custom Stub", str(ctx.exception))
         self.assertIn("official adapter", str(ctx.exception))
         self.assertIn("not been implemented", str(ctx.exception))
+
+        with self.assertRaises(UnsupportedFeatureError) as history_ctx:
+            adapter.list_trades("contract-1")
+
+        self.assertEqual(history_ctx.exception.market_id, "custom_stub")
+        self.assertEqual(history_ctx.exception.feature, "trade_history")
+        self.assertIn("Custom Stub", str(history_ctx.exception))
+
+        with self.assertRaises(UnsupportedFeatureError) as candle_ctx:
+            adapter.list_candles("contract-1")
+
+        self.assertEqual(candle_ctx.exception.market_id, "custom_stub")
+        self.assertEqual(candle_ctx.exception.feature, "candle_history")
+        self.assertIn("Custom Stub", str(candle_ctx.exception))
 
     def test_registry_registers_adapter_and_creates_configured_instance(self) -> None:
         registry = AdapterRegistry()

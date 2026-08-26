@@ -1,0 +1,6 @@
+{
+  "results": [
+    {"orderId": 106817811, "result": "ok"},
+    {"orderId": 106817812, "error": "OrderNotFound", "message": "Order 106817812 not found"}
+  ]
+}

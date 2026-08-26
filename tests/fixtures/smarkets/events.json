@@ -1,0 +1,11 @@
+{
+  "events": [
+    {
+      "id": "event-1",
+      "name": "Bitcoin price event",
+      "state": "upcoming",
+      "start_datetime": "2026-12-31T00:00:00Z",
+      "slug": "bitcoin-price-event"
+    }
+  ]
+}

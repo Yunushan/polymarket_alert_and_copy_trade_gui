@@ -1,0 +1,34 @@
+{
+  "markets": [
+    {
+      "id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "question": "Will BTC trade above $100,000 by year end?",
+      "shortQuestion": "BTC above $100k?",
+      "status": "active",
+      "resolutionStatus": "none",
+      "outcomeTokens": [
+        "0x1111111111111111111111111111111111111111",
+        "0x2222222222222222222222222222222222222222"
+      ],
+      "outcomes": ["Yes", "No"],
+      "outcomePrices": [
+        {
+          "outcomeIndex": 0,
+          "bestBid": 0.42,
+          "bestAsk": 0.46,
+          "midPrice": 0.44,
+          "lastPrice": 0.43
+        },
+        {
+          "outcomeIndex": 1,
+          "bestBid": 0.54,
+          "bestAsk": 0.58,
+          "midPrice": 0.56,
+          "lastPrice": 0.57
+        }
+      ],
+      "metadata": {"slug": "btc-above-100k", "categories": ["crypto"]}
+    }
+  ],
+  "cursor": null
+}

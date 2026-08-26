@@ -1,0 +1,34 @@
+{
+  "BTC": {
+    "2026-12-31T12:00:00.000Z": {
+      "UP": [
+        {
+          "address": "0x1111111111111111111111111111111111111111",
+          "asset": "BTC",
+          "maturityDate": "2026-12-31T12:00:00.000Z",
+          "position": "UP",
+          "strikePrice": 100000,
+          "price": 0.58,
+          "bonus": 0,
+          "liquidity": 25000,
+          "skewImpact": 0.01,
+          "isOpen": true
+        }
+      ],
+      "DOWN": [
+        {
+          "address": "0x1111111111111111111111111111111111111111",
+          "asset": "BTC",
+          "maturityDate": "2026-12-31T12:00:00.000Z",
+          "position": "DOWN",
+          "strikePrice": 100000,
+          "price": 0.42,
+          "bonus": 0,
+          "liquidity": 25000,
+          "skewImpact": 0.01,
+          "isOpen": true
+        }
+      ]
+    }
+  }
+}

@@ -51,6 +51,36 @@ class StubMarketAdapter(MarketAdapter):
     def get_orderbook(self, contract_id: str):
         self.ensure_capability("orderbook_reading")
 
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ):
+        """Reject history reads with the same market-specific blocker context.
+
+        History was added after the original stub surface.  Keeping the
+        operation explicit prevents verified-blocked markets from falling
+        through to the generic base error and makes every adapter operation
+        fail closed consistently.
+        """
+
+        self.ensure_capability("trade_history")
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ):
+        """Reject candle reads with the verified blocker explanation."""
+
+        self.ensure_capability("candle_history")
+
     def place_paper_order(self, order: PaperOrderRequest):
         self.ensure_capability("paper_trading")
 

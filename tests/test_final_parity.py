@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from app import tkinter_smoke_payload
 from core.models import AppConfig
 from market_adapters import MARKET_IDS
+from market_adapters.registry import build_default_registry
 from scripts import verify_live_validation_report_smoke as live_smoke
 from web_api import app_state_payload
 
@@ -16,6 +18,38 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class FinalParityTests(unittest.TestCase):
+    def test_react_account_operation_union_covers_registry_allow_list(self) -> None:
+        """Prevent a newly exposed adapter account operation from becoming UI-only dynamic data."""
+
+        source = (ROOT / "frontend" / "src" / "types.ts").read_text(encoding="utf-8")
+        block = source.split("export type MarketAccountOperation =", 1)[1].split(
+            "export interface MarketAccountPayload", 1
+        )[0]
+        declared = set(re.findall(r'^\s*\|\s*"([^"\\]+)"', block, flags=re.MULTILINE))
+        registry = build_default_registry()
+        expected = {
+            str(operation).strip().lower()
+            for metadata in registry.list_metadata()
+            for operation in getattr(registry.create(metadata.market_id), "account_recovery_operations", ())
+        }
+        self.assertTrue(expected <= declared, f"Frontend account operation union is missing: {sorted(expected - declared)}")
+
+    def test_react_order_management_union_covers_registry_allow_list(self) -> None:
+        """Keep every guarded adapter mutation representable by the React client."""
+
+        source = (ROOT / "frontend" / "src" / "types.ts").read_text(encoding="utf-8")
+        block = source.split("export type MarketOrderManagementOperation =", 1)[1].split(
+            "export interface MarketOrderManagementPayload", 1
+        )[0]
+        declared = set(re.findall(r'^\s*\|\s*"([^"\\]+)"', block, flags=re.MULTILINE))
+        registry = build_default_registry()
+        expected = {
+            str(operation).strip().lower()
+            for metadata in registry.list_metadata()
+            for operation in getattr(registry.create(metadata.market_id), "order_management_operations", ())
+        }
+        self.assertTrue(expected <= declared, f"Frontend order operation union is missing: {sorted(expected - declared)}")
+
     def test_tkinter_smoke_payload_proves_fallback_gui_contract(self) -> None:
         payload = tkinter_smoke_payload()
 
@@ -71,6 +105,44 @@ class FinalParityTests(unittest.TestCase):
 
         self.assertIn("import type { FormEvent, ReactNode } from \"react\";", source)
         self.assertIn("{ children: ReactNode; tone?: \"good\" | \"warn\" | \"neutral\" }", source)
+
+    def test_react_sx_bet_order_management_is_wired_through_settings_and_form(self) -> None:
+        source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        type_source = (ROOT / "frontend" / "src" / "types.ts").read_text(encoding="utf-8")
+
+        self.assertIn("sx_bet_order_management_enabled", source)
+        self.assertIn('selectedMarket.market_id === "sx_bet"', source)
+        self.assertIn("cancel_event_orders", source)
+        self.assertIn("SX Bet v3 uses fixed DELETE /orders-v3", source)
+        self.assertIn("I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS", source)
+        self.assertIn("account_market_hash", source)
+        self.assertIn("account_client_order_id", source)
+        self.assertIn("account_start_date", source)
+        self.assertIn("account_sort_asc", source)
+        self.assertIn("account_outcome_id", source)
+        self.assertIn("account_locale", source)
+        self.assertIn("account_exclude_item", source)
+        self.assertIn("account_from_currency", source)
+        self.assertIn("account_order_by", source)
+        self.assertIn("account_sort_dir", source)
+        self.assertIn("account_search", source)
+        self.assertIn("account_with_cash_outs", source)
+        self.assertIn("account_before", source)
+        self.assertIn("account_after", source)
+        self.assertIn("account_before_time", source)
+        self.assertIn("account_after_time", source)
+        self.assertIn("force: form.account_historical", source)
+        self.assertIn("next: form.account_cursor", source)
+        self.assertIn('"order_by_client_id"', type_source)
+
+    def test_react_xo_order_management_is_wired_through_settings_and_form(self) -> None:
+        source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+        self.assertIn('selectedMarket.market_id === "xo_market"', source)
+        self.assertIn("xo_order_management_enabled", source)
+        self.assertIn("XO order id", source)
+        self.assertIn("XO Market cancellation", source)
+        self.assertIn("isXo", source)
 
     def test_react_analytics_source_exposes_direct_mdd_lookup_and_cached_detail(self) -> None:
         app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")

@@ -1,0 +1,18 @@
+{
+  "title": "$DOGE above $0.21652 on Sep 1, 12:00 UTC?",
+  "prices": [
+    {
+      "price": 0.75,
+      "timestamp": "1736944200000"
+    },
+    {
+      "price": 0.72,
+      "timestamp": "1736943300000"
+    },
+    {
+      "price": 0.7,
+      "timestamp": "1736942400000"
+    }
+  ],
+  "marketStatus": "FUNDED"
+}

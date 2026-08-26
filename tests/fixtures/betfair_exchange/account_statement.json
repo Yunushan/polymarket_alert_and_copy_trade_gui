@@ -1,0 +1,21 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "accountStatement": [
+      {
+        "itemDate": "2026-06-01T11:00:00.000Z",
+        "refId": "bet-1",
+        "itemClass": "BET",
+        "amount": 4.0,
+        "balance": 129.5,
+        "item": "Bet settlement",
+        "legacyData": {
+          "marketId": "1.234",
+          "betId": "bet-1"
+        }
+      }
+    ],
+    "moreAvailable": false
+  },
+  "id": 1
+}

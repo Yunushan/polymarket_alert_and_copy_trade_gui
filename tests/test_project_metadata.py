@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
+
+from scripts.verify_python_dist_artifacts import REQUIRED_SDIST_MEMBERS
 
 try:
     import tomllib
@@ -15,6 +18,47 @@ APP_TITLE = "MarketSentinel"
 
 
 class ProjectMetadataTests(unittest.TestCase):
+    def test_repository_hygiene_policy(self) -> None:
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+        self.assertIn("* text=auto eol=lf", attributes)
+        self.assertIn("*.bat text eol=crlf", attributes)
+        self.assertIn("*.cmd text eol=crlf", attributes)
+
+        if not (ROOT / ".git").exists():
+            self.skipTest("Git metadata is unavailable in this source tree")
+
+        try:
+            tracked_result = subprocess.run(
+                ["git", "ls-files", "-z"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            )
+            eol_result = subprocess.run(
+                ["git", "ls-files", "--eol"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        except FileNotFoundError:
+            self.skipTest("Git executable is unavailable")
+
+        tracked = tracked_result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+        generated = sorted(
+            path
+            for path in tracked
+            if "/__pycache__/" in f"/{path}" or path.endswith((".pyc", ".pyo", ".pyd"))
+        )
+        non_normalized = sorted(
+            line for line in eol_result.stdout.splitlines() if line.startswith(("i/crlf", "i/mixed"))
+        )
+
+        self.assertEqual(generated, [], f"generated Python artifacts are tracked: {generated}")
+        self.assertEqual(non_normalized, [], f"non-normalized Git blobs are tracked: {non_normalized}")
+
     def test_project_name_uses_dashes_not_underscores(self) -> None:
         data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         frontend_package = (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
@@ -79,18 +123,33 @@ class ProjectMetadataTests(unittest.TestCase):
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
 
         for fragment in (
+            "include requirements-bootstrap.lock",
+            "include requirements-security.lock",
             "recursive-include .github",
             "recursive-include assets",
             "recursive-include data",
             "recursive-include docs",
             "recursive-include frontend",
             "recursive-include scripts",
-            "recursive-include tests",
+            "recursive-include tests *.csv *.json *.py *.txt",
             "prune frontend/dist",
             "prune frontend/node_modules",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, manifest)
+
+        self.assertTrue(
+            {
+                "requirements-bootstrap.lock",
+                "requirements-bootstrap.txt",
+                "requirements-build.txt",
+                "requirements-security.lock",
+                "requirements-security.txt",
+                "tests/fixtures/hypermind/outcomes.txt",
+                "tests/fixtures/hypermind/prices.csv",
+                "tests/fixtures/iowa_electronic_markets/powell_price_data.txt",
+            }.issubset(REQUIRED_SDIST_MEMBERS)
+        )
 
 
 if __name__ == "__main__":

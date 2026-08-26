@@ -1,0 +1,22 @@
+{
+  "questions": [
+    {
+      "question_id": "q1001",
+      "name": "Will the 2015 summit occur?",
+      "question_text": "Will the 2015 summit occur before June 2015?",
+      "type": "binary",
+      "choices": ["Yes", "No"],
+      "status": "resolved",
+      "resolution": "Yes",
+      "resolution_at": "2015-06-12T00:00:00Z",
+      "category": "world"
+    },
+    {
+      "question_id": "q1002",
+      "name": "Which team wins the archived final?",
+      "type": "multiple",
+      "choices": ["Alpha", "Beta", "Gamma"],
+      "status": "closed"
+    }
+  ]
+}

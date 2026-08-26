@@ -1,0 +1,22 @@
+{
+  "orders": [
+    {
+      "order_id": "order-kalshi-1",
+      "client_order_id": "client-kalshi-1",
+      "ticker": "KXFED-26MAY-TARGET-425",
+      "outcome_side": "yes",
+      "book_side": "bid",
+      "type": "limit",
+      "status": "resting",
+      "yes_price_dollars": "0.4200",
+      "no_price_dollars": "0.5800",
+      "fill_count_fp": "2.00",
+      "remaining_count_fp": "10.00",
+      "initial_count_fp": "12.00",
+      "created_time": "2026-05-01T12:00:00Z",
+      "last_update_time": "2026-05-01T12:01:00Z",
+      "subaccount_number": 0
+    }
+  ],
+  "cursor": "orders-next"
+}

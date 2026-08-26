@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "order": {
+    "marketId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "trader": "0x3333333333333333333333333333333333333333",
+    "nonce": "0x1",
+    "side": 0,
+    "price": "440000",
+    "size": "5000000",
+    "status": "open"
+  }
+}

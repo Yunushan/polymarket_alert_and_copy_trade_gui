@@ -1,0 +1,12 @@
+{
+  "offers": [
+    {
+      "id": 404,
+      "status": "cancelled"
+    },
+    {
+      "id": 405,
+      "status": "cancelled"
+    }
+  ]
+}

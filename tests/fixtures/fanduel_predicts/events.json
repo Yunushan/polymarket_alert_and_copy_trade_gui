@@ -1,0 +1,11 @@
+{
+  "data": [
+    {
+      "id": "fanduel-og-world-cup-a1",
+      "title": "Will the host nation win the opening match?",
+      "status": "active",
+      "contracts_count": 2
+    }
+  ],
+  "pagination": {"limit": 10, "next_cursor": null, "has_more": false}
+}

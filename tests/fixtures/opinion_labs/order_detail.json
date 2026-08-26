@@ -1,0 +1,25 @@
+{
+  "code": 0,
+  "msg": "success",
+  "result": {
+    "orderData": {
+      "orderId": "order-1",
+      "status": 2,
+      "statusEnum": "Filled",
+      "marketId": 77,
+      "side": 1,
+      "sideEnum": "Buy",
+      "outcome": "Yes",
+      "orderShares": "4",
+      "filledShares": "4",
+      "createdAt": 1733312400000
+    },
+    "trades": [
+      {
+        "txHash": "0xopiniontrade2",
+        "price": "0.65",
+        "shares": "4"
+      }
+    ]
+  }
+}

@@ -24,6 +24,7 @@ class ManifoldAdapterTests(unittest.TestCase):
         market_multi = load_fixture("market_multi")
         prob_binary = load_fixture("prob_binary")
         prob_multi = load_fixture("prob_multi")
+        bets_activity = load_fixture("bets_activity")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/search-markets"):
@@ -36,6 +37,8 @@ class ManifoldAdapterTests(unittest.TestCase):
                 return prob_binary
             if url.endswith("/market/mf-multi-1/prob"):
                 return prob_multi
+            if url.endswith("/bets"):
+                return bets_activity
             raise AssertionError(f"unexpected Manifold URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -50,10 +53,12 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.event_listing)
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertFalse(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.candle_history)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("api.manifold.markets", health["api_base_url"])
+        self.assertTrue(health["activity_feed_supported"])
 
     def test_list_events_uses_search_endpoint_and_maps_markets(self) -> None:
         adapter = self.make_adapter()
@@ -96,6 +101,120 @@ class ManifoldAdapterTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.market_id, "manifold")
         self.assertEqual(ctx.exception.feature, "orderbook_reading")
+
+    def test_public_bet_activity_is_normalized_for_copy_simulation(self) -> None:
+        adapter = self.make_adapter()
+
+        activity = adapter.list_activity("manifold:ForecastUser", limit=10)
+
+        self.assertEqual(len(activity), 3)
+        self.assertEqual(activity[0]["proxyWallet"], "manifold:forecastuser")
+        self.assertEqual(activity[0]["side"], "BUY")
+        self.assertAlmostEqual(activity[0]["size"], 12.5)
+        self.assertEqual(activity[0]["asset"], "mf-binary-1:YES")
+        self.assertEqual(activity[1]["side"], "SELL")
+        self.assertAlmostEqual(activity[1]["size"], 6.25)
+        self.assertEqual(activity[1]["shares"], 6.25)
+        self.assertEqual(activity[2]["asset"], "mf-multi-1:ANSWER:answer-a")
+        self.assertEqual(activity[2]["price"], 0.35)
+        self.assertEqual(activity[0]["timestamp"], 1760000010)
+        self.assertTrue(activity[0]["transactionHash"].startswith("manifold-bet:"))
+
+    def test_public_trade_history_normalizes_fills_and_documented_time_filters(self) -> None:
+        adapter = ManifoldAdapter()
+        trades_fixture = load_fixture("bets_trades")
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params))
+            if url.endswith("/bets"):
+                return trades_fixture
+            raise AssertionError(f"unexpected Manifold URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+
+        trades = adapter.list_trades(
+            "mf-binary-1:YES",
+            limit=2000,
+            before=1760000030,
+            after=1760000000,
+        )
+
+        self.assertEqual(len(trades), 2)
+        self.assertEqual([trade.trade_id for trade in trades], ["trade-bet-1:0", "trade-bet-1:1"])
+        self.assertEqual([trade.side for trade in trades], ["BUY", "BUY"])
+        self.assertAlmostEqual(trades[0].price, 0.6, places=6)
+        self.assertAlmostEqual(trades[1].size, 6.6666666667, places=6)
+        self.assertEqual(trades[0].timestamp, 1760000015)
+        self.assertEqual(trades[0].contract_id, "mf-binary-1:YES")
+        self.assertEqual(
+            calls[0][1],
+            {
+                "contractId": "mf-binary-1",
+                "limit": 1000,
+                "beforeTime": 1760000030000,
+                "afterTime": 1760000000000,
+            },
+        )
+
+        multi_trades = adapter.list_trades("mf-multi-1:ANSWER:answer-a")
+        self.assertEqual(len(multi_trades), 1)
+        self.assertEqual(multi_trades[0].contract_id, "mf-multi-1:ANSWER:answer-a")
+        self.assertAlmostEqual(multi_trades[0].price, 0.6)
+
+    def test_candle_history_derives_bounded_ohlcv_from_public_fills(self) -> None:
+        adapter = ManifoldAdapter()
+        trades_fixture = load_fixture("bets_trades")
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            if url.endswith("/bets"):
+                return trades_fixture
+            raise AssertionError(f"unexpected Manifold URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+
+        candles = adapter.list_candles(
+            "mf-binary-1:YES",
+            resolution="1m",
+            from_timestamp=1760000000,
+            to_timestamp=1760000060,
+        )
+
+        self.assertEqual(len(candles), 1)
+        candle = candles[0]
+        self.assertEqual(candle.timestamp, 1759999980.0)
+        self.assertAlmostEqual(candle.open, 0.6)
+        self.assertAlmostEqual(candle.high, 0.6)
+        self.assertAlmostEqual(candle.low, 0.6)
+        self.assertAlmostEqual(candle.close, 0.6)
+        self.assertAlmostEqual(candle.volume or 0, 10.0)
+        self.assertTrue(candle.raw["derived"])
+        self.assertEqual(candle.raw["source"], "manifold_public_bet_fills")
+        self.assertEqual(candle.raw["trade_ids"], ["trade-bet-1:0", "trade-bet-1:1"])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("mf-binary-1:YES", resolution="2h")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("mf-binary-1:YES", from_timestamp=10, to_timestamp=9)
+
+    def test_activity_requires_prefixed_safe_manifold_identity(self) -> None:
+        adapter = self.make_adapter()
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("ForecastUser")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("manifold:../etc/passwd")
+
+    def test_copy_trade_from_activity_builds_manifold_sell_paper_intent(self) -> None:
+        adapter = self.make_adapter()
+        activity = adapter.list_activity("manifold:forecastuser")[1]
+
+        result = adapter.copy_trade_from_activity(activity)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.raw["endpoint"], "/market/mf-binary-1/sell")
+        self.assertEqual(result.raw["request"], {"shares": 6.25, "outcome": "NO"})
+        self.assertAlmostEqual(result.raw["reference_price"], 0.42)
 
     def test_paper_order_builds_documented_dry_run_payload(self) -> None:
         adapter = self.make_adapter()
@@ -212,6 +331,46 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertEqual(payload, {"shares": 4.0, "outcome": "NO"})
         self.assertEqual(headers["Authorization"], "Key unit-test-key")
 
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            with self.assertRaisesRegex(MarketConfigurationError, "does not support a wire-enforced limit"):
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        market_id="manifold",
+                        contract_id="mf-binary-1:NO",
+                        side="SELL",
+                        size=4,
+                        limit_price=0.60,
+                    )
+                )
+
+    def test_live_sell_cannot_override_the_preflighted_share_count(self) -> None:
+        adapter = ManifoldAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_size": 5,
+            }
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append(json_body)
+            return {"sold": True}
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            adapter.place_live_order(
+                PaperOrderRequest(
+                    market_id="manifold",
+                    contract_id="mf-binary-1:NO",
+                    side="SELL",
+                    size=4,
+                    metadata={"shares": 1_000_000},
+                )
+            )
+
+        self.assertEqual(calls, [{"shares": 4.0, "outcome": "NO"}])
+
     def test_live_buy_for_single_answer_is_blocked_until_documented_shape_maps_safely(self) -> None:
         adapter = ManifoldAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
 
@@ -227,6 +386,93 @@ class ManifoldAdapterTests(unittest.TestCase):
                 )
 
         self.assertIn("multi-bet", str(ctx.exception))
+
+    def test_authenticated_account_reads_use_documented_me_and_bets_filters(self) -> None:
+        adapter = ManifoldAdapter()
+        me = load_fixture("me")
+        bets = load_fixture("bets_account")
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params, headers))
+            if url.endswith("/me"):
+                return me
+            if url.endswith("/bets"):
+                return bets
+            raise AssertionError(f"unexpected Manifold URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            account = adapter.account_recovery("account")
+            active = adapter.account_recovery(
+                "active_orders",
+                contract_id="mf-binary-1:YES",
+                limit=2000,
+                before="bet-open-1",
+                after_time=1760000000,
+            )
+            history = adapter.account_recovery("order_history", limit=10, before_time=1760000030)
+
+        self.assertEqual(account["id"], "user-123")
+        self.assertEqual(active["response"], bets)
+        self.assertEqual(active["parameters"]["userId"], "user-123")
+        self.assertEqual(active["parameters"]["contractId"], "mf-binary-1")
+        self.assertEqual(active["parameters"]["kinds"], "open-limit")
+        self.assertEqual(active["parameters"]["limit"], 1000)
+        self.assertEqual(active["parameters"]["afterTime"], 1760000000000)
+        self.assertNotIn("kinds", history["parameters"])
+        self.assertEqual(calls[0][2]["Authorization"], "Key unit-test-key")
+        self.assertTrue(calls[2][0].endswith("/bets"))
+
+    def test_account_reads_reject_unsafe_ids_and_reversed_time_bounds(self) -> None:
+        adapter = ManifoldAdapter()
+        adapter.runtime.get_json = lambda url, *, params=None, headers=None: load_fixture("me")  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.account_recovery("active_orders", before="../outside")
+            with self.assertRaises(MarketConfigurationError):
+                adapter.account_recovery(
+                    "order_history",
+                    before_time=10,
+                    after_time=20,
+                )
+
+    def test_guarded_open_limit_cancellation_uses_fixed_endpoint_and_confirmation(self) -> None:
+        adapter = ManifoldAdapter(
+            {
+                "manifold_order_management_enabled": True,
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+            }
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append((method, url, params, json_body, headers))
+            return load_fixture("cancel_response")
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            result = adapter.manage_orders(
+                "cancel_order",
+                order_id="bet-open-1",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+
+        self.assertTrue(result["live"])
+        self.assertEqual(result["response"]["isCancelled"], True)
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/bet/bet-open-1/cancel"))
+        self.assertEqual(calls[0][4]["Authorization"], "Key unit-test-key")
+        with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "cancel_order",
+                    order_id="../unsafe",
+                    confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders("cancel_order", order_id="bet-open-1")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+{
+  "pricePerPosition": 0.58,
+  "payout": 172.4,
+  "potenitialProfit": {
+    "usd": 72.4,
+    "percentage": 0.724
+  },
+  "actualBuyInCollateralAmount": 100.01,
+  "actualBuyInUsdAmount": 100.01,
+  "skew": 0.01
+}

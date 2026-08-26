@@ -1,0 +1,24 @@
+{
+  "status": "success",
+  "data": {
+    "orders": [
+      {
+        "id": "0xd9b693a1075ab77c0638fe98fcd3144dbb8f91d0f7ee454d442bf25ca7cbcb66",
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "userAddress": "0xbcc6D643e4159A75ED1dB4e13330230B82F2AEe5",
+        "wallet": "0x4361123dbdc1D812fdf7D27045aF358C9C8AA70A",
+        "isBettingOutcomeOne": true,
+        "percentageOdds": "40000000000000000000",
+        "totalBetSize": "2000000",
+        "remainingSize": "2000000",
+        "expiry": null,
+        "status": "ACTIVE",
+        "inactiveReason": null,
+        "eventId": "L18272456",
+        "createdAt": "2026-07-31T18:45:07.437Z",
+        "updatedAt": "2026-07-31T18:45:07.456Z"
+      }
+    ],
+    "nextKey": "next-orders-key"
+  }
+}

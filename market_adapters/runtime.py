@@ -108,35 +108,84 @@ class AdapterRuntime:
         params: Optional[Mapping[str, Any]] = None,
         json_body: Any = None,
         headers: Optional[Mapping[str, str]] = None,
+        max_response_bytes: Optional[int] = None,
     ) -> Any:
+        if (
+            max_response_bytes is not None
+            and (
+                isinstance(max_response_bytes, bool)
+                or not isinstance(max_response_bytes, int)
+                or max_response_bytes < 1
+            )
+        ):
+            raise MarketConfigurationError("HTTP JSON response byte cap must be a positive integer.")
         self.rate_limiter.wait()
         request_headers = {"Accept": "application/json", "User-Agent": self.user_agent}
         request_headers.update(dict(headers or {}))
+        request_options: Dict[str, Any] = {
+            "params": dict(params or {}),
+            "json": json_body,
+            "headers": request_headers,
+            "timeout": self.timeout_seconds,
+        }
+        if max_response_bytes is not None:
+            request_options["stream"] = True
         try:
             response = self.session.request(
                 method.upper(),
                 url,
-                params=dict(params or {}),
-                json=json_body,
-                headers=request_headers,
-                timeout=self.timeout_seconds,
+                **request_options,
             )
         except requests.RequestException as exc:
             raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
 
         status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            text = str(getattr(response, "text", "") or "")
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {text[:200]}")
+        if max_response_bytes is None:
+            if status >= 400:
+                text = str(getattr(response, "text", "") or "")
+                raise MarketHTTPError(f"{self.market_id} HTTP {status}: {text[:200]}")
+
+            try:
+                return response.json()
+            except ValueError:
+                text = str(getattr(response, "text", "") or "")
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
 
         try:
-            return response.json()
-        except ValueError:
-            text = str(getattr(response, "text", "") or "")
+            if status >= 400:
+                raise MarketHTTPError(f"{self.market_id} HTTP {status}.")
+            content_length = str(getattr(response, "headers", {}).get("Content-Length") or "").strip()
+            if content_length:
+                try:
+                    declared_length = int(content_length)
+                except ValueError:
+                    declared_length = -1
+                if declared_length > max_response_bytes:
+                    raise MarketHTTPError(
+                        f"{self.market_id} response exceeded the configured JSON byte cap."
+                    )
+
+            body = bytearray()
             try:
-                return json.loads(text)
-            except json.JSONDecodeError as exc:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    body.extend(chunk)
+                    if len(body) > max_response_bytes:
+                        raise MarketHTTPError(
+                            f"{self.market_id} response exceeded the configured JSON byte cap."
+                        )
+            except requests.RequestException as exc:
+                raise MarketHTTPError(f"{self.market_id} HTTP response failed: {exc}") from exc
+            try:
+                return json.loads(body)
+            except (ValueError, RecursionError) as exc:
                 raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        finally:
+            response.close()
 
     def get_json(
         self,
@@ -144,8 +193,12 @@ class AdapterRuntime:
         *,
         params: Optional[Mapping[str, Any]] = None,
         headers: Optional[Mapping[str, str]] = None,
+        max_response_bytes: Optional[int] = None,
     ) -> Any:
-        return self.request_json("GET", url, params=params, headers=headers)
+        options: Dict[str, Any] = {"params": params, "headers": headers}
+        if max_response_bytes is not None:
+            options["max_response_bytes"] = max_response_bytes
+        return self.request_json("GET", url, **options)
 
     def resolve_credential(
         self,

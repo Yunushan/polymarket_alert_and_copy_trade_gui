@@ -1,0 +1,28 @@
+{
+  "id": "btc-150k-2025",
+  "question": "Will BTC close above $150,000 in 2025?",
+  "description": "Market resolves YES if Bitcoin closes above the threshold.",
+  "category": "crypto",
+  "createdAt": 1704067200,
+  "expiresAt": 1735689599,
+  "status": "active",
+  "resolutionSource": "Pyth Oracle 15-min TWAP",
+  "yesToken": "YEStok-btc-150k-2025",
+  "noToken": "NOtok-btc-150k-2025",
+  "volume": {
+    "total": 5250000,
+    "24h": 1250000,
+    "7d": 3100000
+  },
+  "liquidity": 450000,
+  "prices": {
+    "yes": 0.35,
+    "no": 0.65,
+    "lastUpdate": 1704153600
+  },
+  "stats": {
+    "totalTrades": 12450,
+    "uniqueTraders": 1834,
+    "avgTradeSize": 421
+  }
+}

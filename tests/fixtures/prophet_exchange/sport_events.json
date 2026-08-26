@@ -1,0 +1,15 @@
+{
+  "data": {
+    "sport_events": [
+      {
+        "event_id": 101,
+        "tournament_id": 123,
+        "name": "Patriots vs. Jets",
+        "start_time": "2026-06-01T17:00:00Z",
+        "status": "scheduled",
+        "home_team": "Patriots",
+        "away_team": "Jets"
+      }
+    ]
+  }
+}

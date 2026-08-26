@@ -83,6 +83,77 @@ class PolymarketAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in orderbook.bids], [0.50, 0.40])
         self.assertEqual([level.price for level in orderbook.asks], [0.62, 0.70])
 
+    def test_authenticated_clob_trade_history_is_normalized(self) -> None:
+        adapter = PolymarketAdapter(
+            {
+                "polymarket_l2_headers": {
+                    "POLY_ADDRESS": "0x" + "a" * 40,
+                    "POLY_API_KEY": "api-key",
+                    "POLY_PASSPHRASE": "passphrase",
+                    "POLY_SIGNATURE": "signature",
+                    "POLY_TIMESTAMP": "1760000000",
+                }
+            }
+        )
+        trades = load_fixture("clob_trades.json")
+        with patch("market_adapters.polymarket.clob_auth.get_trades", return_value=trades) as get_trades:
+            result = adapter.list_trades("token-yes", limit=2, after=1760000000, before=1760000300)
+
+        get_trades.assert_called_once()
+        headers, = get_trades.call_args.args
+        self.assertEqual(headers["POLY_ADDRESS"], "0x" + "a" * 40)
+        self.assertEqual(get_trades.call_args.kwargs["asset_id"], "token-yes")
+        self.assertEqual([item.trade_id for item in result], ["clob-trade-1", "clob-trade-2"])
+        self.assertEqual([item.side for item in result], ["BUY", "SELL"])
+        self.assertAlmostEqual(result[0].size, 12.5)
+        self.assertAlmostEqual(result[1].price, 0.47)
+
+    def test_authenticated_clob_trade_history_fails_closed_without_headers(self) -> None:
+        adapter = PolymarketAdapter()
+
+        with self.assertRaises(MarketConfigurationError) as ctx:
+            adapter.list_trades("token-yes")
+
+        self.assertIn("explicit L2 headers", str(ctx.exception))
+
+    def test_public_clob_price_history_is_normalized_to_flat_candles(self) -> None:
+        adapter = PolymarketAdapter()
+        history = load_fixture("price_history.json")
+
+        with patch("market_adapters.polymarket.clob_rest.get_price_history", return_value=history) as get_history:
+            result = adapter.list_candles(
+                "token-yes",
+                resolution="1h",
+                from_timestamp=1760000000,
+                to_timestamp=1760000300,
+            )
+
+        get_history.assert_called_once_with(
+            "token-yes",
+            start_ts=1760000000,
+            end_ts=1760000300,
+            interval="1h",
+        )
+        self.assertEqual([candle.timestamp for candle in result], [1760000100.0, 1760000200.0])
+        self.assertEqual([candle.close for candle in result], [0.45, 0.47])
+        self.assertTrue(all(candle.volume is None for candle in result))
+        self.assertEqual(result[0].raw["t"], 1760000100)
+
+    def test_public_clob_price_history_validates_interval_and_range(self) -> None:
+        adapter = PolymarketAdapter()
+
+        with self.assertRaises(MarketConfigurationError) as interval_error:
+            adapter.list_candles("token-yes", resolution="5m")
+        self.assertIn("price-history interval", str(interval_error.exception))
+
+        with self.assertRaises(MarketConfigurationError) as range_error:
+            adapter.list_candles(
+                "token-yes",
+                from_timestamp=1760000300,
+                to_timestamp=1760000000,
+            )
+        self.assertIn("to_timestamp greater than from_timestamp", str(range_error.exception))
+
     def test_get_price_falls_back_to_book_midpoint_when_midpoint_payload_is_bad(self) -> None:
         adapter = PolymarketAdapter()
         book = {
@@ -301,6 +372,130 @@ class PolymarketAdapterTests(unittest.TestCase):
                     limit_price=1.5,
                 )
             )
+
+    def test_health_check_exposes_authenticated_account_and_order_operations(self) -> None:
+        health = PolymarketAdapter().health_check()
+
+        self.assertEqual(health["account_recovery_operations"], ["active_orders", "order_detail", "fills"])
+        self.assertEqual(
+            health["order_management_operations"],
+            ["cancel_order", "cancel_orders", "cancel_all_orders", "cancel_market_orders"],
+        )
+        self.assertFalse(health["order_management_enabled"])
+
+    def test_authenticated_account_recovery_routes_documented_clob_reads(self) -> None:
+        adapter = PolymarketAdapter(
+            {
+                "polymarket_l2_headers": {
+                    "POLY_ADDRESS": "0x" + "a" * 40,
+                    "POLY_API_KEY": "api-key",
+                    "POLY_PASSPHRASE": "passphrase",
+                    "POLY_SIGNATURE": "signature",
+                    "POLY_TIMESTAMP": "1760000000",
+                }
+            }
+        )
+        orders = load_fixture("clob_orders.json")
+        order = load_fixture("clob_order.json")
+        fills = load_fixture("clob_trades.json")
+        order_id = "0x" + "a" * 64
+        with patch("market_adapters.polymarket.clob_auth.get_orders", return_value=orders) as get_orders, patch(
+            "market_adapters.polymarket.clob_auth.get_order", return_value=order
+        ) as get_order, patch("market_adapters.polymarket.clob_auth.get_trades", return_value=fills) as get_trades:
+            active = adapter.account_recovery(
+                "active_orders", market_id="0x" + "b" * 64, contract_id="1234567890", next_cursor="MTAw"
+            )
+            detail = adapter.account_recovery("order_detail", order_id=order_id)
+            recovered_fills = adapter.account_recovery(
+                "fills", contract_id="1234567890", after=1760000000, before=1760000300, limit=25
+            )
+
+        self.assertEqual(active, orders)
+        self.assertEqual(detail, order)
+        self.assertEqual(recovered_fills, fills)
+        self.assertEqual(get_orders.call_args.kwargs["market"], "0x" + "b" * 64)
+        self.assertEqual(get_orders.call_args.kwargs["asset_id"], "1234567890")
+        self.assertEqual(get_order.call_args.args[0], order_id)
+        self.assertEqual(get_trades.call_args.kwargs["asset_id"], "1234567890")
+        self.assertEqual(get_trades.call_args.kwargs["after"], 1760000000)
+        self.assertEqual(get_trades.call_args.kwargs["limit"], 25)
+
+    def test_polymarket_order_management_requires_opt_in_and_exact_confirmation(self) -> None:
+        adapter = PolymarketAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "polymarket_l2_headers": {
+                    "POLY_ADDRESS": "0x" + "a" * 40,
+                    "POLY_API_KEY": "api-key",
+                    "POLY_PASSPHRASE": "passphrase",
+                    "POLY_SIGNATURE": "signature",
+                    "POLY_TIMESTAMP": "1760000000",
+                },
+            }
+        )
+        with self.assertRaises(MarketConfigurationError) as disabled:
+            adapter.manage_orders("cancel_all_orders", confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertIn("disabled", str(disabled.exception).lower())
+
+        adapter = PolymarketAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "polymarket_order_management_enabled": True,
+                "polymarket_l2_headers": {
+                    "POLY_ADDRESS": "0x" + "a" * 40,
+                    "POLY_API_KEY": "api-key",
+                    "POLY_PASSPHRASE": "passphrase",
+                    "POLY_SIGNATURE": "signature",
+                    "POLY_TIMESTAMP": "1760000000",
+                },
+            }
+        )
+        with self.assertRaises(MarketConfigurationError) as confirmation:
+            adapter.manage_orders("cancel_all_orders", confirm_order_management="no")
+        self.assertIn("exact confirmation", str(confirmation.exception).lower())
+
+    def test_polymarket_order_management_routes_fixed_cancel_endpoints(self) -> None:
+        adapter = PolymarketAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "polymarket_order_management_enabled": True,
+                "polymarket_l2_headers": {
+                    "POLY_ADDRESS": "0x" + "a" * 40,
+                    "POLY_API_KEY": "api-key",
+                    "POLY_PASSPHRASE": "passphrase",
+                    "POLY_SIGNATURE": "signature",
+                    "POLY_TIMESTAMP": "1760000000",
+                },
+            }
+        )
+        order_id = "0x" + "a" * 64
+        second_id = "0x" + "c" * 64
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        with patch("market_adapters.polymarket.clob_auth.cancel_order", return_value=load_fixture("cancel_order_response.json")) as cancel_order, patch(
+            "market_adapters.polymarket.clob_auth.cancel_orders", return_value=load_fixture("cancel_orders_response.json")
+        ) as cancel_orders, patch(
+            "market_adapters.polymarket.clob_auth.cancel_all_orders", return_value=load_fixture("cancel_all_response.json")
+        ) as cancel_all, patch(
+            "market_adapters.polymarket.clob_auth.cancel_market_orders", return_value=load_fixture("cancel_market_response.json")
+        ) as cancel_market:
+            single = adapter.manage_orders("cancel_order", order_id=order_id, confirm_order_management=confirmation)
+            batch = adapter.manage_orders("cancel_orders", orders=[order_id, second_id, order_id], confirm_order_management=confirmation)
+            global_cancel = adapter.manage_orders("cancel_all_orders", confirm_order_management=confirmation)
+            market_cancel = adapter.manage_orders(
+                "cancel_market_orders",
+                market_id="0x" + "b" * 64,
+                asset_id="1234567890",
+                confirm_order_management=confirmation,
+            )
+
+        self.assertTrue(all(result["live"] for result in (single, batch, global_cancel, market_cancel)))
+        cancel_order.assert_called_once_with(order_id, cancel_order.call_args.args[1])
+        self.assertEqual(cancel_orders.call_args.args[0], [order_id, second_id])
+        cancel_all.assert_called_once()
+        self.assertEqual(cancel_market.call_args.args[:2], ("0x" + "b" * 64, "1234567890"))
 
 
 if __name__ == "__main__":

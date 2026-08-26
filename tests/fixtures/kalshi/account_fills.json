@@ -1,0 +1,20 @@
+{
+  "fills": [
+    {
+      "fill_id": "fill-kalshi-1",
+      "trade_id": "trade-account-kalshi-1",
+      "order_id": "order-kalshi-1",
+      "ticker": "KXFED-26MAY-TARGET-425",
+      "outcome_side": "yes",
+      "book_side": "bid",
+      "count_fp": "2.00",
+      "yes_price_dollars": "0.4200",
+      "no_price_dollars": "0.5800",
+      "is_taker": true,
+      "fee_cost": "0.01",
+      "created_time": "2026-05-01T12:00:30Z",
+      "subaccount_number": 0
+    }
+  ],
+  "cursor": "fills-next"
+}

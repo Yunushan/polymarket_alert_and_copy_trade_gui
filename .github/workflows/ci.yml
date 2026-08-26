@@ -170,17 +170,17 @@ jobs:
           - name: Rocky Linux 8 / Python 3.12
             image: rockylinux/rockylinux:8
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
+            bootstrap: dnf -y upgrade --refresh && dnf -y install python3.12 python3.12-pip python3.12-tkinter git
             desktop_validation: "true"
           - name: Rocky Linux 9 / Python 3.12
             image: rockylinux/rockylinux:9
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
+            bootstrap: dnf -y upgrade --refresh && dnf -y install python3.12 python3.12-pip python3.12-tkinter git
             desktop_validation: "true"
           - name: Rocky Linux 10 / Python 3.12
             image: rockylinux/rockylinux:10
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
+            bootstrap: dnf -y upgrade --refresh && dnf -y install --allowerasing --nobest python3.12 python3.12-pip python3.12-tkinter git
             desktop_validation: "true"
     steps:
       - name: Checkout

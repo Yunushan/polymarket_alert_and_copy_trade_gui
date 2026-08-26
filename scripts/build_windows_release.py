@@ -12,6 +12,11 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
+try:
+    from scripts.release_version import parse_release_version
+except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the repository root, to sys.path.
+    from release_version import parse_release_version
+
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_NAME = "market-sentinel"
@@ -104,6 +109,10 @@ def build_pyinstaller(work_dir: Path, package_dir: Path) -> None:
         "market_adapters",
         "--collect-submodules",
         "polymarket",
+        "--collect-all",
+        "py_clob_client",
+        "--collect-all",
+        "opinion_clob_sdk",
         str(ROOT / "app.py"),
     ]
     run(command)
@@ -229,12 +238,70 @@ def make_portable_zip(package_dir: Path, output_dir: Path, tag: str) -> Path:
     return zip_path
 
 
+def validate_staged_package(package_dir: Path, version: str) -> None:
+    """Refuse to package a missing or stale staged Windows payload."""
+    executable = package_dir / f"{APP_NAME}.exe"
+    if not executable.is_file():
+        raise SystemExit(
+            f"Staged Windows executable is missing: {executable}. "
+            "Run the builder with --prepare-only before --package-only."
+        )
+    version_path = package_dir / "VERSION.txt"
+    expected_version = f"{APP_NAME} {version}\n"
+    try:
+        actual_version = version_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"Staged Windows version marker is missing: {version_path}") from exc
+    if actual_version != expected_version:
+        raise SystemExit(
+            f"Staged Windows payload version does not match {version!r}: "
+            f"{actual_version.strip()!r}. Run --prepare-only again."
+        )
+
+
 def msi_product_version(version: str) -> str:
-    base = version.split("-", 1)[0]
-    parts = base.split(".")
-    if len(parts) != 3 or not all(part.isdigit() for part in parts):
-        raise SystemExit(f"MSI version must come from a numeric x.y.z tag; got {version!r}.")
-    return ".".join(str(int(part)) for part in parts)
+    """Map a release version to a monotonic three-field MSI ProductVersion.
+
+    Windows Installer ignores semantic prerelease labels, so each patch gets a
+    100-value build bucket. Alpha 1-20 use stages 0-19, beta 1-20 use 20-39,
+    release candidates 1-59 use 40-98, and the final release uses stage 99.
+    This ensures every supported prerelease upgrades its predecessor and the
+    final release upgrades every prerelease for the same patch.
+    """
+
+    try:
+        parsed = parse_release_version(version)
+    except ValueError as exc:
+        raise SystemExit(f"Unsupported MSI release version {version!r}: {exc}") from exc
+
+    if parsed.major > 255 or parsed.minor > 255:
+        raise SystemExit(
+            "MSI ProductVersion major and minor fields must be at most 255; "
+            f"got {parsed.major}.{parsed.minor}."
+        )
+
+    if parsed.stage is None:
+        stage = 99
+    else:
+        assert parsed.serial is not None
+        limits = {"a": 20, "b": 20, "rc": 59}
+        maximum = limits[parsed.stage]
+        if parsed.serial > maximum:
+            raise SystemExit(
+                f"MSI {parsed.stage} prerelease serial must be between 1 and {maximum}; "
+                f"got {parsed.serial}."
+            )
+        offsets = {"a": -1, "b": 19, "rc": 39}
+        stage = offsets[parsed.stage] + parsed.serial
+
+    final_build = parsed.patch * 100 + 99
+    if final_build > 65_535:
+        raise SystemExit(
+            "MSI ProductVersion must reserve the complete prerelease-to-final build bucket at or below 65535; "
+            f"patch {parsed.patch} would map its final release to {final_build}."
+        )
+    build = parsed.patch * 100 + stage
+    return f"{parsed.major}.{parsed.minor}.{build}"
 
 
 def directory_id(relative_dir: Path) -> str:
@@ -363,6 +430,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=ROOT / "release-assets")
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build" / "windows-release")
     parser.add_argument("--skip-msi", action="store_true", help="Build only the portable zip.")
+    phase = parser.add_mutually_exclusive_group()
+    phase.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Build and stage the unpackaged application so its executable can be signed.",
+    )
+    phase.add_argument(
+        "--package-only",
+        action="store_true",
+        help="Package an existing staged application without rebuilding or replacing its signed executable.",
+    )
     return parser.parse_args()
 
 
@@ -375,11 +453,19 @@ def main() -> int:
     work_dir = args.work_dir.resolve()
     package_dir = work_dir / f"{APP_NAME}-{args.tag}-win-x64"
     output_dir.mkdir(parents=True, exist_ok=True)
-    clean_dir(work_dir)
+    if args.package_only:
+        validate_staged_package(package_dir, args.version)
+    else:
+        clean_dir(work_dir)
+        frontend_dist = prepare_frontend_dist(args.frontend_zip.resolve() if args.frontend_zip else None)
+        build_pyinstaller(work_dir, package_dir)
+        copy_release_payload(package_dir, frontend_dist, args.version)
+        validate_staged_package(package_dir, args.version)
 
-    frontend_dist = prepare_frontend_dist(args.frontend_zip.resolve() if args.frontend_zip else None)
-    build_pyinstaller(work_dir, package_dir)
-    copy_release_payload(package_dir, frontend_dist, args.version)
+    if args.prepare_only:
+        print(f"Prepared Windows payload for signing: {package_dir}")
+        return 0
+
     portable_zip = make_portable_zip(package_dir, output_dir, args.tag)
     print(f"Built portable zip: {portable_zip}")
     if not args.skip_msi:

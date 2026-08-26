@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "id": "xorder-1",
+      "marketId": "market-1",
+      "outcomeId": "outcome-yes",
+      "status": "open",
+      "side": "buy",
+      "price": 0.44,
+      "quantity": 10
+    }
+  ],
+  "total": 1
+}

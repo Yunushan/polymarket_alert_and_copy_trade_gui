@@ -1,0 +1,24 @@
+{
+  "market_positions": [
+    {
+      "ticker": "KXFED-26MAY-TARGET-425",
+      "position_fp": "2.00",
+      "total_traded_dollars": "0.84",
+      "market_exposure_dollars": "0.84",
+      "realized_pnl_dollars": "0.00",
+      "fees_paid_dollars": "0.01",
+      "last_updated_ts": "2026-05-01T12:00:30Z"
+    }
+  ],
+  "event_positions": [
+    {
+      "event_ticker": "KXFED-26MAY",
+      "total_cost_dollars": "0.84",
+      "total_cost_shares_fp": "2.00",
+      "event_exposure_dollars": "0.84",
+      "realized_pnl_dollars": "0.00",
+      "fees_paid_dollars": "0.01"
+    }
+  ],
+  "cursor": "positions-next"
+}

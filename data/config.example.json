@@ -34,6 +34,7 @@
         "adapter_status": "implemented",
         "azuro_api_base_url": "https://api.onchainfeed.org/api/v1/public",
         "azuro_ws_url": "wss://streams.onchainfeed.org/v1/streams/feed",
+        "azuro_graph_api_url": "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-polygon-v3",
         "azuro_environment": "PolygonUSDT",
         "azuro_chain_id": 137,
         "credential_env_vars": [
@@ -45,7 +46,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Read-only games, conditions, odds, WebSocket subscriptions, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting only accepts pre-signed wallet order payloads and stays disabled by default."
+        "notes": "Read-only games, conditions, odds, bettor bet history, WebSocket subscriptions, simulation-first copy previews, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting is deliberately unsupported and fail-closed until signed clientBetData can be decoded and bound to the reviewed market, outcome, stake, and odds."
       }
     },
     "betfair_exchange": {
@@ -53,6 +54,7 @@
       "settings": {
         "adapter_status": "implemented",
         "betfair_api_base_url": "https://api.betfair.com/exchange/betting/json-rpc/v1",
+        "betfair_account_api_base_url": "https://api.betfair.com/exchange/account/json-rpc/v1",
         "credential_env_vars": [
           "BETFAIR_APP_KEY",
           "BETFAIR_SESSION_TOKEN"
@@ -61,35 +63,59 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "betfair_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, local paper orders, and guarded placeOrders support are implemented through the official Betfair Exchange API. Live betting stays disabled by default; copy trading remains unsupported."
+        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, current/cleared account orders, funds/account/statement/currency-rate reads, local paper orders, guarded placeOrders, and cancelOrders are implemented through Betfair's official Exchange and Accounts APIs. Order management is cancellation-only, requires betfair_order_management_enabled plus the shared live-safety gates, and stays disabled by default. The maximum-exposure cap uses full BACK stake and worst-case LAY liability; copy previews remain simulation-first."
       }
     },
     "betmgm": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "betmgm_api_base_url": "https://sportsapi.wv.betmgm.com",
+        "betmgm_sport_id": 4,
+        "betmgm_country": "at",
+        "betmgm_language": "en",
+        "credential_env_vars": [
+          "BETMGM_ACCESS_ID",
+          "BETMGM_ACCESS_ID_TOKEN"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: no public documented BetMGM prediction/event-market API, SDK, or automation permission flow is published. Consumer app automation is unsupported."
+        "notes": "Official partner Sports API fixture, market, option, and implied-price reads plus local paper orders are implemented. Partner approval and AccessId/AccessIdToken are required; live betting and copy trading are unsupported because no order/account-activity endpoint is documented."
       }
     },
     "cme_prediction_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "ibkr_api_base_url": "https://api.ibkr.com/v1/api",
+        "ibkr_event_products": ["NQ"],
+        "ibkr_contract_month": "SEP26",
+        "credential_env_vars": [
+          "IBKR_SESSION_COOKIE",
+          "IBKR_ACCESS_TOKEN",
+          "IBKR_ACCOUNT_ID"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: CME event-contract support is blocked by market-data licensing/entitlements and a missing documented broker order route for this app."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "ibkr_submit_live_orders": false,
+        "ibkr_order_management_enabled": false,
+        "ibkr_manual_indicator": false,
+        "ibkr_external_operator": "",
+        "notes": "Official CME event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/cancel-all, alerts, paper orders, and IBKR Web API limit orders are implemented. Order management cannot modify or reprice an existing order. An authorized IBKR session, CME/IBKR data and trading entitlements, and funded verification remain external gates."
       }
     },
     "context_v2": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "context_api_base_url": "https://api.context.markets/v2",
+        "credential_env_vars": ["CONTEXT_API_KEY", "CONTEXT_TRADER_ADDRESS"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Context V2 API use requires service credentials, market/order lifecycle validation, and account-specific automation terms that are not available in this local app."
+        "context_order_management_enabled": false,
+        "notes": "Official Context v2 market, price, orderbook, alerts, paper-order, guarded externally signed-order, and guarded signed cancellation paths are implemented. Live submission accepts only the documented signed-order field set: market, outcome, side, price, and size must match shared preflight; trader must match the trusted CONTEXT_TRADER_ADDRESS; type is limit; and expiry, maxFee, makerRoleConstraint, and inventoryModeConstraint must be zero. Unknown signed fields fail before transport. Cancellation sends only externally signed trader/nonce/signature envelopes to fixed official endpoints. Live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates."
       }
     },
     "crypto_com_predict": {
@@ -108,19 +134,23 @@
     "draftkings_predictions": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "draftkings_predictions_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": ["DRAFTKINGS_PREDICTIONS_API_KEY", "CRYPTO_COM_PREDICTIONS_API_KEY"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: DraftKings Predictions is published as an app product, but no public documented Predictions API, SDK, or account activity/order automation route is available."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Read-only DraftKings Predictions/CDNA alias uses the official Crypto.com Predictions API for event, contract, and price data plus local paper orders. Anonymous reads are supported; an optional licensed API key may be supplied. CME-listed contracts use cme_prediction_markets. DraftKings account execution, orderbook depth, live trading, and copy trading are unsupported."
       }
     },
     "drift_bet": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "drift_bet_data_api_base_url": "https://data.api.drift.trade",
+        "drift_bet_market_symbols": [],
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Drift BET support is blocked by Solana wallet, margin, settlement, and BET-specific account handling that is not implemented with fixtures and safeguards."
+        "notes": "Official Drift Data API BET prediction reads, public fill history, bounded derived candles, configured-symbol discovery, alerts, and dry-run orders are implemented. Configure drift_bet_market_symbols or DRIFT_BET_MARKET_SYMBOLS explicitly; the public OpenAPI contract has no stable market-list endpoint and retains only the latest 31 days (20 records per page). Binary orderbooks, wallet-signed live orders, settlement, and copy trading remain unsupported."
       }
     },
     "fact_machine": {
@@ -135,28 +165,50 @@
     "fanatics_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "fanatics_markets_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": ["FANATICS_MARKETS_API_KEY", "CRYPTO_COM_PREDICTIONS_API_KEY"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Fanatics Markets is a consumer product built with Crypto.com/CDNA, but no public Fanatics Markets API, SDK, or automation terms are published."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Read-only Fanatics Markets/CDNA alias using the official Crypto.com Predictions API for event discovery, contracts, prices, alerts, and local dry-run orders. Anonymous reads are supported; an optional licensed API key may be supplied. Fanatics-specific orderbook, live trading, and copy trading APIs are not published. Actual Fanatics account trading remains subject to KYC and regional eligibility."
       }
     },
     "forecastex": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "ibkr_api_base_url": "https://api.ibkr.com/v1/api",
+        "ibkr_contract_months": ["SEP26", "OCT26"],
+        "credential_env_vars": [
+          "IBKR_SESSION_COOKIE",
+          "IBKR_ACCESS_TOKEN",
+          "IBKR_ACCOUNT_ID"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: ForecastEx contracts are broker/member mediated and no direct public self-service ForecastEx market-data plus order API is published for this app."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "ibkr_submit_live_orders": false,
+        "ibkr_order_management_enabled": false,
+        "ibkr_manual_indicator": false,
+        "ibkr_external_operator": "",
+        "notes": "Official ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/cancel-all, alerts, paper orders, and guarded buy-only IBKR Web API limit orders are implemented. Order management cannot modify or reprice an existing order. An authorized IBKR session, ForecastEx permissions, and funded verification remain external gates."
       }
     },
     "frenzy_finance": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "frenzy_rpc_url": "https://mainnet.base.org",
+        "frenzy_chain_id": 8453,
+        "frenzy_contract_address": "0xf116E1BC30D50b8769945Bc48Bd2c1BCdA3ff445",
+        "frenzy_usdc_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "frenzy_from_block": "",
+        "frenzy_to_block": "",
+        "frenzy_market_specs": [],
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Frenzy Finance requires wallet/network handling, contract validation, and settlement-rule support that is not implemented in this app."
+        "notes": "Configured price-range grid discovery, BetSettled history, alerts, and dry-run EIP-712 BetIntent previews are implemented. Active quotes/oracle acknowledgements, wallet signing, orderbooks, live execution, and copy trading remain disabled."
       }
     },
     "gemini_titan": {
@@ -172,55 +224,89 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "gemini_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public prediction-market event discovery, contract listing, orderbooks, implied prices, local paper orders, and guarded authenticated limit-order posting are implemented through official Gemini endpoints. Live trading stays disabled by default; copy trading remains unsupported."
+        "notes": "Public prediction-market event discovery, contract listing, orderbooks, implied prices, local paper orders, guarded authenticated limit-order posting, and guarded single/batch order cancellation are implemented through official Gemini endpoints. Order management requires gemini_order_management_enabled plus the shared live-safety gates and exact operator confirmation; live trading stays disabled by default and copy trading remains unsupported."
       }
     },
     "good_judgment_open": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "good_judgment_open_base_url": "https://www.gjopen.com",
+        "credential_env_vars": [
+          "GJOPEN_API_TOKEN",
+          "GJOPEN_EMAIL",
+          "GJOPEN_PASSWORD"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: public question pages exist, but no public documented API, SDK, or export endpoint is published. Do not scrape pages or automate private sessions."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "min_request_interval_seconds": 0.5,
+        "notes": "Credentialed questions, answer probabilities, irregular forecast snapshots, authenticated /api/v1/me, /api/v1/prediction_sets, and /api/v1/scores recovery, local paper previews, and guarded forecast submission use the documented Cultivate Forecasts API. Set the instance base URL and credentials through environment variables; live submission remains disabled by default and is a forecast update, not exchange execution."
       }
     },
     "hedgehog_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: no stable public Hedgehog Markets API/SDK or documented protocol contract is published for this app's discovery, pricing, order, and settlement model."
+        "hedgehog_rpc_url": "https://mainnetbeta-rpc.eclipse.xyz",
+        "hedgehog_program_id": "PARrVs6F5egaNuz8g6pKJyU4ze3eX5xGZCFb3GLiVvu",
+        "hedgehog_amount_scale": 1000000,
+        "hedgehog_submit_signed_transactions": false,
+        "notes": "Official Hedgehog HPL Parimutuel/Eclipse MarketV1 accounts support on-chain discovery, pooled prices, alerts, and dry-run DepositV1 intents. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed deposit; hedgehog_submit_signed_transactions cannot enable submission today. CLOB depth and copy trading remain unsupported."
       }
     },
     "hyperliquid": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "credential_env_vars": [
+          "HYPERLIQUID_ACCOUNT_WALLET",
+          "HYPERLIQUID_TRADE_WALLET",
+          "HYPERLIQUID_ACTIVITY_WALLET"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: generic HyperCore/perp/spot APIs are not enough; this app lacks a verified HIP-4 prediction-market catalog/order-normalization contract with fixtures and wallet safeguards."
+        "hyperliquid_order_management_enabled": false,
+        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, open/historical orders, perpetual and spot account state, portfolio, subaccounts, alerts, paper orders, and simulation-first copy previews are implemented. Guarded signed cancel, cancel-by-cloid, and schedule-cancel actions use the documented POST /exchange contract, remain disabled by default, and require a complete externally signed envelope plus shared live-safety confirmation; modify and batch-modify are deliberately unavailable. Set HYPERLIQUID_ACCOUNT_WALLET for account reads and HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history; the account reader falls back to the trade wallet when needed. Wallet signing, settlement, and funded execution remain external gates."
       }
     },
     "hypermind": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "hypermind_prices_url": "https://predict.hypermind.com/hypermind/media/data/All-ifps-all-prices-260714.csv",
+        "hypermind_outcomes_url": "https://predict.hypermind.com/hypermind/media/data/Winning-outcomes-all-260714.txt",
+        "hypermind_allow_custom_data_host": false,
+        "hypermind_max_rows": 1500000,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: API feeds are described as managed service deliverables, but no public API contract, SDK, or self-service endpoint is published."
+        "notes": "Archive-only support uses Hypermind's official trade-level CSV and winning-outcomes export. Prices are normalized from source percentages, trade direction remains TRADE because the export does not publish BUY/SELL, and orderbooks/live/copy trading remain unsupported."
       }
     },
     "ibkr_forecasttrader": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "ibkr_api_base_url": "https://api.ibkr.com/v1/api",
+        "ibkr_contract_months": ["SEP26", "OCT26"],
         "credential_env_vars": [
+          "IBKR_SESSION_COOKIE",
+          "IBKR_ACCESS_TOKEN",
           "IBKR_ACCOUNT_ID"
         ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: ForecastTrader/Forecast Contracts require eligible IBKR account permissions and authenticated Web API or TWS/API session handling that cannot be shipped without user-specific entitlements."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "ibkr_submit_live_orders": false,
+        "ibkr_order_management_enabled": false,
+        "ibkr_manual_indicator": false,
+        "ibkr_external_operator": "",
+        "notes": "Official IBKR ForecastTrader/ForecastEx event-contract discovery, conids, top-of-book snapshots, executions/OHLC history, account order reads, guarded order cancellation/cancel-all, alerts, paper orders, and guarded buy-only IBKR Web API limit orders are implemented. Order management cannot modify or reprice an existing order. An authorized IBKR session, account/data entitlements, and funded verification remain external gates."
       }
     },
     "infer": {
@@ -229,32 +315,49 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: INFER-pub redirects to RAND Forecasting Initiative public pages, but no public documented API or export contract is published."
+        "notes": "Verified 2026-05-26; re-verified 2026-08-17: INFER-pub redirects to the RAND Forecasting Initiative permanent read-only archive; accounts and forecasting are closed, and no supported API or export contract is published."
       }
     },
     "iowa_electronic_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "iem_allow_custom_data_host": false,
+        "iem_historical_markets": [
+          {
+            "market_id": "1996-powell-nomination",
+            "title": "1996 Powell Nomination Winner Takes All",
+            "status": "closed",
+            "data_url": "https://iemweb.biz.uiowa.edu/historicaldata/uspoliticalmarkets/1996elections/1996powellnomination_wta/powellpricedata.txt",
+            "contracts": {
+              "P.YES": "Powell's name is placed in nomination",
+              "P.NO": "Powell's name is not placed in nomination"
+            }
+          }
+        ],
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: official quote/history pages exist, but no stable documented API for discovery, contract listing, live quotes, or automated trading is published."
+        "notes": "Archive-only support uses the official IEM historical price-file format; current quote pages, orderbooks, live trading, and copy trading remain unsupported."
       }
     },
     "myriad_markets": {
       "enabled": false,
       "settings": {
         "adapter_status": "implemented",
-        "myriad_api_base_url": "https://api.myriad.markets",
+        "myriad_api_base_url": "https://api-v2.myriadprotocol.com",
+        "myriad_network_id": 56,
         "credential_env_vars": [
-          "MYRIAD_API_KEY"
+          "MYRIAD_API_KEY",
+          "MYRIAD_API_SECRET",
+          "MYRIAD_ACCESS_TOKEN"
         ],
         "live_trading_enabled": false,
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "myriad_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, local paper quote payloads, and guarded signed order submission are implemented through the official Myriad API. Live trading stays disabled by default; copy trading remains unsupported."
+        "notes": "Official grouped event/market discovery via /markets?group_by_event=true and /events/{id}, outcome price reads, orderbooks, alerts, bounded account_activity, portfolio, and market_positions reads from the public wallet endpoints, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded unsigned split/merge/redeem transaction intents, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all mutations are implemented through the official Myriad API. Batch modification is deliberately unavailable. Signed network, market, outcome, side, 1e18-scaled amount, and price must match shared preflight and the trusted configured network before submission. Position intents never sign or submit on-chain; live trading and order management stay disabled by default."
       }
     },
     "kalshi": {
@@ -263,6 +366,7 @@
         "adapter_status": "implemented",
         "kalshi_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
         "kalshi_market_status": "open",
+        "kalshi_order_management_enabled": false,
         "credential_env_vars": [
           "KALSHI_API_KEY_ID",
           "KALSHI_PRIVATE_KEY_PATH",
@@ -273,7 +377,7 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Read-only market data and paper trading are implemented through official Kalshi REST endpoints. Live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
+        "notes": "Official market/event discovery, prices/orderbooks, public trades, candles, signed account recovery, guarded live order placement, and guarded V2 cancel/batch-cancel/decrease mutations are supported. Amendment is deliberately unavailable so order management cannot increase or reprice exposure. Order management requires kalshi_order_management_enabled plus live_trading_enabled, live_trading_confirmed, and exact operator confirmation; live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
       }
     },
     "limitless_exchange": {
@@ -291,8 +395,9 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "limitless_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Read-only market data, orderbooks, and local paper trading are implemented through official Limitless APIs. Live HMAC order posting is guarded by live_trading_enabled and requires environment credentials plus an on-behalf-of profile."
+        "notes": "Official market data, orderbooks, local paper trading, HMAC live order posting, and guarded single/batch/market-scoped cancellation are implemented through documented Limitless APIs. Live order management is disabled by default and requires limitless_order_management_enabled, live_trading_enabled, exact operator/global confirmations, and token credentials."
       }
     },
     "manifold": {
@@ -309,7 +414,8 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Read-only market discovery, probabilities, and local paper trading are implemented through the official Manifold API. Authenticated MANA betting is guarded by live_trading_enabled and MANIFOLD_API_KEY."
+        "manifold_order_management_enabled": false,
+        "notes": "Official market discovery, probabilities, public manifold:<username> bet activity, authenticated /me and /bets account reads, simulation-first copy previews, local paper trading, and guarded open-limit bet cancellation are implemented through the official Manifold API. Authenticated MANA betting and order management are guarded by live_trading_enabled, separate opt-ins, exact confirmations, and MANIFOLD_API_KEY."
       }
     },
     "metaculus": {
@@ -317,11 +423,25 @@
       "settings": {
         "adapter_status": "implemented",
         "metaculus_api_base_url": "https://www.metaculus.com/api",
+        "metaculus_forecaster_id": "",
         "credential_env_vars": [
           "METACULUS_API_TOKEN"
         ],
         "live_trading_enabled": false,
-        "notes": "Authenticated read-only post/question discovery and probability reads are implemented through the official Metaculus API. Community Prediction data is access-limited by Metaculus API policy. No trading support exists."
+        "notes": "Authenticated post/question discovery, probability reads, and forecast-owned post recovery are implemented through the official Metaculus API. Set metaculus_forecaster_id (or pass it to the account feed) for GET /api/posts/?forecaster_id=...; Community Prediction data is access-limited by Metaculus API policy. Forecast submission is a guarded forecast update, not exchange execution."
+      }
+    },
+    "scicast": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "implemented",
+        "scicast_api_base_url": "https://datamart.scicast.org",
+        "credential_env_vars": [
+          "SCICAST_API_KEY"
+        ],
+        "scicast_allow_custom_base_url": false,
+        "live_trading_enabled": false,
+        "notes": "Archive-only reads through SciCast's documented historical Data Mart: question discovery, forecast snapshots, trade history, alerts, and local paper previews. The service is retired; no orderbook, live trading, or copy trading is supported."
       }
     },
     "opinion_labs": {
@@ -329,21 +449,37 @@
       "settings": {
         "adapter_status": "implemented",
         "opinion_api_base_url": "https://openapi.opinion.trade/openapi",
+        "opinion_clob_host": "https://proxy.opinion.trade:8443",
+        "opinion_chain_id": 56,
         "credential_env_vars": [
-          "OPINION_API_KEY"
+          "OPINION_API_KEY",
+          "OPINION_ACCOUNT_WALLET",
+          "OPINION_PRIVATE_KEY",
+          "OPINION_MULTI_SIG_ADDRESS",
+          "OPINION_RPC_URL"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "opinion_live_check_approval": false,
+        "opinion_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, token listing, token prices, orderbooks, alerts, and local paper orders are implemented through the official Opinion OpenAPI. Live trading and copy trading remain unsupported."
+        "notes": "Authenticated market discovery, token listing, token prices, orderbooks, alerts, filled wallet-trade activity, order history/detail, and wallet positions use the official Opinion OpenAPI. Account reads require OPINION_ACCOUNT_WALLET (or the documented trade/activity wallet fallback) and OPINION_API_KEY. Guarded limit/market live orders plus cancel_order, batch_cancel_orders, and cancel_all_orders use the optional official opinion-clob-sdk on BNB Chain (chain id 56); install requirements-live.lock and provide OPINION_API_KEY, OPINION_PRIVATE_KEY, OPINION_MULTI_SIG_ADDRESS, and OPINION_RPC_URL only when explicitly enabling live trading or order management."
       }
     },
     "nadex": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "nadex_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": [
+          "NADEX_PREDICTIONS_API_KEY",
+          "CRYPTO_COM_PREDICTIONS_API_KEY"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Nadex event-contract trading requires eligible exchange account access and no public documented third-party event-contract API is published for this adapter."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Read-only Nadex/CDNA prediction-event alias through the official Crypto.com Predictions Market Data API. Anonymous reads and local paper orders are supported; account trading, DCM/FIX depth, knock-out products, live orders, and copy trading are intentionally unsupported. Commercial redistribution/model training requires a Market Data License."
       }
     },
     "omen": {
@@ -355,8 +491,11 @@
           "OMEN_SUBGRAPH_URL"
         ],
         "live_trading_enabled": false,
+        "omen_rpc_url": "",
+        "omen_submit_signed_transactions": false,
+        "omen_candle_trade_limit": 1000,
         "min_request_interval_seconds": 0.5,
-        "notes": "Read-only market discovery, outcome listing, AMM marginal-price alerts, and local paper orders are implemented through the documented Omen FixedProductMarketMaker subgraph schema. Configure OMEN_SUBGRAPH_URL or omen_subgraph_url to a maintained GraphQL endpoint. Live trading requires wallet-signed AMM transactions and is not implemented."
+        "notes": "Market discovery, outcome listing, AMM marginal-price alerts, public FPMM trades, and bounded derived candles are implemented through the documented Omen subgraph schema. Trade size uses each collateral token's indexed scale; candle derivation rejects ambiguous same-second prices. Configure OMEN_SUBGRAPH_URL or omen_subgraph_url to a maintained GraphQL endpoint. Live submission is deliberately unsupported and fail-closed until signed calldata can be decoded and bound to the reviewed FPMM order; omen_submit_signed_transactions cannot enable submission today."
       }
     },
     "polymarket": {
@@ -372,7 +511,8 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Live trading is disabled by default. Keep credentials in .env or environment variables, not in config.json."
+        "polymarket_order_management_enabled": false,
+        "notes": "Authenticated CLOB order/fill recovery and guarded cancel-order, cancel-orders, cancel-all-orders, and cancel-market-orders mutations are implemented through fixed official endpoints. Order management requires polymarket_order_management_enabled plus the shared live-safety gates and exact operator confirmation; live trading remains disabled by default. Keep credentials in .env or environment variables, not in config.json."
       }
     },
     "predictit": {
@@ -392,14 +532,17 @@
         "adapter_status": "implemented",
         "predict_fun_api_base_url": "https://api.predict.fun/v1",
         "credential_env_vars": [
-          "PREDICT_FUN_API_KEY"
+          "PREDICT_FUN_API_KEY",
+          "PREDICT_FUN_JWT",
+          "PREDICT_FUN_ACCESS_TOKEN"
         ],
         "live_trading_enabled": false,
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
+        "predict_fun_order_management_enabled": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Market discovery, outcome listing, orderbook-derived prices, alerts, local paper orders, and guarded signed order submission are implemented through the official Predict.fun REST API. Live trading stays disabled by default; copy trading remains unsupported."
+        "notes": "Market discovery, outcome listing, orderbook-derived prices, public order-match trade history, timeseries point-candles, authenticated account/order/activity/position recovery, simulation-first activity copy previews, local paper orders, and guarded signed LIMIT-order submission are implemented through the official Predict.fun REST API. Signed outcome token, side, 1e18-scaled size, and price must match shared preflight; market-order, fill-or-kill, minimum-output, and nonzero-slippage payload semantics fail closed. Relay-only order removal is disabled by default, requires JWT credentials plus the shared live-safety gates and exact operator confirmation, and does not invalidate orders on-chain; automatic or live copy execution remains unsupported."
       }
     },
     "prizepicks": {
@@ -408,7 +551,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: no public official PrizePicks developer API for programmatic projections, entries, market data, or automation is published for this app."
+        "notes": "Verified 2026-08-23: PrizePicks identifies Kalshi as its event-contract provider, but no official machine-readable mapping from the venue-wide catalog to the current PrizePicks board or PrizePicks account/order automation API is published."
       }
     },
     "probo": {
@@ -423,19 +566,21 @@
     "robinhood_prediction_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "robinhood_prediction_markets_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Robinhood Prediction Markets is exposed as a consumer brokerage/app product, but no public documented prediction-market API, SDK, or automation permission flow is published."
+        "notes": "Read-only Robinhood Prediction Markets alias uses the official public Kalshi market-data API for discovery, contracts, prices, orderbooks, trades, candles, alerts, and local paper orders. Robinhood account execution, private endpoints, and copy trading are unsupported."
       }
     },
     "smarkets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "credential_env_vars": ["SMARKETS_SESSION_TOKEN", "SMARKETS_API_TOKEN"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Smarkets API/data use requires account approval and written permission for platform data use, so this app cannot ship working support without user-specific entitlements."
+        "smarkets_order_management_enabled": false,
+        "notes": "Official Smarkets v3 event, market, contract, quote-orderbook, alert, paper-order, simulation-first copy previews from complete authenticated executed orders, authenticated order/account reads, and guarded session-authenticated order placement/cancellation are implemented. Copy previews never submit live orders automatically. Application approval, written data-use permission, account eligibility, and funded execution remain external gates."
       }
     },
     "sx_bet": {
@@ -446,6 +591,7 @@
         "sx_bet_ws_url": "wss://realtime.sx.bet/connection/websocket",
         "sx_bet_base_token": "0x6629Ce1Cf35Cc1329ebB4F63202F3f197b3F050B",
         "sx_bet_executor_address": "0x52adf738AAD93c31f798a30b2C74D658e1E9a562",
+        "sx_bet_order_management_enabled": false,
         "credential_env_vars": [
           "SX_BET_API_KEY",
           "SX_BET_PRIVATE_KEY",
@@ -456,16 +602,27 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Read-only markets, active-order orderbooks, best odds, WebSocket channel metadata, and local paper trading are implemented through official SX Bet APIs. Live signed order posting is guarded by live_trading_enabled and requires wallet credentials plus funded SX account setup."
+        "notes": "Read-only markets, active-order orderbooks, best odds, public trades, API-key account bets/fills/positions/balance, WebSocket channel metadata, and local paper trading are implemented through official SX Bet APIs. Live signed order posting is guarded by live_trading_enabled and requires wallet credentials plus funded SX account setup. v3 cancellations remain separately disabled unless sx_bet_order_management_enabled=true and the shared live confirmation gate is satisfied."
       }
     },
     "thales_market": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "credential_env_vars": [
+          "THALES_SUBGRAPH_URL",
+          "THALES_ACCOUNT_ADDRESS"
+        ],
+        "thales_network": "10",
+        "thales_rpc_url": "https://mainnet.optimism.io",
+        "thales_subgraph_url": "",
+        "thales_amm_address": "",
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Thales support requires chain-specific contract/indexer integration, AMM accounting, and explicit wallet transaction handling that this app does not implement."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "thales_submit_signed_transactions": false,
+        "notes": "Official Thales AMM market/quote reads, positional prices, alerts, local paper orders, and account-scoped positions/option-transaction reads are implemented. Configure THALES_SUBGRAPH_URL (or thales_subgraph_url) for the official positional-market subgraph and provide a wallet at request time or via THALES_ACCOUNT_ADDRESS. Live submission is deliberately unsupported and fail-closed until signed calldata can be decoded and bound to the reviewed order; thales_submit_signed_transactions cannot enable submission today."
       }
     },
     "underdog_sports": {
@@ -474,7 +631,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Underdog is a consumer app with eligibility restrictions and no public official API or automation terms for third-party prediction/event-market integration."
+        "notes": "Verified 2026-08-23: Underdog identifies CDNA as its event-contract exchange, but no official machine-readable mapping from the venue-wide catalog to the current Underdog board or Underdog account/order automation API is published."
       }
     },
     "xo_market": {
@@ -491,7 +648,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, outcome listing, orderbooks, alerts, local paper orders, and guarded signed live order posting are implemented through official XO Markets HMAC endpoints. Live trading remains disabled by default; copy trading is unsupported."
+        "notes": "Authenticated market discovery, outcome listing, orderbooks, public/account trades, OHLCV candles, alerts, local paper orders, simulation-first copy previews, guarded signed live order posting, and guarded synchronous order cancellation are implemented through official XO Markets HMAC endpoints. Live trading and order management remain disabled by default; cancellation additionally requires xo_order_management_enabled and exact operator confirmation; copy previews never submit live orders."
       }
     },
     "zeitgeist": {
@@ -500,73 +657,91 @@
         "adapter_status": "implemented",
         "zeitgeist_indexer_url": "https://processor.bsr.zeitgeist.pm/graphql",
         "zeitgeist_market_status": "",
-        "credential_env_vars": [],
+        "zeitgeist_rpc_url": "",
+        "zeitgeist_submit_signed_extrinsics": false,
+        "credential_env_vars": ["ZEITGEIST_RPC_URL", "SUBSTRATE_RPC_URL"],
         "live_trading_enabled": false,
         "min_request_interval_seconds": 0.5,
-        "notes": "Read-only market discovery, outcome asset price alerts, and local paper orders are implemented through the official Zeitgeist Subsquid/indexer GraphQL shape. Live trading requires wallet-signed Substrate extrinsics and is not implemented."
+        "notes": "Official Zeitgeist Subsquid/indexer market and asset discovery, outcome prices, alerts, and local paper orders are implemented. Live submission is deliberately unsupported and fail-closed until the signed extrinsic can be decoded and bound to the reviewed HybridRouter order; zeitgeist_submit_signed_extrinsics cannot enable submission today."
       }
     },
     "coinbase_prediction_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "coinbase_prediction_markets_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Coinbase prediction markets are exposed through the Coinbase/CFM product, but no public prediction-market API contract is available for third-party automation."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Read-only Coinbase prediction-market alias over the official Kalshi venue market-data API for discovery, contracts, prices, orderbooks, alerts, and local paper orders. Coinbase-specific live and copy-trading APIs are not published; keep live trading disabled."
       }
     },
     "probable": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "credential_env_vars": ["PROB_ADDRESS", "PROB_API_KEY", "PROB_API_SECRET", "PROB_PASSPHRASE"],
+        "probable_chain_id": 56,
+        "probable_amount_decimals": 18,
+        "probable_fee_rate_bps": 0,
+        "probable_order_nonce": 0,
+        "probable_signature_type": 0,
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Probable publishes developer documentation, but endpoint schemas, credential handling, rate limits, and offline fixtures are not yet validated in this app."
+        "notes": "Official Probable market/CLOB discovery, prices, orderbooks, alerts, paper orders, and guarded externally signed-order submission are implemented. Live submission accepts only the documented outer and signed-order fields. Signed token, side, price, and size must match shared preflight using the trusted collateral precision; maker, signer, and owner must match PROB_ADDRESS; taker and expiration must be zero; feeRateBps, nonce, and signatureType must match the trusted settings above; and the outer envelope is fixed to GTC with deferExec=true and no slippage modifier. Unknown fields fail before transport. BNB mainnet defaults to 18 decimals and other chains require an explicit reviewed scale. Live execution requires credentials, a signed order, BSC account readiness, and explicit opt-in."
       }
     },
     "kalshi_via_robinhood": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "kalshi_via_robinhood_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Robinhood does not publish a separate public automation contract for Kalshi-through-Robinhood accounts; private brokerage endpoints are unsupported."
+        "notes": "Read-only Kalshi-through-Robinhood distribution alias uses the official public Kalshi market-data API for discovery, contracts, prices, orderbooks, trades, candles, alerts, and local paper orders. Robinhood account execution, private endpoints, and copy trading are unsupported."
       }
     },
     "fanduel_predicts": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "fanduel_predicts_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": ["FANDUEL_PREDICTS_API_KEY", "CRYPTO_COM_PREDICTIONS_API_KEY"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: FanDuel Predicts is a consumer product without a public documented prediction-market API or third-party automation contract."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Read-only FanDuel Predicts/OG alias using the official Crypto.com Predictions API for OG/CDNA event discovery, contracts, prices, alerts, and local dry-run orders. Anonymous reads are supported; an optional licensed API key may be supplied. CME-listed contracts remain available through cme_prediction_markets. FanDuel account orderbook, live trading, and copy trading APIs are not published; account use remains subject to KYC and regional eligibility."
       }
     },
     "seer": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
         "credential_env_vars": [],
+        "seer_rpc_url": "",
+        "seer_trading_contract_addresses": [],
+        "seer_submit_signed_transactions": false,
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Seer requires chain, wallet, settlement, and fixture-backed adapter coverage that is not implemented."
+        "notes": "Official Seer markets-search/get-market discovery, chain-qualified outcome prices, alerts, and local paper orders are implemented. Live submission is deliberately unsupported and fail-closed until signed DEX calldata can be decoded and bound to the reviewed order; seer_submit_signed_transactions cannot enable submission today. Wallet signing, approvals, settlement, depth, and copy trading remain operator-owned or unsupported."
       }
     },
     "dflow": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "credential_env_vars": ["DFLOW_API_KEY", "DFLOW_WALLET_ADDRESS", "DFLOW_USER_PUBLIC_KEY", "DFLOW_SOLANA_RPC_URL"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: DFlow requires API-key, Solana mint, wallet, and fixture-backed integration coverage that is not implemented."
+        "notes": "Official DFlow nested event/market discovery, outcome mints, prices, orderbooks, alerts, wallet-filtered on-chain fills, simulation-first copy previews, and paper trade requests are implemented. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed order. Credentials, Proof/KYC, wallet, balance, redemption, and order-status evidence remain external gates."
       }
     },
     "space": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "space_api_base_url": "https://api.into.space/v1",
+        "space_market_status": "active",
+        "space_orderbook_depth": 20,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Space is a wallet-based Solana prediction platform without a validated public REST/indexer contract in this repository."
+        "notes": "Official Space REST reads, binary/multi-outcome contracts, prices, orderbooks, alerts, and local paper orders are implemented. The official docs currently say the public production release will be announced separately; wallet-signed live trading and copy trading remain unsupported."
       }
     },
     "xmarket": {
@@ -581,27 +756,37 @@
         "live_trading_enabled": false,
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
+        "xmarket_order_management_enabled": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.6,
-        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, and guarded API-key order submission are implemented through the official Xmarket API. Live trading stays disabled by default."
+        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key single-order submission, authenticated positions/order reads, bounded account-scoped filled-order history with derived candles, simulation-first copy previews from complete authenticated fills, and fixed batch cancellation are implemented through the official Xmarket API. Order-management batch creation is deliberately unavailable. Public trade history remains unsupported. Live trading and order management stay disabled by default; copy previews never submit live orders; order management additionally requires xmarket_order_management_enabled and the shared safety gates."
       }
     },
     "trueo": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "trueo_chain_id": 8453,
+        "trueo_live_transaction_targets": [],
+        "trueo_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Trueo is an on-chain prediction market, but a validated contract/indexer adapter with settlement and wallet safeguards is not implemented."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "notes": "Official Base TruthMarketManager/TruthMarket and documented Uniswap pool reads, discovery, prices, alerts, paper orders, and transaction-envelope decoding are implemented. Live submission is deliberately unsupported and fail-closed until router calldata can be ABI-decoded and bound to the reviewed order; trueo_submit_signed_transactions cannot enable submission today. CLOB depth and copy trading remain unsupported."
       }
     },
     "prdt_finance": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "prdt_rpc_url": "",
+        "prdt_prediction_contracts": [],
+        "prdt_amount_scale": 1.0,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: PRDT Finance lacks a validated public market-data/order adapter and offline fixtures in this app."
+        "notes": "Official legacy Prediction-contract reads, bull/bear pool-share prices, alerts, and open-round paper intents are implemented. Configure the RPC and explicit deployed Prediction addresses; the adapter never guesses deployments. Live execution, CLOB depth, settlement, and copy trading remain unsupported."
       }
     },
     "synstation": {
@@ -610,34 +795,49 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: no stable official market-data and order API contract has been validated for SynStation."
+        "notes": "Verified 2026-08-21: no stable official market-data and order API contract has been validated for SynStation."
       }
     },
     "gnosis_prediction_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "gnosis_subgraph_url": "",
+        "gnosis_rpc_url": "",
+        "credential_env_vars": ["GNOSIS_SUBGRAPH_URL", "OMEN_SUBGRAPH_URL"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Gnosis prediction-market surfaces overlap with Omen contracts, but a separate supported Gnosis market API and lifecycle contract is not implemented."
+        "gnosis_submit_signed_transactions": false,
+        "gnosis_candle_trade_limit": 1000,
+        "notes": "Official Gnosis/Omen FixedProductMarketMaker GraphQL alias; configure a current Gnosis/Omen subgraph endpoint. Discovery, prices, public FPMM trades, per-collateral indexed scaling, bounded derived candles with ambiguous same-second OHLC rejection, alerts, and paper orders are supported. Live submission is deliberately unsupported and fail-closed until signed calldata can be decoded and bound to the reviewed FPMM order; gnosis_submit_signed_transactions cannot enable submission today. CLOB depth, collateral approval, settlement, and live copy trading remain unsupported."
       }
     },
     "zeitgeist_sdk_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "zeitgeist_sdk_indexer_url": "",
+        "zeitgeist_rpc_url": "",
+        "zeitgeist_submit_signed_extrinsics": false,
+        "credential_env_vars": ["ZEITGEIST_SDK_INDEXER_URL", "ZEITGEIST_RPC_URL", "SUBSTRATE_RPC_URL"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: the existing Zeitgeist adapter does not independently cover the SDK/market target with validated endpoints and fixtures."
+        "notes": "The official Zeitgeist SDK/Markets Subsquid GraphQL schema is implemented as an explicit alias with independent discovery, outcome prices, alerts, and dry-run paper orders. Live submission is deliberately unsupported and fail-closed until the signed extrinsic can be decoded and bound to the reviewed HybridRouter order; zeitgeist_submit_signed_extrinsics cannot enable submission today. Settlement, CLOB depth, and copy trading remain unsupported."
       }
     },
     "metadao": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "metadao_api_base_url": "https://market-api.metadao.fi",
+        "metadao_history_slot_window": 500000,
+        "metadao_history_max_windows": 3,
+        "metadao_history_event_cap": 50000,
+        "metadao_history_response_byte_cap": 16777216,
+        "metadao_solana_rpc_url": "",
+        "metadao_router_program_ids": [],
+        "metadao_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: MetaDAO requires validated Solana market, wallet, settlement, and account-data integration."
+        "notes": "Official MetaDAO Futarchy DEX /api/tickers discovery, bid/ask/last prices, bounded recent public spot-swap history, derived OHLCV candles, alerts, and local paper orders are implemented. History scans are capped per call by metadao_history_slot_window (1..500000), metadao_history_max_windows (1..50; per-call scan/request cap), metadao_history_event_cap (1..250000; total decoded rows per call), and metadao_history_response_byte_cap (1024..67108864; streamed response bytes before JSON decoding). Calls without timestamp bounds intentionally return only the bounded recent slice and may return fewer rows or omit the earliest partial candle bucket; every retained candle from a truncated scan is marked partial with bounded-slot coverage. Timestamp-complete requests must reach pair creation and verify its declared creation swap within the configured scan horizon or fail closed, and arbitrary full-history completeness is not claimed. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed order; metadao_submit_signed_transactions cannot enable submission today. Wallet signing, approvals, settlement, depth, and live copy trading remain unsupported."
       }
     },
     "levr_bet": {
@@ -646,7 +846,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: no stable official Levr Bet API, contract schema, and settlement fixtures have been validated."
+        "notes": "Verified 2026-08-21: Levr Bet's public model description does not provide a stable official API, deployment inventory, contract schema, or settlement fixtures for safe integration."
       }
     },
     "dexsport": {
@@ -655,52 +855,73 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Dexsport lacks a validated prediction-market data, wallet, and settlement adapter for this app."
+        "notes": "Verified 2026-08-21: Dexsport documents prediction markets and smart-contract settlement, but its public documentation does not provide a stable market-data API, deployment inventory, or reviewed prediction-contract ABI."
       }
     },
     "lamas_finance": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "lamas_finance_rpc_url": "https://api.devnet.solana.com",
+        "lamas_finance_cluster": "devnet",
+        "lamas_finance_price_program_id": "SqFtqbsedB3HVwYd89wxTwL4UXV5JASq3JoPcApjNMJ",
+        "lamas_finance_up_down_program_id": "BbCEshx6obrBjzWPXBRxq99GcFVPB8ioe48pUYr711zy",
+        "lamas_finance_price_mint": "HEy1zzM3LFUFy8TbHEoEKQMYmPx1Uz3o51RZYRqCtDrs",
+        "lamas_finance_up_down_mint": "9a7TwLHkA2AaJd9E7qsdhaTPhQL5wQ9VXYo7J2pXHixV",
+        "lamas_finance_amount_scale": 1000000000,
+        "lamas_finance_price_scale": 1000000000000,
+        "lamas_finance_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Lamas Finance lacks a validated public API and fixture-backed contract integration here."
+        "notes": "Official Lamas Finance Anchor PricePredict and UpOrDown programs are mapped to Solana JSON-RPC discovery, pooled prices, alerts, and local paper intents. Live submission is deliberately unsupported and fail-closed until every signed Solana instruction can be decoded and bound to the reviewed prediction; lamas_finance_submit_signed_transactions cannot enable submission today. The default deployment is the documented devnet example; confirm any production program/mint inventory before use. CLOB depth, settlement, and copy trading remain unsupported."
       }
     },
     "zetarium_world": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "zetarium_rpc_url": "https://bsc-dataseed.binance.org",
+        "zetarium_prediction_market_address": "0xfc5fa5bb5f6a812600c303b4b83ee8dbdc021d99",
+        "zetarium_chain_id": 56,
+        "zetarium_market_ids": [],
+        "zetarium_max_market_scan": 500,
+        "zetarium_live_transaction_targets": [],
+        "zetarium_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Zetarium World prediction-market V2/API support is not a stable production integration target in this repository."
+        "notes": "Reviewed BSC PredictionMarket deployment and documented V2 contract model: on-chain discovery, pari-mutuel YES/NO pool prices, alerts, local paper intents, and guarded externally signed BUY transactions are fixture-backed. Keep market IDs explicit when operating a bounded inventory; live submission remains disabled by default and requires a reviewed target allow-list. CLOB depth, wallet signing, settlement, and copy trading remain unsupported."
       }
     },
     "blinq": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Blinq lacks a validated public API and risk-controlled adapter contract."
+        "copy_trading_enabled": false,
+        "notes": "Read-only alias over official Polymarket public market data for markets surfaced by Blinq. Discovery, contracts, prices, orderbooks, alerts, and local paper orders are supported; Blinq leverage, deposits, private account actions, live wallet execution, and copy trading remain unsupported."
       }
     },
     "zeitgeist_prediction_pools": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "zeitgeist_pools_indexer_url": "",
+        "zeitgeist_rpc_url": "",
+        "zeitgeist_submit_signed_extrinsics": false,
+        "credential_env_vars": ["ZEITGEIST_POOLS_INDEXER_URL", "ZEITGEIST_INDEXER_URL", "ZEITGEIST_RPC_URL", "SUBSTRATE_RPC_URL"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: prediction-pool support needs a separate pool schema, asset accounting, and lifecycle fixtures beyond the existing Zeitgeist adapter."
+        "notes": "Pool-scoped Zeitgeist market/pool/asset GraphQL adapter for discovery, prices, alerts, and paper orders. Live submission is deliberately unsupported and fail-closed until the signed extrinsic can be decoded and bound to the reviewed pool-scoped HybridRouter order; zeitgeist_submit_signed_extrinsics cannot enable submission today. Pool accounting, settlement, CLOB depth, and copy trading remain unsupported."
       }
     },
     "reality_eth_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "reality_eth_subgraph_url": "",
+        "credential_env_vars": ["REALITY_ETH_SUBGRAPH_URL", "REALITYETH_SUBGRAPH_URL"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Reality.eth is an oracle/question protocol, not a validated tradable-market API for this application."
+        "notes": "Official Reality.eth question-subgraph adapter; configure a current GraphQL endpoint. Question discovery, response-option listing, lifecycle status, and read-only metadata are supported. Prices, price-triggered alerts, orderbooks, paper orders, and trading remain unsupported because Reality.eth is an oracle/question protocol."
       }
     },
     "sportstrade": {
@@ -715,10 +936,22 @@
     "prophet_exchange": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "prophet_exchange_api_base_url": "https://cash.api.prophetx.co/partner",
+        "prophet_exchange_api_version": "v3",
+        "prophet_exchange_tournament_id": "",
+        "credential_env_vars": [
+          "PROPHET_EXCHANGE_API_KEY",
+          "PROPHET_EXCHANGE_ACCESS_TOKEN",
+          "PROPHET_EXCHANGE_ACCESS_KEY",
+          "PROPHET_EXCHANGE_SECRET_KEY"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Prophet Exchange API access requires approval and partner credentials unavailable to public adapter tests."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "prophet_exchange_order_management_enabled": false,
+        "notes": "Official ProphetX affiliate Market Data and guarded Trading API integration is implemented with offline fixtures, including wallet balance, paginated order-history/order-detail/trade reads, simulation-first copy previews from complete authenticated fills, and fixed single/batch cancellation. Configure partner/API credentials; live submission and order management stay disabled by default, support the documented BUY quote shape only, require the separate prophet_exchange_order_management_enabled opt-in for cancellation, and require approved account/KYC/region access."
       }
     },
     "sporttrade_products": {
@@ -733,19 +966,11 @@
     "matchbook": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "credential_env_vars": ["MATCHBOOK_SESSION_TOKEN", "MATCHBOOK_USERNAME", "MATCHBOOK_PASSWORD", "MATCHBOOK_MFA_CODE"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Matchbook has an official API, but automated use requires account approval and express API/data-use authorization."
-      }
-    },
-    "scicast": {
-      "enabled": false,
-      "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
-        "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: SciCast historical data-mart documentation is not a current production market/trading API contract."
+        "matchbook_order_management_enabled": false,
+        "notes": "Official Matchbook event/market/runner discovery, decimal-odds prices, orderbooks, alerts, paper orders, guarded session-authenticated offer submission, and fixed single/batch/global cancellation are implemented. Edit mutations are deliberately unavailable. The maximum-exposure cap uses full BACK stake and worst-case LAY liability. Account session, region eligibility, API terms, and funded execution remain external gates; order management is opt-in and disabled by default."
       }
     },
     "meta_arena": {

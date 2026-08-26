@@ -1,0 +1,16 @@
+{
+  "data": [
+    {
+      "id": "fanatics-contract-yes",
+      "symbol": "FANATICS-CHAMP-YES",
+      "title": "Yes",
+      "status": "active"
+    },
+    {
+      "id": "fanatics-contract-no",
+      "symbol": "FANATICS-CHAMP-NO",
+      "title": "No",
+      "status": "active"
+    }
+  ]
+}

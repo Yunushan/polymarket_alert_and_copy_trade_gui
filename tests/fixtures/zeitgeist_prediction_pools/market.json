@@ -1,0 +1,53 @@
+{
+  "data": {
+    "markets": [
+      {
+        "id": "zeitgeist-market-90",
+        "marketId": 90,
+        "question": "Will a DEX be deployed on Statemint or Statemine before the end of Q2 2027?",
+        "description": "Zeitgeist pool fixture market for adapter tests.",
+        "slug": "dex-on-statemint",
+        "status": "Active",
+        "resolvedOutcome": null,
+        "outcomeAssets": [
+          "CategoricalOutcome:90:0",
+          "CategoricalOutcome:90:1"
+        ],
+        "marketType": {
+          "categorical": "2",
+          "scalar": null
+        },
+        "categories": [
+          {
+            "ticker": "YES",
+            "name": "Yes",
+            "color": "#2ecc71"
+          },
+          {
+            "ticker": "NO",
+            "name": "No",
+            "color": "#e74c3c"
+          }
+        ],
+        "pool": {
+          "id": "pool-17",
+          "poolId": 17,
+          "poolStatus": "Active",
+          "baseAsset": "Ztg",
+          "volume": "10000",
+          "ztgQty": "5000",
+          "weights": [
+            {
+              "assetId": "CategoricalOutcome:90:0",
+              "len": "500"
+            },
+            {
+              "assetId": "CategoricalOutcome:90:1",
+              "len": "500"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

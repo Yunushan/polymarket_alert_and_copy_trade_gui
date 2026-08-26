@@ -1,0 +1,14 @@
+{
+  "positions": [
+    {
+      "marketSlug": "doge-above-021652-sep-1-1200-utc",
+      "tokenId": "1111111111111111111111111111111111111111111111111111111111111111",
+      "outcome": "Yes",
+      "size": "1.5",
+      "averagePrice": "0.75",
+      "status": "OPEN",
+      "winningOutcomeIndex": null,
+      "payoutNumerators": null
+    }
+  ]
+}

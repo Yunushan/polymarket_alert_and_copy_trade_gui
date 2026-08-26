@@ -25,6 +25,7 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Yes",
     "No",
     "Live trading only",
+    "Guarded, off by default",
     "Live/WebSocket only",
     "Live signed orders only",
     "Subgraph endpoint required",
@@ -44,10 +45,17 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Wallet required for trading",
     "Jurisdiction varies",
     "API credentials required",
+    "API key; JWT for private reads/removal",
+    "No API key; wallet/collateral required only for future live chain flow",
+    "No API key; wallet required only for future live chain flow",
+    "No API key; wallet/settlement required only for future live chain flow",
+    "No API key for reads; externally signed wallet payload required for live orders",
+    "No API key; externally signed wallet transaction required for live orders",
     "Optional API key",
     "Live trading only",
     "Not KYC limited",
     "Account/API token required",
+    "API key required",
     "Not trading/KYC limited",
     "Account/export access required",
     "Program access required",
@@ -59,18 +67,26 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Account or wallet required",
     "Gemini account required",
     "Region limited",
+    "Solana RPC; externally signed wallet transaction required for live orders",
+    "Production Base RPC and externally signed wallet transaction required for live orders",
+    "Devnet example; production deployment must be reviewed",
 )
 IMPLEMENTED_MARKETS = {
+    "betmgm",
     "polymarket",
+    "blinq",
     "kalshi",
     "predictit",
     "manifold",
     "metaculus",
+    "good_judgment_open",
     "limitless_exchange",
     "sx_bet",
     "azuro",
     "augur",
+    "reality_eth_markets",
     "omen",
+    "gnosis_prediction_markets",
     "zeitgeist",
     "myriad_markets",
     "xo_market",
@@ -79,7 +95,40 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "draftkings_predictions",
+    "fanatics_markets",
+    "fanduel_predicts",
+    "coinbase_prediction_markets",
+    "robinhood_prediction_markets",
+    "kalshi_via_robinhood",
+    "context_v2",
+    "smarkets",
+    "dflow",
     "xmarket",
+    "probable",
+    "matchbook",
+    "thales_market",
+    "metadao",
+    "seer",
+    "hyperliquid",
+    "trueo",
+    "zeitgeist_sdk_markets",
+    "zeitgeist_prediction_pools",
+    "ibkr_forecasttrader",
+    "forecastex",
+    "cme_prediction_markets",
+    "drift_bet",
+    "frenzy_finance",
+    "space",
+    "hedgehog_markets",
+    "prophet_exchange",
+    "prdt_finance",
+    "zetarium_world",
+    "lamas_finance",
+    "nadex",
+    "iowa_electronic_markets",
+    "hypermind",
+    "scicast",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -141,6 +190,13 @@ class ReadmeCapabilityMatrixTests(unittest.TestCase):
                 continue
             if any(f"`{market_id}`" in line for market_id in MARKET_IDS):
                 self.assertIn("| Stub |", line)
+
+    def test_readme_documents_omen_history_safety_boundaries(self) -> None:
+        text = README.read_text(encoding="utf-8")
+
+        self.assertIn("Omen/Gnosis public FPMM trades plus bounded derived candles", text)
+        self.assertIn("resolve each collateral token's indexed scale", text)
+        self.assertIn("reject ambiguous same-second OHLC", text)
 
 
 if __name__ == "__main__":

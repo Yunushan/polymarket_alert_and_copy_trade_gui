@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "msg": "success",
+  "result": {
+    "total": 1,
+    "list": [
+      {
+        "marketId": 77,
+        "marketTitle": "Will ETH be above $3,000?",
+        "outcome": "Yes",
+        "sharesOwned": "4",
+        "sharesFrozen": "0",
+        "unrealizedPnl": "0.12",
+        "tokenId": "0xyes",
+        "avgEntryPrice": "0.65"
+      }
+    ]
+  }
+}

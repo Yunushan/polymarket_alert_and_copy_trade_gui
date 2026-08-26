@@ -1,0 +1,12 @@
+{
+  "offers": [
+    {
+      "id": 404,
+      "status": "edited",
+      "current-odds": 1.5,
+      "new-odds": 2.0,
+      "current-stake": 5.0,
+      "new-stake": 6.0
+    }
+  ]
+}

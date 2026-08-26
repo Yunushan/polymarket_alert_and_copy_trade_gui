@@ -1,0 +1,27 @@
+{
+  "assetPositions": [
+    {
+      "position": {
+        "coin": "#10",
+        "szi": "5.0",
+        "entryPx": "0.63",
+        "unrealizedPnl": "0.02"
+      },
+      "type": "oneWay"
+    }
+  ],
+  "marginSummary": {
+    "accountValue": "100.0",
+    "totalNtlPos": "3.15",
+    "totalRawUsd": "100.0",
+    "totalMarginUsed": "0.0"
+  },
+  "crossMarginSummary": {
+    "accountValue": "100.0",
+    "totalNtlPos": "3.15",
+    "totalRawUsd": "100.0",
+    "totalMarginUsed": "0.0"
+  },
+  "crossMaintenanceMarginUsed": "0.0",
+  "withdrawable": "100.0"
+}

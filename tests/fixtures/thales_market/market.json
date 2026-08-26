@@ -1,0 +1,17 @@
+{
+  "address": "0x1111111111111111111111111111111111111111",
+  "asset": "BTC",
+  "maturityDate": "2026-12-31T12:00:00.000Z",
+  "position": "UP",
+  "strikePrice": 100000,
+  "price": 0.58,
+  "bonus": 0,
+  "roi": {
+    "baseRoi": 0.72,
+    "bonusRoi": 0,
+    "totalRoi": 0.72
+  },
+  "liquidity": 25000,
+  "skewImpact": 0.01,
+  "isOpen": true
+}

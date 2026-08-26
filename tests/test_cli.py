@@ -11,6 +11,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.storage import load_config
+from market_adapters import (
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
+    MarketTrade,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PriceSnapshot,
+)
 
 import market_sentinel_cli
 from polymarket.http_client import PolymarketHTTPError
@@ -24,6 +33,1888 @@ def run_cli_silent(args: list[str]) -> int:
 
 
 class MarketSentinelCliTests(unittest.TestCase):
+    def test_market_read_commands_expose_normalized_adapter_operations(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="space")
+        adapter = SimpleNamespace(
+            list_events=lambda query, limit: [
+                MarketEvent("space", "event-1", query or "event", status="open")
+            ],
+            list_contracts=lambda event_id: [
+                MarketContract("space", "event-1:YES", event_id, "Yes", outcome="Yes")
+            ],
+            get_price=lambda contract: PriceSnapshot("space", contract, last=0.61, midpoint=0.61, source="fixture"),
+            get_orderbook=lambda contract: OrderBookSnapshot(
+                "space",
+                contract,
+                bids=[OrderBookLevel(0.6, 4.0)],
+                asks=[OrderBookLevel(0.62, 3.0)],
+            ),
+            list_trades=lambda contract, **kwargs: [MarketTrade("space", contract, "trade-1", "BUY", 0.6, 2.0, 1700000000.0)],
+            list_candles=lambda contract, **kwargs: [
+                MarketCandle("space", contract, 1700000000.0, 0.59, 0.62, 0.58, 0.61, 10.0)
+            ],
+        )
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(["markets", "events", "--query", "launch", "--compact"]),
+                0,
+            )
+            self.assertEqual(
+                json.loads(stdout.getvalue())["events"][0]["title"],
+                "launch",
+            )
+
+        commands = [
+            (["markets", "contracts", "event-1", "--compact"], "contracts"),
+            (["markets", "price", "event-1:YES", "--compact"], "price"),
+            (["markets", "orderbook", "event-1:YES", "--compact"], "orderbook"),
+            (["markets", "trades", "event-1:YES", "--before", "1700000010", "--compact"], "trades"),
+            (["markets", "candles", "event-1:YES", "--resolution", "1h", "--from", "1700000000", "--compact"], "candles"),
+        ]
+        for command, key in commands:
+            with self.subTest(command=command):
+                stdout = io.StringIO()
+                with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+                    "market_sentinel_cli._registry", return_value=SimpleNamespace()
+                ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+                    "market_sentinel_cli.require_market_enabled"
+                ), patch("sys.stdout", stdout):
+                    self.assertEqual(market_sentinel_cli.main(command), 0)
+                    self.assertIn(key, json.loads(stdout.getvalue()))
+
+    def test_markets_support_command_exposes_canonical_matrix(self) -> None:
+        expected = {
+            "selected_market_id": "kalshi",
+            "market": {
+                "market_id": "kalshi",
+                "implementation_status": "implemented",
+                "operations": {"live_trading": {"status": "guarded"}},
+            },
+        }
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=SimpleNamespace()), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.market_support_payload", return_value=expected), patch("sys.stdout", stdout):
+            self.assertEqual(market_sentinel_cli.main(["markets", "support", "--market", "kalshi", "--compact"]), 0)
+        self.assertEqual(json.loads(stdout.getvalue()), expected)
+
+    def test_market_read_commands_reject_non_finite_time_bounds(self) -> None:
+        with patch("market_sentinel_cli._load_cfg", return_value=SimpleNamespace(selected_market_id="space")), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("market_sentinel_cli.adapter_for_market"):
+            self.assertEqual(market_sentinel_cli.main(["markets", "trades", "contract", "--before", "nan"]), 1)
+
+    def test_market_account_command_exposes_allow_listed_recovery(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="gemini_titan")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("positions",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "positions": [{"symbol": "GEMI-BTC100K26-YES"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "positions",
+                        "--event-ticker",
+                        "BTC100K2026",
+                        "--limit",
+                        "10",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "positions")
+        self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
+        self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
+
+    def test_ibkr_account_and_order_management_commands_forward_documented_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="ibkr_forecasttrader")
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("orders", "order_status"),
+            account_recovery=account_recovery,
+            order_management_operations=("cancel_order", "cancel_all_orders", "modify_order"),
+            manage_orders=manage_orders,
+        )
+        common_patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "orders",
+                        "--market",
+                        "ibkr_forecasttrader",
+                        "--status",
+                        "filled",
+                        "--historical",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        account_payload = json.loads(stdout.getvalue())
+        self.assertEqual(account_calls, [("orders", {"filters": "filled", "force": True})])
+        self.assertEqual(account_payload["data"]["operation"], "orders")
+
+        instructions = {
+            "conid": 721095497,
+            "orderType": "LMT",
+            "side": "BUY",
+            "tif": "DAY",
+            "quantity": 5,
+            "price": 0.51,
+        }
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "modify_order",
+                        "--market",
+                        "ibkr_forecasttrader",
+                        "--order-id",
+                        "987654",
+                        "--instructions",
+                        json.dumps(instructions),
+                        "--manual-indicator",
+                        "false",
+                        "--external-operator",
+                        "desk-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        order_payload = json.loads(stdout.getvalue())
+        self.assertEqual(order_calls[0][0], "modify_order")
+        self.assertEqual(order_calls[0][1]["order_id"], "987654")
+        self.assertEqual(order_calls[0][1]["instructions"], instructions)
+        self.assertEqual(order_calls[0][1]["manual_indicator"], "false")
+        self.assertEqual(order_calls[0][1]["external_operator"], "desk-1")
+        self.assertEqual(order_payload["data"]["operation"], "modify_order")
+
+    def test_manifold_account_and_order_management_commands_forward_documented_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="manifold")
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("account", "active_orders", "order_history"),
+            account_recovery=account_recovery,
+            order_management_operations=("cancel_order",),
+            manage_orders=manage_orders,
+        )
+        common_patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "active_orders",
+                        "--market",
+                        "manifold",
+                        "--contract",
+                        "mf-binary-1:YES",
+                        "--limit",
+                        "20",
+                        "--before",
+                        "bet-open-1",
+                        "--from",
+                        "1760000000",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        account_payload = json.loads(stdout.getvalue())
+        self.assertEqual(account_calls, [("active_orders", {
+            "contract_id": "mf-binary-1:YES",
+            "limit": 20,
+            "before": "bet-open-1",
+            "after": None,
+            "before_time": None,
+            "after_time": 1760000000.0,
+        })])
+        self.assertEqual(account_payload["data"]["operation"], "active_orders")
+
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "manifold",
+                        "--order-id",
+                        "bet-open-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        order_payload = json.loads(stdout.getvalue())
+        self.assertEqual(order_calls, [("cancel_order", {
+            "order_id": "bet-open-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+        self.assertEqual(order_payload["data"]["operation"], "cancel_order")
+
+    def test_prophet_exchange_account_and_cancellation_commands_forward_documented_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="prophet_exchange")
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("balance", "transactions"),
+            account_recovery=account_recovery,
+            order_management_operations=("cancel_order", "cancel_orders"),
+            manage_orders=manage_orders,
+        )
+        common_patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "transactions",
+                        "--market",
+                        "prophet_exchange",
+                        "--cursor",
+                        "41",
+                        "--limit",
+                        "25",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(account_calls, [("transactions", {"cursor": "41", "limit": 25})])
+        self.assertEqual(json.loads(stdout.getvalue())["data"]["operation"], "transactions")
+
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "prophet_exchange",
+                        "--order-id",
+                        "order-1",
+                        "--external-id",
+                        "external-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(order_calls, [("cancel_order", {
+            "order_id": "order-1",
+            "external_id": "external-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+        self.assertEqual(json.loads(stdout.getvalue())["data"]["operation"], "cancel_order")
+
+        stdout = io.StringIO()
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_orders",
+                        "--market",
+                        "prophet_exchange",
+                        "--instructions",
+                        '[{"order_id":"order-1","external_id":"external-1"}]',
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(order_calls[-1][0], "cancel_orders")
+        self.assertEqual(order_calls[-1][1]["orders"], [{"order_id": "order-1", "external_id": "external-1"}])
+
+    def test_azuro_bet_history_account_command_forwards_wallet_and_bounds(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="azuro")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("bet_history",),
+            account_recovery=account_recovery,
+        )
+        stdout = io.StringIO()
+        patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "bet_history",
+                        "--market",
+                        "azuro",
+                        "--wallet",
+                        "0x0000000000000000000000000000000000000001",
+                        "--limit",
+                        "25",
+                        "--offset",
+                        "4",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "bet_history",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 25,
+                        "offset": 4,
+                    },
+                )
+            ],
+        )
+
+    def test_thales_transaction_account_command_forwards_wallet_filters_and_bounds(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="thales_market")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("positions", "transactions"),
+            account_recovery=account_recovery,
+        )
+        stdout = io.StringIO()
+        patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "transactions",
+                        "--market",
+                        "thales_market",
+                        "--wallet",
+                        "0x0000000000000000000000000000000000000001",
+                        "--account-market-id",
+                        "0x1111111111111111111111111111111111111111",
+                        "--limit",
+                        "12",
+                        "--from",
+                        "100",
+                        "--to",
+                        "200",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "transactions",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 12,
+                        "market_id": "0x1111111111111111111111111111111111111111",
+                        "from_timestamp": 100.0,
+                        "to_timestamp": 200.0,
+                    },
+                )
+            ],
+        )
+
+    def test_metadao_activity_account_command_forwards_wallet_and_bounds(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="metadao")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("activity",),
+            account_recovery=account_recovery,
+        )
+        stdout = io.StringIO()
+        patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "activity",
+                        "--market",
+                        "metadao",
+                        "--wallet",
+                        "11111111111111111111111111111111",
+                        "--limit",
+                        "12",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                    },
+                )
+            ],
+        )
+
+    def test_myriad_account_activity_command_forwards_wallet_and_bounds(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("account_activity",),
+            account_recovery=account_recovery,
+        )
+        stdout = io.StringIO()
+        patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "account_activity",
+                        "--market",
+                        "myriad_markets",
+                        "--wallet",
+                        "0x0000000000000000000000000000000000000001",
+                        "--limit",
+                        "10",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 10,
+                    },
+                )
+            ],
+        )
+
+    def test_myriad_portfolio_and_market_positions_commands_forward_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("portfolio", "market_positions"),
+            account_recovery=account_recovery,
+        )
+        wallet = "0x0000000000000000000000000000000000000001"
+        patches = (
+            patch("market_sentinel_cli._load_cfg", return_value=cfg),
+            patch("market_sentinel_cli._registry", return_value=SimpleNamespace()),
+            patch("market_sentinel_cli.adapter_for_market", return_value=adapter),
+            patch("market_sentinel_cli.require_market_enabled"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patch("sys.stdout", io.StringIO()):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets", "account", "portfolio", "--market", "myriad_markets",
+                        "--wallet", wallet, "--page", "2", "--limit", "10",
+                        "--trading-model", "ob", "--min-shares", "1.5",
+                        "--account-market-id", "501", "--network-id", "56",
+                        "--token-address", wallet, "--status", "ongoing", "--keyword", "btc",
+                        "--sort", "desc", "--sort-by", "profit", "--exclude-history",
+                        "--group-by-event", "--compact",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets", "account", "market_positions", "--market", "myriad_markets",
+                        "--wallet", wallet, "--topics", "crypto,macro", "--market-ids", "56:501,56:502",
+                        "--state", "open", "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(account_calls[0][0], "portfolio")
+        self.assertEqual(account_calls[0][1]["page"], 2)
+        self.assertEqual(account_calls[0][1]["trading_model"], "ob")
+        self.assertEqual(account_calls[0][1]["exclude_history"], True)
+        self.assertEqual(account_calls[1], (
+            "market_positions",
+            {
+                "wallet": wallet,
+                "limit": 25,
+                "page": 1,
+                "trading_model": "all",
+                "min_shares": None,
+                "market_slug": None,
+                "market_id": None,
+                "network_id": None,
+                "token_address": None,
+                "status": None,
+                "keyword": None,
+                "sort": None,
+                "sort_by": None,
+                "exclude_history": False,
+                "group_by_event": False,
+                "state": "open",
+                "topics": "crypto,macro",
+                "market_ids": "56:501,56:502",
+            },
+        ))
+
+    def test_myriad_position_intent_command_forwards_unsigned_request(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        calls = []
+
+        def position_intent(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs, "intent_only": True}
+
+        adapter = SimpleNamespace(
+            position_intent_operations=("split", "merge", "redeem", "redeem_voided", "neg_risk_split", "neg_risk_merge"),
+            position_intent=position_intent,
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets", "position-intent", "neg_risk_split", "--market", "myriad_markets",
+                        "--amount", "1000", "--network-id", "56",
+                        "--event-id", "0x" + "ab" * 32, "--outcome-index", "2", "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls, [("neg_risk_split", {
+            "amount": "1000",
+            "network_id": "56",
+            "event_id": "0x" + "ab" * 32,
+            "outcome_index": "2",
+        })])
+
+    def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "batch_cancel_orders", "cancel_all_orders", "batch_modify_orders"),
+            manage_orders=manage_orders,
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        signed = {
+            "order": {
+                "trader": "0x1234567890123456789012345678901234567890",
+                "marketId": "42",
+                "outcomeId": 0,
+                "side": 0,
+                "amount": "1000000000000000000",
+                "price": "500000000000000000",
+                "minFillAmount": "0",
+                "nonce": "1",
+                "expiration": "0",
+            },
+            "signature": "0x" + "ab" * 65,
+        }
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "myriad_markets",
+                        "--order-hash",
+                        "0x" + "12" * 32,
+                        "--instructions",
+                        json.dumps(signed),
+                        "--network-id",
+                        "56",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_order")
+        self.assertEqual(calls[0][1]["order_hash"], "0x" + "12" * 32)
+        self.assertEqual(calls[0][1]["order"], signed["order"])
+        self.assertEqual(calls[0][1]["signature"], signed["signature"])
+        self.assertEqual(calls[0][1]["network_id"], "56")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "batch_cancel_orders",
+                        "--market",
+                        "myriad_markets",
+                        "--instructions",
+                        json.dumps([signed]),
+                        "--allow-partial",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "batch_cancel_orders")
+        self.assertEqual(calls[1][1]["orders"], [signed])
+        self.assertTrue(calls[1][1]["allow_partial"])
+        self.assertNotIn("instructions", calls[1][1])
+
+    def test_betfair_order_management_command_forwards_guarded_mutation_options(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_orders", "update_orders", "replace_orders"),
+            manage_orders=manage_orders,
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--exchange-market-id",
+                        "1.234",
+                        "--instructions",
+                        '[{"bet_id":"bet-1","size_reduction":1.25}]',
+                        "--customer-ref",
+                        "cancel-1",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(calls[0][0], "cancel_orders")
+        self.assertEqual(
+            calls[0][1],
+            {
+                "market_id": "1.234",
+                "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                "customer_ref": "cancel-1",
+            },
+        )
+        self.assertEqual(payload["parameters"]["market_id"], "1.234")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "replace_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--json",
+                        '{"market_id":"1.234","instructions":[{"bet_id":"bet-1","new_price":2}],"market_version":7}',
+                        "--async-request",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "replace_orders")
+        self.assertEqual(calls[1][1]["market_version"], 7)
+        self.assertTrue(calls[1][1]["async_request"])
+
+    def test_kalshi_order_management_command_forwards_v2_mutation_options(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="kalshi")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order"),
+            manage_orders=manage_orders,
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "amend_order",
+                        "--market",
+                        "kalshi",
+                        "--order-id",
+                        "order-1",
+                        "--ticker",
+                        "KXTEST-YES",
+                        "--side",
+                        "bid",
+                        "--price",
+                        "0.44",
+                        "--count",
+                        "3",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "amend_order")
+        self.assertEqual(calls[0][1]["order_id"], "order-1")
+        self.assertEqual(calls[0][1]["ticker"], "KXTEST-YES")
+        self.assertEqual(calls[0][1]["count"], "3")
+        self.assertEqual(
+            calls[0][1]["confirm_order_management"],
+            "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "batch_cancel_orders",
+                        "--market",
+                        "kalshi",
+                        "--instructions",
+                        '[{"order_id":"order-1"},{"order_id":"order-2","exchange_index":0}]',
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "batch_cancel_orders")
+        self.assertEqual(
+            calls[1][1]["orders"],
+            [{"order_id": "order-1"}, {"order_id": "order-2", "exchange_index": 0}],
+        )
+        self.assertNotIn("instructions", calls[1][1])
+
+    def test_gemini_order_management_command_forwards_single_and_batch_cancellations(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="gemini_titan")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "batch_cancel_orders"),
+            manage_orders=manage_orders,
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "gemini_titan",
+                        "--order-id",
+                        "106817811",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_order")
+        self.assertEqual(calls[0][1]["order_id"], "106817811")
+        self.assertEqual(calls[0][1]["confirm_order_management"], confirmation)
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "batch_cancel_orders",
+                        "--market",
+                        "gemini_titan",
+                        "--instructions",
+                        "[106817811,106817812]",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "batch_cancel_orders")
+        self.assertEqual(calls[1][1]["orders"], [106817811, 106817812])
+        self.assertEqual(calls[1][1]["confirm_order_management"], confirmation)
+        self.assertNotIn("instructions", calls[1][1])
+
+    def test_opinion_order_management_command_forwards_sdk_cancellation_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="opinion_labs")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "batch_cancel_orders", "cancel_all_orders"),
+            manage_orders=manage_orders,
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_all_orders",
+                        "--market",
+                        "opinion_labs",
+                        "--market-id",
+                        "77",
+                        "--side",
+                        "BUY",
+                        "--confirm-global-cancel",
+                        "CANCEL ALL OPINION ORDERS",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_all_orders")
+        self.assertEqual(calls[0][1]["market_id"], "77")
+        self.assertEqual(calls[0][1]["side"], "BUY")
+        self.assertEqual(calls[0][1]["confirm_global_cancel"], "CANCEL ALL OPINION ORDERS")
+        self.assertEqual(calls[0][1]["confirm_order_management"], confirmation)
+
+    def test_limitless_order_management_command_forwards_market_scoped_cancellation(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="limitless_exchange")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "batch_cancel_orders", "cancel_all_orders"),
+            manage_orders=manage_orders,
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_all_orders",
+                        "--market",
+                        "limitless_exchange",
+                        "--market-slug",
+                        "doge-above-021652-sep-1-1200-utc",
+                        "--confirm-global-cancel",
+                        "CANCEL ALL LIMITLESS ORDERS",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_all_orders")
+        self.assertEqual(calls[0][1]["market_slug"], "doge-above-021652-sep-1-1200-utc")
+        self.assertEqual(calls[0][1]["confirm_global_cancel"], "CANCEL ALL LIMITLESS ORDERS")
+        self.assertEqual(calls[0][1]["confirm_order_management"], confirmation)
+
+    def test_matchbook_order_management_command_forwards_offer_mutation_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="matchbook")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=(
+                "cancel_offer",
+                "cancel_offers",
+                "cancel_all_offers",
+                "edit_offer",
+                "edit_offers",
+            ),
+            manage_orders=manage_orders,
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_offers",
+                        "--market",
+                        "matchbook",
+                        "--offer-ids",
+                        "404,405",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_offers")
+        self.assertEqual(calls[0][1]["offer_ids"], "404,405")
+        self.assertEqual(calls[0][1]["confirm_order_management"], confirmation)
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "edit_offers",
+                        "--market",
+                        "matchbook",
+                        "--instructions",
+                        '[{"id":404,"current-odds":1.5,"new-odds":2,"current-stake":5,"new-stake":6}]',
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "edit_offers")
+        self.assertEqual(calls[1][1]["instructions"][0]["id"], 404)
+        self.assertEqual(calls[1][1]["confirm_order_management"], confirmation)
+
+    def test_hyperliquid_account_command_forwards_dex_and_history_limit(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="hyperliquid")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("order_history",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "orders": [{"coin": "#10"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "order_history",
+                        "--market",
+                        "hyperliquid",
+                        "--limit",
+                        "12",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "order_history")
+        self.assertEqual(payload["parameters"]["limit"], 12)
+
+    def test_hyperliquid_order_management_command_forwards_signed_envelopes(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="hyperliquid")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "schedule_cancel"),
+            manage_orders=manage_orders,
+        )
+        signed_cancel = {
+            "action": {"type": "cancel", "cancels": [{"a": 100000000, "o": 123456789}]},
+            "nonce": 1700000000000,
+            "signature": "0x" + "ab" * 65,
+        }
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "hyperliquid",
+                        "--instructions",
+                        json.dumps(signed_cancel),
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_order")
+        self.assertEqual(calls[0][1]["signed_action"], signed_cancel)
+        self.assertEqual(calls[0][1]["confirm_order_management"], confirmation)
+
+        signed_schedule = {
+            "action": {"type": "scheduleCancel", "time": 1800000000000},
+            "nonce": 1700000000001,
+            "signature": "0x" + "cd" * 65,
+        }
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "schedule_cancel",
+                        "--market",
+                        "hyperliquid",
+                        "--instructions",
+                        json.dumps(signed_schedule),
+                        "--confirm-order-management",
+                        confirmation,
+                        "--confirm-global-cancel",
+                        "SCHEDULE HYPERLIQUID CANCEL",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "schedule_cancel")
+        self.assertEqual(calls[1][1]["signed_action"], signed_schedule)
+        self.assertEqual(calls[1][1]["confirm_global_cancel"], "SCHEDULE HYPERLIQUID CANCEL")
+
+    def test_opinion_account_command_forwards_page_filters_and_order_id(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="opinion_labs")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("order_history", "order_detail", "positions"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "result": {"list": [{"orderId": "order-1"}]},
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "order_history",
+                        "--page",
+                        "2",
+                        "--limit",
+                        "20",
+                        "--account-market-id",
+                        "77",
+                        "--chain-id",
+                        "56",
+                        "--status",
+                        "1,2",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["parameters"], {"page": 2, "limit": 20, "market_id": "77", "chain_id": "56", "status": "1,2"})
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    ["markets", "account", "order_detail", "--order-id", "order-1", "--compact"]
+                ),
+                0,
+            )
+        self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"order_id": "order-1"})
+
+    def test_betfair_account_command_forwards_cleared_order_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("active_orders", "cleared_orders", "funds", "account"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "clearedOrders": [{"betId": "bet-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "cleared_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--contract",
+                        "1.234:101",
+                        "--status",
+                        "SETTLED",
+                        "--limit",
+                        "10",
+                        "--offset",
+                        "2",
+                        "--from",
+                        "1780308000",
+                        "--to",
+                        "1780394400",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        parameters = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(parameters["market_id"], "1.234")
+        self.assertEqual(parameters["runner_id"], "101")
+        self.assertEqual(parameters["bet_status"], "SETTLED")
+        self.assertEqual(parameters["limit"], 10)
+        self.assertEqual(parameters["offset"], 2)
+        self.assertEqual(parameters["from_timestamp"], 1780308000.0)
+        self.assertEqual(parameters["to_timestamp"], 1780394400.0)
+
+    def test_betfair_account_command_forwards_active_order_and_funds_options(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("active_orders", "cleared_orders", "funds", "account"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "active_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--contract",
+                        "1.234:101",
+                        "--status",
+                        "EXECUTABLE",
+                        "--order-by",
+                        "BY_PLACE_TIME",
+                        "--sort-dir",
+                        "LATEST_TO_EARLIEST",
+                        "--limit",
+                        "8",
+                        "--offset",
+                        "3",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        active = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(active["market_id"], "1.234")
+        self.assertEqual(active["contract_id"], "1.234:101")
+        self.assertEqual(active["order_by"], "BY_PLACE_TIME")
+        self.assertEqual(active["sort_dir"], "LATEST_TO_EARLIEST")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    ["markets", "account", "funds", "--market", "betfair_exchange", "--wallet", "UK", "--compact"]
+                ),
+                0,
+            )
+        self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"wallet": "UK"})
+
+    def test_betfair_account_command_forwards_statement_and_currency_options(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=(
+                "active_orders",
+                "cleared_orders",
+                "funds",
+                "account",
+                "statement",
+                "currency_rates",
+            ),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "statement",
+                        "--market",
+                        "betfair_exchange",
+                        "--locale",
+                        "en",
+                        "--wallet",
+                        "UK",
+                        "--limit",
+                        "12",
+                        "--offset",
+                        "4",
+                        "--from",
+                        "1780272000",
+                        "--to",
+                        "1780358400",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        statement = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(statement["locale"], "en")
+        self.assertEqual(statement["limit"], 12)
+        self.assertEqual(statement["offset"], 4)
+        self.assertTrue(statement["include_item"])
+        self.assertEqual(statement["wallet"], "UK")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "currency_rates",
+                        "--market",
+                        "betfair_exchange",
+                        "--from-currency",
+                        "GBP",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"from_currency": "GBP"})
+
+    def test_matchbook_account_command_forwards_report_and_offer_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="matchbook")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("settled_bets", "current_bets", "current_offers", "balance", "account"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "data": {"operation": operation},
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "settled_bets",
+                        "--market",
+                        "matchbook",
+                        "--account-sport-id",
+                        "1",
+                        "--account-event-id",
+                        "101",
+                        "--account-market-id",
+                        "202",
+                        "--limit",
+                        "10",
+                        "--offset",
+                        "2",
+                        "--from",
+                        "1780344000",
+                        "--to",
+                        "1780347600",
+                        "--account-odds-type",
+                        "DECIMAL",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        parameters = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(parameters["sport_id"], "1")
+        self.assertEqual(parameters["event_id"], "101")
+        self.assertEqual(parameters["market_id"], "202")
+        self.assertEqual(parameters["limit"], 10)
+        self.assertEqual(parameters["offset"], 2)
+        self.assertEqual(parameters["from_timestamp"], 1780344000.0)
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "current_offers",
+                        "--market",
+                        "matchbook",
+                        "--account-side",
+                        "back",
+                        "--account-offer-status",
+                        "open,matched",
+                        "--account-interval",
+                        "30",
+                        "--account-include-edits",
+                        "--account-aggregation-type",
+                        "average",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        parameters = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(parameters["side"], "back")
+        self.assertEqual(parameters["status"], "open,matched")
+        self.assertEqual(parameters["interval"], 30)
+        self.assertTrue(parameters["include_edits"])
+        self.assertEqual(parameters["aggregation_type"], "average")
+
+    def test_kalshi_account_command_forwards_signed_read_parameters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="kalshi")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("fills",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "fills": [{"fill_id": "fill-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "fills",
+                        "--ticker",
+                        "KXTEST-YES",
+                        "--order-id",
+                        "order-1",
+                        "--historical",
+                        "--limit",
+                        "12",
+                        "--from",
+                        "1700000000",
+                        "--to",
+                        "1700000100",
+                        "--subaccount",
+                        "2",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "fills")
+        self.assertEqual(payload["parameters"]["ticker"], "KXTEST-YES")
+        self.assertEqual(payload["parameters"]["order_id"], "order-1")
+        self.assertTrue(payload["parameters"]["historical"])
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["subaccount"], 2)
+
+    def test_limitless_account_command_forwards_delegated_read_parameters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="limitless_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("user_orders",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "orders": [{"order_id": "order-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "user_orders",
+                        "--market-slug",
+                        "doge-above-021652-sep-1-1200-utc",
+                        "--on-behalf-of",
+                        "profile-123",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "user_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "on_behalf_of": "profile-123",
+                "market_slug": "doge-above-021652-sep-1-1200-utc",
+            },
+        )
+        self.assertEqual(payload["data"]["orders"][0]["order_id"], "order-1")
+
+    def test_xmarket_account_command_forwards_bounded_market_order_parameters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="xmarket")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("positions", "user_orders", "market_orders"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "items": [{"id": "xorder-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "market_orders",
+                        "--market",
+                        "xmarket",
+                        "--account-market-id",
+                        "market-1",
+                        "--status",
+                        "open",
+                        "--page",
+                        "2",
+                        "--limit",
+                        "25",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "market_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {"status": "open", "page": 2, "limit": 25, "market_id": "market-1"},
+        )
+        self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
+
+    def test_good_judgment_open_account_command_forwards_forecast_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="good_judgment_open")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("me", "prediction_sets", "scores"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "scores": [{"id": 1001}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "scores",
+                        "--market",
+                        "good_judgment_open",
+                        "--page",
+                        "2",
+                        "--account-membership-id",
+                        "902",
+                        "--account-score-type",
+                        "question",
+                        "--account-scoreable-id",
+                        "1201",
+                        "--account-predictor-type",
+                        "user",
+                        "--include-daily-scores",
+                        "--account-created-after",
+                        "2026-01-01T00:00:00Z",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "scores")
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "page": 2,
+                "membership_id": "902",
+                "question_id": None,
+                "filter": None,
+                "created_before": None,
+                "created_after": "2026-01-01T00:00:00Z",
+                "updated_before": None,
+                "updated_after": None,
+                "score_type": "question",
+                "scoreable_id": "1201",
+                "predictor_type": "user",
+                "include_daily_scores": True,
+            },
+        )
+
+    def test_smarkets_account_and_order_management_commands_forward_allow_listed_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="smarkets")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("order_history", "account"),
+            order_management_operations=("cancel_order", "cancel_orders"),
+            account_recovery=lambda operation, **kwargs: {"operation": operation, "parameters": kwargs},
+            manage_orders=lambda operation, **kwargs: {"operation": operation, "parameters": kwargs},
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "order_history",
+                        "--market",
+                        "smarkets",
+                        "--status",
+                        "created,filled",
+                        "--limit",
+                        "25",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        account_payload = json.loads(stdout.getvalue())
+        self.assertEqual(account_payload["parameters"], {"status": "created,filled", "limit": 25})
+
+        stdout.seek(0)
+        stdout.truncate(0)
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_orders",
+                        "--market",
+                        "smarkets",
+                        "--market-id",
+                        "market-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        order_payload = json.loads(stdout.getvalue())
+        self.assertEqual(order_payload["operation"], "cancel_orders")
+        self.assertEqual(order_payload["parameters"]["market_id"], "market-1")
+        self.assertEqual(
+            order_payload["parameters"]["confirm_order_management"],
+            "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+
     def test_polymarket_leaderboard_cli_builds_unlimited_scan_params(self) -> None:
         parser = market_sentinel_cli.build_parser()
         args = parser.parse_args(
@@ -58,6 +1949,61 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(params["mdd_cache_ttl_seconds"], ["120"])
         self.assertEqual(params["scan_retry_attempts"], ["5"])
         self.assertEqual(params["scan_retry_delay_seconds"], ["30"])
+
+    def test_dflow_account_activity_command_forwards_wallet_and_bounds(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="dflow")
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter = SimpleNamespace(
+            account_recovery_operations=("account_activity",),
+            account_recovery=account_recovery,
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), \
+             patch("market_sentinel_cli._registry", return_value=SimpleNamespace()), \
+             patch("market_sentinel_cli.adapter_for_market", return_value=adapter), \
+             patch("market_sentinel_cli.require_market_enabled"), \
+             patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "account_activity",
+                        "--market",
+                        "dflow",
+                        "--wallet",
+                        "11111111111111111111111111111111",
+                        "--limit",
+                        "12",
+                        "--ticker",
+                        "KXBTC-26DEC31-100K",
+                        "--token-id",
+                        "mint-yes",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                        "cursor": None,
+                        "ticker": "KXBTC-26DEC31-100K",
+                        "mint": "mint-yes",
+                    },
+                )
+            ],
+        )
 
     def test_polymarket_leaderboard_cli_runs_headless_json_output(self) -> None:
         payload = {
@@ -686,6 +2632,20 @@ class MarketSentinelCliTests(unittest.TestCase):
         help_text = stdout.getvalue()
         for command in ("doctor", "config", "markets", "alerts", "wallets", "copy", "paper", "dependencies", "serve"):
             self.assertIn(command, help_text)
+
+    def test_serve_forwards_frontend_directory_as_keyword(self) -> None:
+        config_path = Path("custom-config.json")
+        frontend_dir = Path("custom-frontend")
+        args = SimpleNamespace(host="127.0.0.1", port=8766, config=config_path, frontend_dir=frontend_dir)
+        with patch("market_sentinel_cli.run_server") as run_server:
+            self.assertEqual(market_sentinel_cli.run_serve(args), 0)
+
+        run_server.assert_called_once_with(
+            "127.0.0.1",
+            8766,
+            config_path,
+            frontend_dir=frontend_dir,
+        )
 
 
 if __name__ == "__main__":

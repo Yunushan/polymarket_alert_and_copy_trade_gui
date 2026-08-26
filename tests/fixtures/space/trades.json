@@ -1,0 +1,23 @@
+{
+  "trades": [
+    {
+      "id": "trade_abc123",
+      "market": "btc-150k-2025",
+      "outcome": "YES",
+      "price": 0.35,
+      "quantity": 1000,
+      "side": "BUY",
+      "timestamp": 1704153540
+    },
+    {
+      "id": "trade_def456",
+      "market": "btc-150k-2025",
+      "outcome": "YES",
+      "price": 0.349,
+      "quantity": 250,
+      "side": "SELL",
+      "timestamp": 1704153500
+    }
+  ],
+  "hasMore": true
+}

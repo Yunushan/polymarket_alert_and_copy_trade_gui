@@ -1,0 +1,15 @@
+{
+  "positions": [
+    {
+      "eventTicker": "BTC100K2026",
+      "symbol": "GEMI-BTC100K26-YES",
+      "outcome": "yes",
+      "quantity": "2",
+      "averagePrice": "0.41",
+      "currentPrice": "0.44",
+      "positionValue": "0.88",
+      "unrealizedPnl": "0.06"
+    }
+  ],
+  "total": 1
+}

@@ -1,0 +1,23 @@
+[
+  {
+    "id": "bet-open-1",
+    "contractId": "mf-binary-1",
+    "outcome": "YES",
+    "limitProb": 0.55,
+    "isFilled": false,
+    "isCancelled": false,
+    "orderAmount": 10,
+    "amount": 2,
+    "createdTime": 1760000000000
+  },
+  {
+    "id": "bet-filled-1",
+    "contractId": "mf-binary-1",
+    "outcome": "NO",
+    "isFilled": true,
+    "isCancelled": false,
+    "amount": 5,
+    "shares": 10,
+    "createdTime": 1760000010000
+  }
+]

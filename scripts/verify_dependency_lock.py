@@ -19,13 +19,16 @@ TEST_LOCK_PATH = ROOT / "requirements-test.lock"
 BUILD_LOCK_PATH = ROOT / "requirements-build.lock"
 SECURITY_LOCK_PATH = ROOT / "requirements-security.lock"
 BOOTSTRAP_LOCK_PATH = ROOT / "requirements-bootstrap.lock"
+REQUIREMENTS_PATH = ROOT / "requirements.txt"
 LIVE_REQUIREMENTS_PATH = ROOT / "requirements-live.txt"
 TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
 BUILD_REQUIREMENTS_PATH = ROOT / "requirements-build.txt"
 SECURITY_REQUIREMENTS_PATH = ROOT / "requirements-security.txt"
 BOOTSTRAP_REQUIREMENTS_PATH = ROOT / "requirements-bootstrap.txt"
 PROJECT_PATH = ROOT / "pyproject.toml"
-LOCKED_REQUIREMENT_RE = re.compile(r"^([A-Za-z0-9_.-]+)==[^\s;]+(?:\s*;\s*[^\\]+)?\s*\\?$")
+LOCKED_REQUIREMENT_RE = re.compile(
+    r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)(?:\s*;\s*[^\\]+)?\s*\\?$"
+)
 HASH_RE = re.compile(r"^\s*--hash=sha256:[0-9a-f]{64}$")
 
 
@@ -35,6 +38,7 @@ def canonical_name(value: str) -> str:
 
 def lock_issues(lock_text: str, project_dependencies: list[str]) -> list[str]:
     locked: dict[str, int] = {}
+    locked_versions: dict[str, list[str]] = {}
     active_name: str | None = None
     active_has_hash = False
     issues: list[str] = []
@@ -52,6 +56,7 @@ def lock_issues(lock_text: str, project_dependencies: list[str]) -> list[str]:
             finish_active()
             active_name = canonical_name(match.group(1))
             locked[active_name] = locked.get(active_name, 0) + 1
+            locked_versions.setdefault(active_name, []).append(match.group(2))
             continue
         if active_name and HASH_RE.match(line):
             active_has_hash = True
@@ -62,8 +67,16 @@ def lock_issues(lock_text: str, project_dependencies: list[str]) -> list[str]:
 
     for dependency in project_dependencies:
         requirement = Requirement(dependency)
-        if canonical_name(requirement.name) not in locked:
+        requirement_name = canonical_name(requirement.name)
+        versions = locked_versions.get(requirement_name, [])
+        if not versions:
             issues.append(f"direct dependency {requirement.name} is missing from requirements.lock")
+            continue
+        for version in versions:
+            if requirement.specifier and not requirement.specifier.contains(version, prereleases=True):
+                issues.append(
+                    f"locked {requirement.name}=={version} does not satisfy source requirement {dependency}"
+                )
     duplicate_names = sorted(name for name, count in locked.items() if count > 1 and name != "tomli")
     if duplicate_names:
         issues.append("duplicate locked packages: " + ", ".join(duplicate_names))
@@ -82,11 +95,27 @@ def main() -> int:
     project = tomllib.loads(PROJECT_PATH.read_text(encoding="utf-8"))
     optional = project.get("project", {}).get("optional-dependencies", {})
     runtime_dependencies = list(project.get("project", {}).get("dependencies", []))
+    runtime_source_requirements = _requirement_lines(REQUIREMENTS_PATH)
+    live_source_requirements = _requirement_lines(LIVE_REQUIREMENTS_PATH)
+    test_source_requirements = _requirement_lines(TEST_REQUIREMENTS_PATH)
+    runtime_constraints = [*runtime_dependencies, *runtime_source_requirements]
     live_dependencies = [*runtime_dependencies, *optional.get("live", [])]
     checks = (
-        (LOCK_PATH, runtime_dependencies),
-        (LIVE_LOCK_PATH, live_dependencies),
-        (TEST_LOCK_PATH, [*live_dependencies, *optional.get("test", [])]),
+        (LOCK_PATH, runtime_constraints),
+        (
+            LIVE_LOCK_PATH,
+            [*live_dependencies, *runtime_source_requirements, *live_source_requirements],
+        ),
+        (
+            TEST_LOCK_PATH,
+            [
+                *live_dependencies,
+                *optional.get("test", []),
+                *runtime_source_requirements,
+                *live_source_requirements,
+                *test_source_requirements,
+            ],
+        ),
         (BUILD_LOCK_PATH, _requirement_lines(BUILD_REQUIREMENTS_PATH)),
         (SECURITY_LOCK_PATH, _requirement_lines(SECURITY_REQUIREMENTS_PATH)),
         (BOOTSTRAP_LOCK_PATH, _requirement_lines(BOOTSTRAP_REQUIREMENTS_PATH)),

@@ -5,6 +5,7 @@ import csv
 import importlib
 import importlib.metadata as importlib_metadata
 import json
+import math
 import os
 import sys
 import tempfile
@@ -31,6 +32,7 @@ from web_api import (
     LEADERBOARD_SORTS,
     _fetch_polymarket_leaderboard_scan_rows,
     add_wallet_watch,
+    adapter_for_market,
     alert_from_payload,
     alerts_payload,
     app_state_payload,
@@ -48,6 +50,7 @@ from web_api import (
     live_preflight_payload,
     live_safety_payload,
     markets_payload,
+    market_support_payload,
     paper_order_from_payload,
     paper_order_impact,
     paper_payload,
@@ -82,10 +85,17 @@ from web_api import (
     refresh_all_alert_prices,
     refresh_paper_marks,
     refresh_selected_paper_mark,
+    require_market_enabled,
     run_server,
+    serialize_market_contract,
+    serialize_market_event,
     attach_polymarket_mdd_audit_cache,
     normalize_polymarket_leaderboard_row,
     submit_paper_order,
+    serialize_market_candle,
+    serialize_market_trade,
+    serialize_orderbook,
+    serialize_price_snapshot,
     update_wallet_watch,
     wallets_payload,
 )
@@ -1168,6 +1178,15 @@ def run_markets_list(args: argparse.Namespace) -> int:
     return _write_command_payload(args, markets_payload(_load_cfg(args), _registry()))
 
 
+def run_markets_support(args: argparse.Namespace) -> int:
+    """Print the truthful support state for every catalog market or one id."""
+
+    return _write_command_payload(
+        args,
+        market_support_payload(_load_cfg(args), _registry(), getattr(args, "market", None)),
+    )
+
+
 def run_market_set(args: argparse.Namespace) -> int:
     cfg = _load_cfg(args)
     payload = _json_arg(args.json)
@@ -1184,6 +1203,968 @@ def run_market_set(args: argparse.Namespace) -> int:
     apply_market_patch(cfg, args.market_id, payload)
     _save_cfg(args, cfg)
     return _write_command_payload(args, markets_payload(cfg, _registry()))
+
+
+def _market_read_context(args: argparse.Namespace, feature: str):
+    """Load an enabled market adapter for a headless read operation.
+
+    Read commands deliberately share the same enablement and adapter
+    configuration path as the web API.  This keeps the CLI from accidentally
+    bypassing local market-disable or safety settings while still allowing
+    every documented adapter read to be used without a GUI.
+    """
+
+    cfg = _load_cfg(args)
+    market_id = str(getattr(args, "market", None) or cfg.selected_market_id or "").strip().lower()
+    if not market_id:
+        raise ValueError("market is required (pass --market or select one in config).")
+    require_market_enabled(cfg, market_id, feature)
+    registry = _registry()
+    return cfg, market_id, adapter_for_market(cfg, market_id, registry)
+
+
+def _cli_history_float(value: Any, label: str) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite number.") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be a finite number.")
+    return number
+
+
+def run_market_events(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "event listing")
+    query = str(args.query or "")
+    limit = _cli_clamp_int(args.limit, 50, 1, 1000)
+    events = adapter.list_events(query, limit=limit)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "query": query,
+            "limit": limit,
+            "events": [serialize_market_event(event) for event in events],
+        },
+    )
+
+
+def run_market_contracts(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "contract listing")
+    contracts = adapter.list_contracts(str(args.event_id))
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "event_id": str(args.event_id),
+            "contracts": [serialize_market_contract(contract) for contract in contracts],
+        },
+    )
+
+
+def run_market_price(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "price reading")
+    snapshot = adapter.get_price(str(args.contract))
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "price": serialize_price_snapshot(snapshot),
+        },
+    )
+
+
+def run_market_orderbook(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "orderbook reading")
+    orderbook = adapter.get_orderbook(str(args.contract))
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "orderbook": serialize_orderbook(orderbook),
+        },
+    )
+
+
+def run_market_trades(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "trade history")
+    limit = _cli_clamp_int(args.limit, 50, 1, 1000)
+    before = _cli_history_float(args.before, "before")
+    after = _cli_history_float(args.after, "after")
+    trades = adapter.list_trades(str(args.contract), limit=limit, before=before, after=after)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "limit": limit,
+            "before": before,
+            "after": after,
+            "trades": [serialize_market_trade(trade) for trade in trades],
+        },
+    )
+
+
+def run_market_candles(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "candle history")
+    resolution = str(args.resolution or "1h").strip()
+    if not resolution:
+        raise ValueError("resolution cannot be empty.")
+    from_timestamp = _cli_history_float(args.from_timestamp, "from")
+    to_timestamp = _cli_history_float(args.to_timestamp, "to")
+    candles = adapter.list_candles(
+        str(args.contract),
+        resolution=resolution,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+    )
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "resolution": resolution,
+            "from": from_timestamp,
+            "to": to_timestamp,
+            "candles": [serialize_market_candle(candle) for candle in candles],
+        },
+    )
+
+
+GEMINI_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "order_history",
+    "positions",
+    "settled_positions",
+    "volume_metrics",
+)
+KALSHI_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "order_history",
+    "fills",
+    "positions",
+    "settlements",
+    "balance",
+    "queue_positions",
+)
+LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
+XMARKET_ACCOUNT_OPERATIONS = ("positions", "user_orders", "market_orders")
+SMARKETS_ACCOUNT_OPERATIONS = ("order_history", "account")
+PROBABLE_ACCOUNT_OPERATIONS = ("open_orders", "order")
+OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
+OPINION_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "batch_cancel_orders",
+    "cancel_all_orders",
+)
+BETFAIR_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "cleared_orders",
+    "funds",
+    "account",
+    "statement",
+    "currency_rates",
+)
+MATCHBOOK_ACCOUNT_OPERATIONS = (
+    "settled_bets",
+    "current_bets",
+    "current_offers",
+    "balance",
+    "account",
+)
+HYPERLIQUID_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "order_history",
+    "positions",
+    "spot_balances",
+    "portfolio",
+    "subaccounts",
+)
+POLYMARKET_ACCOUNT_OPERATIONS = ("active_orders", "order_detail", "fills")
+PREDICT_FUN_ACCOUNT_OPERATIONS = (
+    "account",
+    "active_orders",
+    "order_detail",
+    "account_activity",
+    "positions",
+    "positions_by_address",
+)
+IBKR_ACCOUNT_OPERATIONS = ("orders", "order_status")
+MANIFOLD_ACCOUNT_OPERATIONS = ("account", "active_orders", "order_history")
+PROPHET_EXCHANGE_ACCOUNT_OPERATIONS = (
+    "balance",
+    "transactions",
+    "order_history",
+    "order_detail",
+    "trades",
+)
+AZURO_ACCOUNT_OPERATIONS = ("bet_history",)
+THALES_ACCOUNT_OPERATIONS = ("positions", "transactions")
+METADAO_ACCOUNT_OPERATIONS = ("activity",)
+OMEN_ACCOUNT_OPERATIONS = ("activity",)
+DFLOW_ACCOUNT_OPERATIONS = ("account_activity",)
+METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
+GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS = ("me", "prediction_sets", "scores")
+MYRIAD_ACCOUNT_OPERATIONS = ("account_activity", "portfolio", "market_positions")
+XO_ACCOUNT_OPERATIONS = (
+    "account",
+    "positions",
+    "orders",
+    "trades",
+    "settlement",
+    "settlement_history",
+    "audit_logs",
+)
+SX_BET_ACCOUNT_OPERATIONS = (
+    "balance",
+    "active_orders",
+    "order_detail",
+    "order_by_client_id",
+    "order_history",
+    "fills",
+    "positions",
+)
+MARKET_ACCOUNT_OPERATIONS = tuple(
+    dict.fromkeys(
+        GEMINI_ACCOUNT_OPERATIONS
+        + KALSHI_ACCOUNT_OPERATIONS
+        + LIMITLESS_ACCOUNT_OPERATIONS
+        + XMARKET_ACCOUNT_OPERATIONS
+        + SMARKETS_ACCOUNT_OPERATIONS
+        + PROBABLE_ACCOUNT_OPERATIONS
+        + OPINION_ACCOUNT_OPERATIONS
+        + BETFAIR_ACCOUNT_OPERATIONS
+        + MATCHBOOK_ACCOUNT_OPERATIONS
+        + HYPERLIQUID_ACCOUNT_OPERATIONS
+        + POLYMARKET_ACCOUNT_OPERATIONS
+        + PREDICT_FUN_ACCOUNT_OPERATIONS
+        + IBKR_ACCOUNT_OPERATIONS
+        + MANIFOLD_ACCOUNT_OPERATIONS
+        + PROPHET_EXCHANGE_ACCOUNT_OPERATIONS
+        + AZURO_ACCOUNT_OPERATIONS
+        + THALES_ACCOUNT_OPERATIONS
+        + METADAO_ACCOUNT_OPERATIONS
+        + OMEN_ACCOUNT_OPERATIONS
+        + DFLOW_ACCOUNT_OPERATIONS
+        + METACULUS_ACCOUNT_OPERATIONS
+        + GOOD_JUDGMENT_OPEN_ACCOUNT_OPERATIONS
+        + MYRIAD_ACCOUNT_OPERATIONS
+        + XO_ACCOUNT_OPERATIONS
+        + SX_BET_ACCOUNT_OPERATIONS
+    )
+)
+
+
+def run_market_account(args: argparse.Namespace) -> int:
+    """Read one adapter's explicitly documented authenticated account feed."""
+
+    _cfg, market_id, adapter = _market_read_context(args, "account recovery")
+    operation = str(args.operation or "").strip().lower()
+    kwargs: Dict[str, Any] = {}
+    if market_id == "limitless_exchange":
+        kwargs = {
+            "on_behalf_of": str(getattr(args, "on_behalf_of", "") or "").strip() or None,
+        }
+        if operation == "user_orders":
+            kwargs["market_slug"] = str(getattr(args, "market_slug", "") or "").strip()
+    elif market_id == "xmarket":
+        market_id_filter = str(getattr(args, "account_market_id", "") or "").strip()
+        if not market_id_filter and args.contract:
+            market_id_filter = str(args.contract).split(":", 1)[0].strip()
+        kwargs = {
+            "status": str(getattr(args, "status", "") or "").strip().lower() or None,
+            "page": _cli_clamp_int(getattr(args, "page", "1"), 1, 1, 10000),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 1000),
+        }
+        if operation == "market_orders":
+            kwargs["market_id"] = market_id_filter
+    elif market_id == "smarkets":
+        kwargs = {
+            "status": str(getattr(args, "status", "") or "").strip().lower(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 1000),
+        }
+    elif market_id == "probable":
+        kwargs = {
+            "page": _cli_clamp_int(getattr(args, "page", "1"), 1, 1, 10000),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 50),
+            "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+            "token_ids": str(getattr(args, "token_ids", "") or "").strip() or None,
+        }
+        if operation == "order":
+            kwargs.update(
+                {
+                    "order_id": str(args.order_id or "").strip(),
+                    "token_id": str(getattr(args, "token_id", "") or "").strip(),
+                    "client_order_id": str(getattr(args, "client_order_id", "") or "").strip() or None,
+                }
+            )
+    elif market_id == "kalshi":
+        ticker = str(args.ticker or "").strip()
+        if not ticker and args.contract:
+            ticker = str(args.contract).split(":", 1)[0].strip()
+        subaccount = (
+            _cli_clamp_int(args.subaccount, 0, 0, 63)
+            if args.subaccount not in (None, "")
+            else None
+        )
+        kwargs.update(
+            {
+                "ticker": ticker,
+                "event_ticker": str(args.event_ticker or "").strip(),
+                "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                "cursor": str(args.cursor or "").strip(),
+                "min_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "max_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                "subaccount": subaccount,
+            }
+        )
+        if operation == "order_history":
+            kwargs.update(
+                {
+                    "status": str(args.status or "executed").strip().lower(),
+                    "historical": bool(args.historical),
+                }
+            )
+        elif operation == "fills":
+            kwargs.update(
+                {
+                    "order_id": str(args.order_id or "").strip(),
+                    "historical": bool(args.historical),
+                }
+            )
+        elif operation == "positions":
+            kwargs["count_filter"] = str(args.count_filter or "").strip()
+        elif operation == "queue_positions":
+            kwargs = {
+                "ticker": ticker,
+                "event_ticker": str(args.event_ticker or "").strip(),
+                "subaccount": subaccount,
+            }
+    elif market_id == "opinion_labs":
+        if operation == "order_detail":
+            kwargs = {"order_id": str(args.order_id or "").strip()}
+        else:
+            kwargs = {
+                "page": _cli_clamp_int(getattr(args, "page", "1"), 1, 1, 10000),
+                "limit": _cli_clamp_int(args.limit, 10, 1, 20),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "chain_id": str(getattr(args, "chain_id", "") or "").strip(),
+            }
+            if operation == "order_history":
+                kwargs["status"] = str(args.status or "").strip()
+    elif market_id == "polymarket":
+        kwargs = {
+            "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+            "contract_id": str(args.contract or "").strip(),
+            "next_cursor": str(args.cursor or "").strip(),
+        }
+        if operation == "order_detail":
+            kwargs = {"order_id": str(args.order_id or "").strip()}
+        elif operation == "fills":
+            kwargs.update(
+                {
+                    "trade_id": str(getattr(args, "trade_id", "") or "").strip(),
+                    "limit": _cli_clamp_int(args.limit, 100, 1, 500),
+                    "before": _cli_history_float(getattr(args, "before", None), "before"),
+                    "after": _cli_history_float(getattr(args, "after", None), "after"),
+                }
+            )
+    elif market_id == "betfair_exchange":
+        if operation == "funds":
+            kwargs = {"wallet": str(getattr(args, "wallet", "") or "").strip()}
+        elif operation == "account":
+            kwargs = {}
+        elif operation == "statement":
+            kwargs = {
+                "locale": str(getattr(args, "locale", "en") or "en").strip(),
+                "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "include_item": not bool(getattr(args, "exclude_item", False)),
+                "wallet": str(getattr(args, "wallet", "") or "").strip(),
+                "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+            }
+        elif operation == "currency_rates":
+            kwargs = {"from_currency": str(getattr(args, "from_currency", "") or "").strip()}
+        elif operation in {"active_orders", "cleared_orders"}:
+            market_id_filter = str(getattr(args, "account_market_id", "") or "").strip()
+            runner_id = str(getattr(args, "runner_id", "") or "").strip()
+            if not market_id_filter and args.contract:
+                parts = str(args.contract).split(":", 1)
+                market_id_filter = parts[0].strip()
+                if len(parts) == 2 and not runner_id:
+                    runner_id = parts[1].strip()
+            if operation == "active_orders":
+                kwargs = {
+                    "market_id": market_id_filter,
+                    "contract_id": str(args.contract or "").strip(),
+                    "status": str(args.status or "").strip(),
+                    "order_by": str(getattr(args, "order_by", "BY_MATCH_TIME") or "BY_MATCH_TIME").strip(),
+                    "sort_dir": str(getattr(args, "sort_dir", "EARLIEST_TO_LATEST") or "EARLIEST_TO_LATEST").strip(),
+                    "include_item_description": bool(getattr(args, "include_item_description", False)),
+                    "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
+            else:
+                kwargs = {
+                    "bet_status": str(args.status or "SETTLED").strip(),
+                    "market_id": market_id_filter,
+                    "event_type_id": str(getattr(args, "event_type_id", "") or "").strip(),
+                    "event_id": str(getattr(args, "account_event_id", "") or "").strip(),
+                    "runner_id": runner_id,
+                    "bet_id": str(getattr(args, "bet_id", "") or "").strip(),
+                    "group_by": str(getattr(args, "group_by", "BET") or "BET").strip(),
+                    "include_item_description": bool(getattr(args, "include_item_description", False)),
+                    "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
+    elif market_id == "matchbook":
+        if operation in {"balance", "account"}:
+            kwargs = {}
+        elif operation in {"settled_bets", "current_bets"}:
+            kwargs = {
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
+                "sport_id": str(getattr(args, "account_sport_id", "") or "").strip(),
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "odds_type": str(getattr(args, "account_odds_type", "DECIMAL") or "DECIMAL").strip(),
+                "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+            }
+        elif operation == "current_offers":
+            raw_interval = str(getattr(args, "account_interval", "") or "").strip()
+            kwargs = {
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "limit": _cli_clamp_int(args.limit, 20, 1, 1000),
+                "sport_id": str(getattr(args, "account_sport_id", "") or "").strip(),
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "runner_id": str(getattr(args, "runner_id", "") or "").strip(),
+                "side": str(getattr(args, "account_side", "") or "").strip(),
+                "status": str(getattr(args, "account_offer_status", "") or "").strip(),
+                "interval": _cli_clamp_int(raw_interval, 0, 0, 2147483647) if raw_interval else None,
+                "include_edits": bool(getattr(args, "account_include_edits", False)),
+                "cancellation_reason": str(getattr(args, "account_cancellation_reason", "") or "").strip(),
+                "aggregation_type": str(getattr(args, "account_aggregation_type", "none") or "none").strip(),
+                "odds_type": str(getattr(args, "account_odds_type", "DECIMAL") or "DECIMAL").strip(),
+            }
+    elif market_id == "hyperliquid":
+        if operation in {"active_orders", "positions"}:
+            kwargs["dex"] = str(getattr(args, "dex", "") or "").strip()
+        elif operation == "order_history":
+            kwargs["limit"] = _cli_clamp_int(args.limit, 2000, 1, 2000)
+    elif market_id == "predict_fun":
+        if operation == "order_detail":
+            kwargs = {"order_id": str(getattr(args, "order_id", "") or "").strip()}
+        elif operation == "positions_by_address":
+            kwargs = {
+                "address": str(getattr(args, "wallet", "") or "").strip(),
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "cursor": str(getattr(args, "cursor", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "is_resolved": getattr(args, "is_resolved", None),
+                "sort": str(getattr(args, "sort", "") or "").strip(),
+            }
+        elif operation == "account":
+            kwargs = {}
+        else:
+            kwargs = {
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "cursor": str(getattr(args, "cursor", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "status": str(getattr(args, "status", "") or "").strip(),
+                "is_resolved": getattr(args, "is_resolved", None),
+                "sort": str(getattr(args, "sort", "") or "").strip(),
+            }
+            if operation == "account_activity":
+                kwargs["event_types"] = str(getattr(args, "event_types", "") or "").strip()
+    elif market_id == "manifold":
+        if operation == "account":
+            kwargs = {}
+        else:
+            kwargs = {
+                "contract_id": str(args.contract or "").strip() or None,
+                "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
+                "before": str(getattr(args, "before", "") or "").strip() or None,
+                "after": str(getattr(args, "after", "") or "").strip() or None,
+                "before_time": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
+                "after_time": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
+            }
+    elif market_id == "prophet_exchange":
+        if operation == "balance":
+            kwargs = {}
+        elif operation == "order_detail":
+            kwargs = {"order_id": str(getattr(args, "order_id", "") or "").strip()}
+        elif operation == "order_history":
+            kwargs = {
+                "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 100),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+                "matching_status": str(getattr(args, "matching_status", "") or "").strip() or None,
+                "status": str(getattr(args, "status", "") or "").strip() or None,
+                "from": getattr(args, "from_timestamp", None),
+                "to": getattr(args, "to_timestamp", None),
+            }
+        elif operation == "trades":
+            kwargs = {
+                "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 100),
+                "from": getattr(args, "from_timestamp", None),
+                "to": getattr(args, "to_timestamp", None),
+            }
+        else:
+            kwargs = {
+                "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 10, 1, 500),
+            }
+    elif market_id == "azuro":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
+            "offset": _cli_clamp_int(getattr(args, "offset", "0"), 0, 0, 1_000_000),
+        }
+    elif market_id == "thales_market":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
+            "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+            "from_timestamp": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
+            "to_timestamp": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
+        }
+    elif market_id in {"metadao", "omen", "gnosis_prediction_markets"}:
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 25, 1, 100),
+        }
+    elif market_id == "metaculus":
+        kwargs = {
+            "forecaster_id": str(getattr(args, "account_forecaster_id", "") or "").strip() or None,
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+            "offset": _cli_clamp_int(getattr(args, "offset", "0"), 0, 0, 100_000),
+            "with_cp": bool(getattr(args, "include_cp", False)),
+            "include_cp_history": bool(getattr(args, "include_cp_history", False)),
+            "include_descriptions": bool(getattr(args, "include_descriptions", False)),
+        }
+    elif market_id == "good_judgment_open":
+        kwargs = {
+            "page": _cli_clamp_int(getattr(args, "page", "0"), 0, 0, 100_000),
+            "membership_id": str(getattr(args, "account_membership_id", "") or "").strip() or None,
+            "question_id": str(getattr(args, "account_question_id", "") or "").strip() or None,
+            "filter": str(getattr(args, "account_filter", "") or "").strip() or None,
+            "created_before": str(getattr(args, "account_created_before", "") or "").strip() or None,
+            "created_after": str(getattr(args, "account_created_after", "") or "").strip() or None,
+            "updated_before": str(getattr(args, "account_updated_before", "") or "").strip() or None,
+            "updated_after": str(getattr(args, "account_updated_after", "") or "").strip() or None,
+            "score_type": str(getattr(args, "account_score_type", "") or "").strip() or None,
+            "scoreable_id": str(getattr(args, "account_scoreable_id", "") or "").strip() or None,
+            "predictor_type": str(getattr(args, "account_predictor_type", "") or "").strip() or None,
+            "include_daily_scores": bool(getattr(args, "include_daily_scores", False)),
+        }
+    elif market_id == "myriad_markets":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 25, 1, 100),
+        }
+        if operation in {"portfolio", "market_positions"}:
+            kwargs.update(
+                {
+                    "page": _cli_clamp_int(getattr(args, "page", None), 1, 1, 10_000),
+                    "trading_model": str(getattr(args, "trading_model", "all") or "all").strip(),
+                    "min_shares": str(getattr(args, "min_shares", "") or "").strip() or None,
+                    "market_slug": str(getattr(args, "market_slug", "") or "").strip() or None,
+                    "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+                    "network_id": str(getattr(args, "network_id", "") or "").strip() or None,
+                    "token_address": str(getattr(args, "token_address", "") or "").strip() or None,
+                    "status": str(getattr(args, "status", "") or "").strip() or None,
+                    "keyword": str(getattr(args, "keyword", "") or "").strip() or None,
+                    "sort": str(getattr(args, "sort", "") or "").strip() or None,
+                    "sort_by": str(getattr(args, "sort_by", "") or "").strip() or None,
+                    "exclude_history": bool(getattr(args, "exclude_history", False)),
+                    "group_by_event": bool(getattr(args, "group_by_event", False)),
+                }
+            )
+            if operation == "market_positions":
+                kwargs.update(
+                    {
+                        "state": str(getattr(args, "state", "") or "").strip() or None,
+                        "topics": str(getattr(args, "topics", "") or "").strip() or None,
+                        "market_ids": str(getattr(args, "market_ids", "") or "").strip() or None,
+                    }
+                )
+    elif market_id == "dflow":
+        kwargs = {
+            "wallet": str(getattr(args, "wallet", "") or "").strip(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 25, 1, 250),
+            "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+            "ticker": str(getattr(args, "ticker", "") or "").strip() or None,
+            "mint": str(getattr(args, "token_id", "") or "").strip() or None,
+        }
+    elif market_id == "xo_market":
+        if operation in {"account", "positions", "orders"}:
+            kwargs = {}
+        elif operation in {"settlement", "settlement_history"}:
+            market_id_filter = str(getattr(args, "account_market_id", "") or "").strip()
+            if not market_id_filter and args.contract:
+                market_id_filter = str(args.contract).split(":", 1)[0].strip()
+            kwargs = {"market_id": market_id_filter}
+            if operation == "settlement_history":
+                kwargs.update(
+                    {
+                        "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 1000),
+                        "cursor": str(getattr(args, "cursor", "") or "").strip() or None,
+                    }
+                )
+        elif operation in {"trades", "audit_logs"}:
+            kwargs = {
+                "limit": _cli_clamp_int(getattr(args, "limit", None), 100, 1, 1000),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip() or None,
+                "outcome_id": str(getattr(args, "outcome_id", "") or "").strip() or None,
+                "start_time": _cli_history_float(getattr(args, "from_timestamp", None), "from"),
+                "end_time": _cli_history_float(getattr(args, "to_timestamp", None), "to"),
+            }
+            if operation == "audit_logs":
+                kwargs["event_type"] = str(getattr(args, "event_type", "") or "").strip() or None
+    elif market_id == "sx_bet":
+        if operation == "balance":
+            kwargs = {}
+        elif operation == "active_orders":
+            kwargs = {
+                "market_hash": str(getattr(args, "account_market_hash", "") or "").strip() or None,
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
+        elif operation == "order_detail":
+            kwargs = {"order_id": str(getattr(args, "order_id", "") or "").strip()}
+        elif operation == "order_by_client_id":
+            kwargs = {"client_order_id": str(getattr(args, "client_order_id", "") or "").strip()}
+        elif operation == "order_history":
+            kwargs = {
+                "market_hash": str(getattr(args, "account_market_hash", "") or "").strip() or None,
+                "status": str(getattr(args, "status", "") or "").strip() or None,
+                "start_date": str(getattr(args, "start_date", "") or "").strip() or None,
+                "end_date": str(getattr(args, "end_date", "") or "").strip() or None,
+                "sort_asc": getattr(args, "sort_asc", None),
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
+        elif operation == "fills":
+            kwargs = {
+                "trade_id": str(getattr(args, "trade_id", "") or "").strip() or None,
+                "order_id": str(getattr(args, "order_id", "") or "").strip() or None,
+                "start_date": str(getattr(args, "start_date", "") or "").strip() or None,
+                "end_date": str(getattr(args, "end_date", "") or "").strip() or None,
+                "sort_asc": getattr(args, "sort_asc", None),
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
+        elif operation == "positions":
+            kwargs = {
+                "status": str(getattr(args, "status", "") or "").strip(),
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+                "sort_asc": getattr(args, "sort_asc", None),
+                "per_page": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 100),
+                "next_key": str(getattr(args, "cursor", "") or "").strip() or None,
+            }
+    elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
+        kwargs = {
+            "filters": str(getattr(args, "status", "") or "").strip(),
+            "force": bool(getattr(args, "historical", False)),
+        }
+        if operation == "order_status":
+            kwargs["order_id"] = str(getattr(args, "order_id", "") or "").strip()
+    else:
+        if operation in {"active_orders", "order_history"}:
+            kwargs.update(
+                {
+                    "contract_id": str(args.contract or "").strip() or None,
+                    "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                }
+            )
+        if operation == "order_history":
+            kwargs.update(
+                {
+                    "status": str(args.status or "filled").strip().lower(),
+                    "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
+            )
+        elif operation == "positions":
+            kwargs.update(
+                {
+                    "event_ticker": str(args.event_ticker or "").strip(),
+                    "limit": (
+                        _cli_clamp_int(args.limit, 100, 1, 1000)
+                        if args.limit not in (None, "")
+                        else None
+                    ),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "sort": str(args.sort or "").strip() or None,
+                }
+            )
+        elif operation == "settled_positions":
+            kwargs.update(
+                {
+                    "event_ticker": str(args.event_ticker or "").strip(),
+                    "limit": _cli_clamp_int(args.limit, 1000, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "sort": str(args.sort or "-date").strip(),
+                    "search": str(args.search or "").strip(),
+                    "category": str(args.category or "").strip(),
+                    "with_cash_outs": bool(args.with_cash_outs),
+                }
+            )
+        elif operation == "volume_metrics":
+            kwargs.update(
+                {
+                    "event_ticker": str(args.event_ticker or "").strip(),
+                    "start_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "end_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
+            )
+    data = adapter.account_recovery(operation, **kwargs)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "operation": operation,
+            "parameters": kwargs,
+            "data": data,
+        },
+    )
+
+
+MYRIAD_POSITION_INTENT_OPERATIONS = (
+    "split",
+    "merge",
+    "redeem",
+    "redeem_voided",
+    "neg_risk_split",
+    "neg_risk_merge",
+)
+
+
+def run_market_position_intent(args: argparse.Namespace) -> int:
+    """Request an unsigned Myriad position transaction for external signing."""
+
+    _cfg, market_id, adapter = _market_read_context(args, "position transaction intent")
+    operation = str(args.operation or "").strip().lower()
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "position_intent_operations", ()))
+    if operation not in supported:
+        raise ValueError(
+            f"{market_id} does not support position operation {operation or '<empty>'}; "
+            f"supported: {', '.join(supported) or 'none'}."
+        )
+    payload = _json_arg(getattr(args, "json", None))
+    _put_optional(payload, "market_id", getattr(args, "position_market_id", None))
+    _put_optional(payload, "amount", getattr(args, "amount", None))
+    _put_optional(payload, "network_id", getattr(args, "network_id", None))
+    _put_optional(payload, "event_id", getattr(args, "event_id", None))
+    _put_optional(payload, "outcome_index", getattr(args, "outcome_index", None))
+    data = adapter.position_intent(operation, **payload)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "operation": operation,
+            "parameters": payload,
+            "data": data,
+        },
+    )
+
+
+BETFAIR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_orders", "update_orders", "replace_orders")
+KALSHI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")
+POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_all_orders",
+    "cancel_market_orders",
+)
+GEMINI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
+MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_offer",
+    "cancel_offers",
+    "cancel_all_offers",
+    "edit_offer",
+    "edit_offers",
+)
+MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "batch_cancel_orders",
+    "cancel_all_orders",
+    "batch_modify_orders",
+)
+LIMITLESS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")
+SMARKETS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
+PROBABLE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders", "cancel_all_orders")
+HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_by_cloid",
+    "modify_order",
+    "batch_modify_orders",
+    "schedule_cancel",
+)
+PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS = ("remove_orders", "remove_orders_by_hash")
+XMARKET_ORDER_MANAGEMENT_OPERATIONS = ("batch_create_orders", "batch_cancel_orders")
+IBKR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_all_orders", "modify_order")
+MANIFOLD_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order",)
+PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
+SX_BET_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_event_orders",
+    "cancel_all_orders",
+)
+CONTEXT_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
+MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
+    dict.fromkeys(
+        BETFAIR_ORDER_MANAGEMENT_OPERATIONS
+        + KALSHI_ORDER_MANAGEMENT_OPERATIONS
+        + POLYMARKET_ORDER_MANAGEMENT_OPERATIONS
+        + GEMINI_ORDER_MANAGEMENT_OPERATIONS
+        + MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS
+        + MYRIAD_ORDER_MANAGEMENT_OPERATIONS
+        + OPINION_ORDER_MANAGEMENT_OPERATIONS
+        + LIMITLESS_ORDER_MANAGEMENT_OPERATIONS
+        + SMARKETS_ORDER_MANAGEMENT_OPERATIONS
+        + PROBABLE_ORDER_MANAGEMENT_OPERATIONS
+        + HYPERLIQUID_ORDER_MANAGEMENT_OPERATIONS
+        + PREDICT_FUN_ORDER_MANAGEMENT_OPERATIONS
+        + XMARKET_ORDER_MANAGEMENT_OPERATIONS
+        + IBKR_ORDER_MANAGEMENT_OPERATIONS
+        + MANIFOLD_ORDER_MANAGEMENT_OPERATIONS
+        + PROPHET_EXCHANGE_ORDER_MANAGEMENT_OPERATIONS
+        + SX_BET_ORDER_MANAGEMENT_OPERATIONS
+        + CONTEXT_ORDER_MANAGEMENT_OPERATIONS
+    )
+)
+
+
+def run_market_order_management(args: argparse.Namespace) -> int:
+    """Run a documented live order-management mutation through an adapter."""
+
+    _cfg, market_id, adapter = _market_read_context(args, "order management")
+    operation = str(args.operation or "").strip().lower()
+    payload = _json_arg(getattr(args, "json", None))
+    exchange_market_id = str(getattr(args, "exchange_market_id", "") or "").strip()
+    if exchange_market_id:
+        payload["market_id"] = exchange_market_id
+    polymarket_market_id = str(getattr(args, "market_id", "") or "").strip()
+    if polymarket_market_id:
+        payload["market_id"] = polymarket_market_id
+    if market_id == "polymarket":
+        _put_optional(payload, "asset_id", getattr(args, "asset_id", None))
+    market_slug = str(getattr(args, "market_slug", "") or "").strip()
+    if market_slug:
+        payload["market_slug"] = market_slug
+    instructions_value = getattr(args, "instructions", None)
+    if instructions_value:
+        raw = str(instructions_value)
+        if raw.startswith("@"):
+            raw = Path(raw[1:]).expanduser().read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list) and not (
+            market_id == "myriad_markets" and operation in {"cancel_order", "batch_modify_orders"}
+        ) and not (market_id == "hyperliquid" and isinstance(parsed, dict)) and not (
+            market_id == "context_v2" and operation == "cancel_order" and isinstance(parsed, dict)
+        ):
+            if not (market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"} and operation == "modify_order" and isinstance(parsed, dict)):
+                raise ValueError("--instructions must contain a JSON array (or a Myriad/Hyperliquid/Context/IBKR JSON object).")
+        if market_id == "context_v2":
+            payload["signed_cancel"] = parsed
+        elif operation in {"batch_create_orders", "batch_cancel_orders"} or (market_id == "polymarket" and operation == "cancel_orders") or (market_id == "prophet_exchange" and operation == "cancel_orders"):
+            payload["orders"] = parsed
+        elif market_id == "myriad_markets" and operation == "batch_modify_orders":
+            if not isinstance(parsed, dict):
+                raise ValueError("Myriad batch_modify_orders instructions must be a JSON object with cancel/place arrays.")
+            payload.update(parsed)
+        elif market_id == "myriad_markets" and operation == "cancel_order":
+            if not isinstance(parsed, dict):
+                raise ValueError("Myriad cancel_order instructions must be a JSON object with order and signature.")
+            payload.update(parsed)
+        elif market_id == "hyperliquid":
+            if not isinstance(parsed, dict):
+                raise ValueError("Hyperliquid order-management instructions must be a signed JSON object.")
+            payload["signed_action"] = parsed
+        elif market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
+            if not isinstance(parsed, dict):
+                raise ValueError("IBKR modify_order instructions must be a JSON object.")
+            payload["instructions"] = parsed
+        else:
+            payload["instructions"] = parsed
+    _put_optional(payload, "customer_ref", getattr(args, "customer_ref", None))
+    if getattr(args, "market_version", None) not in (None, ""):
+        raw_version = str(args.market_version)
+        payload["market_version"] = _coerce_value(raw_version)
+    if bool(getattr(args, "async_request", False)):
+        payload["async_request"] = True
+    _put_optional(payload, "confirm_global_cancel", getattr(args, "confirm_global_cancel", None))
+    for key, argument in (
+        ("order_id", "order_id"),
+        ("external_id", "external_id"),
+        ("order_ids", "order_ids"),
+        ("token_id", "token_id"),
+        ("token_ids", "token_ids"),
+        ("event_id", "event_id"),
+        ("offer_id", "offer_id"),
+        ("offer_ids", "offer_ids"),
+        ("event_ids", "event_ids"),
+        ("market_ids", "market_ids"),
+        ("runner_ids", "runner_ids"),
+        ("current_odds", "current_odds"),
+        ("new_odds", "new_odds"),
+        ("current_stake", "current_stake"),
+        ("new_stake", "new_stake"),
+        ("ticker", "ticker"),
+        ("side", "side"),
+        ("price", "price"),
+        ("count", "count"),
+        ("client_order_id", "client_order_id"),
+        ("updated_client_order_id", "updated_client_order_id"),
+        ("reduce_by", "reduce_by"),
+        ("reduce_to", "reduce_to"),
+        ("order_hash", "order_hash"),
+        ("trader", "trader"),
+        ("timestamp", "timestamp"),
+        ("nonce", "nonce"),
+        ("signature", "signature"),
+        ("signature_type", "signature_type"),
+        ("network_id", "network_id"),
+        ("allow_partial", "allow_partial"),
+        ("cancel", "cancel"),
+        ("place", "place"),
+        ("subaccount", "subaccount"),
+        ("exchange_index", "exchange_index"),
+        ("confirm_order_management", "confirm_order_management"),
+        ("signed_action", "signed_action"),
+        ("signed_cancel", "signed_cancel"),
+        ("manual_indicator", "manual_indicator"),
+        ("external_operator", "external_operator"),
+    ):
+        _put_optional(payload, key, getattr(args, argument, None))
+    data = adapter.manage_orders(operation, **payload)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "operation": operation,
+            "parameters": payload,
+            "data": data,
+        },
+    )
 
 
 def run_live_safety_show(args: argparse.Namespace) -> int:
@@ -1897,7 +2878,12 @@ def run_polymarket_live_snapshots_export(args: argparse.Namespace) -> int:
 
 
 def run_serve(args: argparse.Namespace) -> int:
-    run_server(args.host, int(args.port), _config_path(args), Path(args.frontend_dir).expanduser())
+    run_server(
+        args.host,
+        int(args.port),
+        _config_path(args),
+        frontend_dir=Path(args.frontend_dir).expanduser(),
+    )
     return 0
 
 
@@ -2054,6 +3040,14 @@ def build_parser() -> argparse.ArgumentParser:
     markets_list = markets_sub.add_parser("list", parents=[common], help="List configured markets and capabilities.")
     _add_json_output_args(markets_list)
     markets_list.set_defaults(func=run_markets_list)
+    markets_support = markets_sub.add_parser(
+        "support",
+        parents=[common],
+        help="Show supported, safety-guarded, unsupported, and verified-blocked operations for catalog markets.",
+    )
+    markets_support.add_argument("--market", default=None, help="Optional market id; omit to show the full catalog matrix.")
+    _add_json_output_args(markets_support)
+    markets_support.set_defaults(func=run_markets_support)
     market_set = markets_sub.add_parser("set", parents=[common], help="Patch one market config.")
     market_set.add_argument("market_id")
     market_set.add_argument("--enabled", action=argparse.BooleanOptionalAction, default=None)
@@ -2066,6 +3060,260 @@ def build_parser() -> argparse.ArgumentParser:
     market_set.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
     _add_json_output_args(market_set)
     market_set.set_defaults(func=run_market_set)
+
+    market_events = markets_sub.add_parser(
+        "events",
+        parents=[common],
+        help="List events/markets from an enabled adapter using its official discovery feed.",
+    )
+    market_events.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_events.add_argument("--query", default="", help="Optional adapter-supported search text.")
+    market_events.add_argument("--limit", default="50", help="Maximum events to return (1-1000).")
+    _add_json_output_args(market_events)
+    market_events.set_defaults(func=run_market_events)
+
+    market_contracts = markets_sub.add_parser(
+        "contracts",
+        parents=[common],
+        help="List contracts/outcomes for an event from an enabled adapter.",
+    )
+    market_contracts.add_argument("event_id")
+    market_contracts.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    _add_json_output_args(market_contracts)
+    market_contracts.set_defaults(func=run_market_contracts)
+
+    market_price = markets_sub.add_parser(
+        "price",
+        parents=[common],
+        help="Read one normalized contract price from an enabled adapter.",
+    )
+    market_price.add_argument("contract")
+    market_price.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    _add_json_output_args(market_price)
+    market_price.set_defaults(func=run_market_price)
+
+    market_orderbook = markets_sub.add_parser(
+        "orderbook",
+        parents=[common],
+        help="Read one normalized contract orderbook from an enabled adapter.",
+    )
+    market_orderbook.add_argument("contract")
+    market_orderbook.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    _add_json_output_args(market_orderbook)
+    market_orderbook.set_defaults(func=run_market_orderbook)
+
+    market_trades = markets_sub.add_parser(
+        "trades",
+        parents=[common],
+        help="Read normalized trade history from an enabled adapter when officially documented.",
+    )
+    market_trades.add_argument("contract")
+    market_trades.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_trades.add_argument("--limit", default="50", help="Maximum trades to return (1-1000).")
+    market_trades.add_argument("--before", default=None, help="Optional Unix timestamp bound.")
+    market_trades.add_argument("--after", default=None, help="Optional Unix timestamp bound.")
+    _add_json_output_args(market_trades)
+    market_trades.set_defaults(func=run_market_trades)
+
+    market_candles = markets_sub.add_parser(
+        "candles",
+        parents=[common],
+        help="Read normalized candle history from an enabled adapter when officially documented.",
+    )
+    market_candles.add_argument("contract")
+    market_candles.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_candles.add_argument("--resolution", default="1h")
+    market_candles.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
+    market_candles.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
+    _add_json_output_args(market_candles)
+    market_candles.set_defaults(func=run_market_candles)
+
+    market_account = markets_sub.add_parser(
+        "account",
+        parents=[common],
+        help="Read an explicitly documented authenticated account feed (including Polymarket CLOB and Predict.fun account surfaces).",
+    )
+    market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
+    market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_account.add_argument("--contract", default=None, help="Optional canonical contract id for order feeds.")
+    market_account.add_argument("--ticker", default=None, help="Kalshi market ticker for account reads.")
+    market_account.add_argument("--market-slug", default=None, help="Limitless market slug for user_orders.")
+    market_account.add_argument("--on-behalf-of", default=None, help="Optional Limitless delegated profile.")
+    market_account.add_argument("--order-id", default=None, help="Optional order id for order-detail/fill reads.")
+    market_account.add_argument("--token-id", default=None, help="Probable token id for authenticated order reads.")
+    market_account.add_argument("--token-ids", default=None, help="Probable comma-separated token ids for open-order reads.")
+    market_account.add_argument("--client-order-id", default=None, help="Optional Probable client order id.")
+    market_account.add_argument("--trade-id", default=None, help="Optional Polymarket trade id for fill reads.")
+    market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
+    market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
+    market_account.add_argument("--account-market-hash", default="", help="SX Bet 32-byte market hash filter.")
+    market_account.add_argument("--outcome-id", default="", help="XO outcome id for authenticated history filters.")
+    market_account.add_argument("--event-type", default="", help="XO audit event type filter.")
+    market_account.add_argument("--trading-model", default="all", help="Myriad account model: amm, ob, or all.")
+    market_account.add_argument("--min-shares", default="", help="Myriad minimum position shares.")
+    market_account.add_argument("--network-id", default="", help="Myriad account network id.")
+    market_account.add_argument("--token-address", default="", help="Myriad account token address.")
+    market_account.add_argument("--keyword", default="", help="Myriad account search keyword.")
+    market_account.add_argument("--sort-by", default="", help="Myriad portfolio sort field.")
+    market_account.add_argument("--exclude-history", action="store_true", help="Myriad portfolio: exclude historical positions.")
+    market_account.add_argument("--group-by-event", action="store_true", help="Myriad portfolio: group positions by event.")
+    market_account.add_argument("--state", default="", help="Myriad market-position state filter.")
+    market_account.add_argument("--topics", default="", help="Myriad market-position comma-separated topics.")
+    market_account.add_argument("--market-ids", default="", help="Myriad market-position comma-separated market ids.")
+    market_account.add_argument("--event-types", default="", help="Predict.fun comma-separated account activity event types.")
+    market_account.add_argument("--start-date", default="", help="SX Bet v3 account ISO-8601 lower time bound.")
+    market_account.add_argument("--end-date", default="", help="SX Bet v3 account ISO-8601 upper time bound.")
+    market_account.add_argument("--sort-asc", action=argparse.BooleanOptionalAction, default=None, help="SX Bet v3 account sort direction.")
+    market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
+    market_account.add_argument("--event-type-id", default="", help="Betfair event type id filter.")
+    market_account.add_argument("--account-event-id", default="", help="Betfair event id filter.")
+    market_account.add_argument("--account-forecaster-id", default="", help="Metaculus forecaster id for forecast_posts.")
+    market_account.add_argument("--account-membership-id", default="", help="Good Judgment Open membership id filter.")
+    market_account.add_argument("--account-question-id", default="", help="Good Judgment Open question id filter.")
+    market_account.add_argument("--account-filter", default="", help="Good Judgment Open documented account filter.")
+    market_account.add_argument("--account-created-before", default="", help="Good Judgment Open ISO-8601 created-before filter.")
+    market_account.add_argument("--account-created-after", default="", help="Good Judgment Open ISO-8601 created-after filter.")
+    market_account.add_argument("--account-updated-before", default="", help="Good Judgment Open ISO-8601 updated-before filter.")
+    market_account.add_argument("--account-updated-after", default="", help="Good Judgment Open ISO-8601 updated-after filter.")
+    market_account.add_argument("--account-score-type", default="", help="Good Judgment Open score type: question/challenge/site.")
+    market_account.add_argument("--account-scoreable-id", default="", help="Good Judgment Open scoreable id.")
+    market_account.add_argument("--account-predictor-type", default="", help="Good Judgment Open predictor type: user/team.")
+    market_account.add_argument("--account-sport-id", default="", help="Matchbook sport id filter.")
+    market_account.add_argument("--account-side", default="", help="Matchbook offer side filter (back/lay/win/lose).")
+    market_account.add_argument("--account-offer-status", default="", help="Matchbook offer status filter.")
+    market_account.add_argument("--account-aggregation-type", default="none", help="Matchbook offer aggregation (none/summary/average).")
+    market_account.add_argument("--account-odds-type", default="DECIMAL", help="Matchbook odds type (DECIMAL/US/HK/MALAY/INDO/percent).")
+    market_account.add_argument("--account-interval", default="", help="Matchbook offer interval in seconds.")
+    market_account.add_argument("--account-cancellation-reason", default="", help="Matchbook cancellation reason.")
+    market_account.add_argument("--account-include-edits", action="store_true", help="Include Matchbook offer edits.")
+    market_account.add_argument("--runner-id", default="", help="Betfair runner id filter.")
+    market_account.add_argument("--bet-id", default="", help="Betfair bet id filter.")
+    market_account.add_argument("--group-by", default="BET", help="Betfair cleared-order roll-up.")
+    market_account.add_argument("--include-item-description", action="store_true")
+    market_account.add_argument(
+        "--wallet",
+        default="",
+        help="Wallet or activity identity (Betfair, MetaDAO Solana, Omen/Gnosis EVM, Predict.fun, or Myriad).",
+    )
+    market_account.add_argument("--locale", default="en", help="Betfair account-statement locale.")
+    market_account.add_argument("--exclude-item", action="store_true", help="Exclude item details from Betfair statements.")
+    market_account.add_argument("--from-currency", default="", help="Betfair source currency for currency_rates.")
+    market_account.add_argument("--order-by", default="BY_MATCH_TIME", help="Betfair current-order sort field.")
+    market_account.add_argument("--sort-dir", default="EARLIEST_TO_LATEST", help="Betfair current-order sort direction.")
+    market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")
+    market_account.add_argument("--status", default="", help="Documented account order status (venue-specific).")
+    market_account.add_argument("--matching-status", default="", help="Prophet Exchange matching status filter.")
+    market_account.add_argument("--limit", default=None, help="Optional page size (operation-specific).")
+    market_account.add_argument("--offset", default="0", help="Optional page offset.")
+    market_account.add_argument("--cursor", default="", help="Cursor returned by a previous account read.")
+    market_account.add_argument("--subaccount", default=None, help="Optional Kalshi subaccount number (0-63).")
+    market_account.add_argument("--count-filter", default="", help="Kalshi positions filter: position,total_traded.")
+    market_account.add_argument("--historical", action="store_true", help="Use the venue's documented historical endpoint.")
+    market_account.add_argument("--sort", default=None, help="Documented position sort value.")
+    market_account.add_argument("--is-resolved", default=None, help="Predict.fun positions filter: true or false.")
+    market_account.add_argument("--search", default="", help="Settled-position search text.")
+    market_account.add_argument("--category", default="", help="Settled-position category.")
+    market_account.add_argument("--with-cash-outs", action="store_true")
+    market_account.add_argument("--include-cp", action="store_true", help="Metaculus: include Community Prediction data.")
+    market_account.add_argument("--include-cp-history", action="store_true", help="Metaculus: include full aggregation history.")
+    market_account.add_argument("--include-descriptions", action="store_true", help="Metaculus: include question descriptions.")
+    market_account.add_argument("--include-daily-scores", action="store_true", help="Good Judgment Open: include daily score breakdowns.")
+    market_account.add_argument("--dex", default="", help="Optional Hyperliquid perpetual DEX name.")
+    market_account.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
+    market_account.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
+    market_account.add_argument("--before", default=None, help="Optional Polymarket fill timestamp upper bound.")
+    market_account.add_argument("--after", default=None, help="Optional Polymarket fill timestamp lower bound.")
+    _add_json_output_args(market_account)
+    market_account.set_defaults(func=run_market_account)
+
+    market_position = markets_sub.add_parser(
+        "position-intent",
+        parents=[common],
+        help="Request a documented unsigned position transaction for external wallet signing (Myriad).",
+    )
+    market_position.add_argument("operation", choices=MYRIAD_POSITION_INTENT_OPERATIONS)
+    market_position.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_position.add_argument("--market-id", dest="position_market_id", default=None, help="Myriad on-chain market id.")
+    market_position.add_argument("--amount", default=None, help="Unsigned collateral/share amount in token base units.")
+    market_position.add_argument("--network-id", default=None, help="Optional Myriad network id.")
+    market_position.add_argument("--event-id", default=None, help="NegRisk bytes32 event id for neg-risk operations.")
+    market_position.add_argument("--outcome-index", default=None, help="NegRisk outcome index (0-255).")
+    market_position.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
+    _add_json_output_args(market_position)
+    market_position.set_defaults(func=run_market_position_intent)
+
+    market_orders = markets_sub.add_parser(
+        "manage-orders",
+        parents=[common],
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Hyperliquid, IBKR event contracts, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, Prophet Exchange, Predict.fun, Probable, Smarkets, SX Bet, or Xmarket).",
+    )
+    market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
+    market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_orders.add_argument("--exchange-market-id", default="", help="Betfair exchange market id for the mutation.")
+    market_orders.add_argument("--market-id", default="", help="Polymarket condition id for cancel_market_orders.")
+    market_orders.add_argument("--market-slug", default="", help="Limitless market slug for cancel_all_orders.")
+    market_orders.add_argument("--asset-id", default="", help="Polymarket token id for cancel_market_orders.")
+    market_orders.add_argument(
+        "--instructions",
+        default=None,
+        help="JSON array of venue instructions/order ids, or a signed Hyperliquid/Myriad JSON object, or @path to a JSON file.",
+    )
+    market_orders.add_argument("--customer-ref", default=None, help="Optional Betfair de-duplication reference (max 32 chars).")
+    market_orders.add_argument("--market-version", default=None, help="Optional replaceOrders market version integer or JSON object.")
+    market_orders.add_argument("--async-request", action="store_true", help="Request asynchronous replaceOrders processing.")
+    market_orders.add_argument(
+        "--confirm-global-cancel",
+        default=None,
+        help="Exact global-cancel text is required (venue-specific; e.g. CANCEL ALL BETS, CANCEL ALL LIMITLESS ORDERS, CANCEL ALL MATCHBOOK OFFERS, or CANCEL ALL OPINION ORDERS).",
+    )
+    market_orders.add_argument("--order-id", default=None, help="Venue order identifier for single-order mutations.")
+    market_orders.add_argument("--external-id", default=None, help="Prophet Exchange external id paired with the returned order id.")
+    market_orders.add_argument("--order-ids", default=None, help="Probable comma-separated order ids for batch cancellation.")
+    market_orders.add_argument("--token-id", default=None, help="Probable token id for order cancellation.")
+    market_orders.add_argument("--token-ids", default=None, help="Probable comma-separated token ids for scoped reads.")
+    market_orders.add_argument("--event-id", default=None, help="Probable event id for cancel-all scoping.")
+    market_orders.add_argument("--offer-id", default=None, help="Matchbook offer identifier for single-offer mutations.")
+    market_orders.add_argument("--offer-ids", default=None, help="Matchbook comma-separated offer ids for cancel_offers.")
+    market_orders.add_argument("--event-ids", default=None, help="Matchbook comma-separated event ids for scoped cancellation.")
+    market_orders.add_argument("--market-ids", default=None, help="Matchbook comma-separated market ids for scoped cancellation.")
+    market_orders.add_argument("--runner-ids", default=None, help="Matchbook comma-separated runner ids for scoped cancellation.")
+    market_orders.add_argument("--current-odds", default=None, help="Matchbook edit_offer current decimal odds.")
+    market_orders.add_argument("--new-odds", default=None, help="Matchbook edit_offer replacement decimal odds.")
+    market_orders.add_argument("--current-stake", default=None, help="Matchbook edit_offer current remaining stake.")
+    market_orders.add_argument("--new-stake", default=None, help="Matchbook edit_offer replacement remaining stake.")
+    market_orders.add_argument("--order-hash", default=None, help="Myriad order hash or safe client order id for cancel_order.")
+    market_orders.add_argument("--trader", default=None, help="Myriad trader wallet for cancel_all_orders.")
+    market_orders.add_argument("--timestamp", default=None, help="Myriad cancel-all EIP-712 timestamp.")
+    market_orders.add_argument("--signature", default=None, help="Myriad EIP-712 order/cancel signature.")
+    market_orders.add_argument("--signature-type", default=None, help="Myriad signature type: 0 (EOA) or 3 (SCW).")
+    market_orders.add_argument("--network-id", default=None, help="Myriad network id for signed order requests.")
+    market_orders.add_argument(
+        "--allow-partial",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Myriad batch mutation behavior when individual entries fail (default true).",
+    )
+    market_orders.add_argument("--trade-id", default=None, help="Polymarket trade id for account fills reads.")
+    market_orders.add_argument("--ticker", default=None, help="Kalshi market ticker for amend_order.")
+    market_orders.add_argument("--side", choices=["bid", "ask", "BUY", "SELL"], default=None, help="Kalshi bid/ask or Opinion BUY/SELL filter.")
+    market_orders.add_argument("--price", default=None, help="Kalshi V2 amend price in probability dollars.")
+    market_orders.add_argument("--count", default=None, help="Kalshi V2 amend total contract count.")
+    market_orders.add_argument("--client-order-id", default=None, help="Optional Kalshi original client order id.")
+    market_orders.add_argument("--updated-client-order-id", default=None, help="Optional Kalshi amended client order id.")
+    market_orders.add_argument("--reduce-by", default=None, help="Kalshi decrease amount.")
+    market_orders.add_argument("--reduce-to", default=None, help="Kalshi target remaining count; use exactly one reduction flag.")
+    market_orders.add_argument("--subaccount", default=None, help="Kalshi subaccount number (0-63).")
+    market_orders.add_argument("--exchange-index", default=None, help="Kalshi exchange shard; only 0 is supported.")
+    market_orders.add_argument("--manual-indicator", default=None, help="IBKR CME manualIndicator value (true/false).")
+    market_orders.add_argument("--external-operator", default=None, help="IBKR CME extOperator identifier.")
+    market_orders.add_argument(
+        "--confirm-order-management",
+        default=None,
+        help="Exact text I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS is required for live mutations.",
+    )
+    market_orders.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
+    _add_json_output_args(market_orders)
+    market_orders.set_defaults(func=run_market_order_management)
 
     live = subparsers.add_parser("live-safety", parents=[common], help="Inspect live safety gates or run a no-order preflight.")
     live_sub = live.add_subparsers(dest="live_command", required=True)

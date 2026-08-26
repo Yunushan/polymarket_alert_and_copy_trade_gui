@@ -1,17 +1,22 @@
 {
-  "order_id": "106817811",
-  "id": "106817811",
+  "orderId": 106817811,
+  "status": "open",
   "symbol": "GEMI-BTC100K26-YES",
-  "exchange": "gemini",
-  "avg_execution_price": "0",
   "side": "buy",
-  "type": "exchange limit",
-  "timestamp": "1767225600",
-  "timestampms": 1767225600000,
-  "is_live": true,
-  "is_cancelled": false,
-  "executed_amount": "0",
-  "remaining_amount": "3",
+  "outcome": "yes",
+  "orderType": "limit",
+  "quantity": "3",
+  "filledQuantity": "0",
+  "remainingQuantity": "3",
   "price": "0.44",
-  "original_amount": "3"
+  "avgExecutionPrice": null,
+  "createdAt": "2026-08-22T07:00:00.000Z",
+  "updatedAt": "2026-08-22T07:00:00.000Z",
+  "cancelledAt": null,
+  "contractMetadata": {
+    "contractId": "contract_yes",
+    "contractTicker": "BTC100K26-YES",
+    "eventTicker": "BTC100K2026",
+    "contractStatus": "active"
+  }
 }

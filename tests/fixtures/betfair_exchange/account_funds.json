@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "availableToBetBalance": 125.5,
+    "exposure": -4.25,
+    "retainedCommission": 0.0,
+    "exposureLimit": -1000.0
+  },
+  "id": 1
+}

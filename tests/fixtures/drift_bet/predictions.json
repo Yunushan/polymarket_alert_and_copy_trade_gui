@@ -1,0 +1,37 @@
+{
+  "success": true,
+  "records": [
+    {
+      "ts": 1787000000,
+      "txSig": "5DriftBetPredictionRecord1111111111111111111111111111111111111111",
+      "txSigIndex": 0,
+      "slot": 300000000,
+      "quoteAssetAmountFilled": "620000",
+      "baseAssetAmountFilled": "1000000000",
+      "oraclePrice": "104250.0",
+      "marketIndex": 7,
+      "marketType": "perp",
+      "symbol": "BTC-ELECTION-BET",
+      "action": "fill",
+      "fillRecordId": "drift-fill-101",
+      "takerOrderDirection": "long",
+      "makerOrderDirection": "short"
+    },
+    {
+      "ts": 1786998200,
+      "txSig": "5DriftBetPredictionRecord2222222222222222222222222222222222222222",
+      "txSigIndex": 1,
+      "slot": 299999700,
+      "quoteAssetAmountFilled": "1160000",
+      "baseAssetAmountFilled": "2000000000",
+      "oraclePrice": "104100.0",
+      "marketIndex": 7,
+      "marketType": "perp",
+      "symbol": "BTC-ELECTION-BET",
+      "action": "fill",
+      "fillRecordId": "drift-fill-100",
+      "takerOrderDirection": "short",
+      "makerOrderDirection": "long"
+    }
+  ]
+}

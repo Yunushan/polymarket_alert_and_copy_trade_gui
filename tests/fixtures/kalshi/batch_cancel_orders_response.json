@@ -1,0 +1,16 @@
+{
+  "orders": [
+    {
+      "order_id": "order-kalshi-1",
+      "reduced_by": "10.00",
+      "ts_ms": 1780272000123,
+      "client_order_id": "client-kalshi-1"
+    },
+    {
+      "order_id": "order-kalshi-2",
+      "reduced_by": "4.00",
+      "ts_ms": 1780272000456,
+      "client_order_id": "client-kalshi-2"
+    }
+  ]
+}

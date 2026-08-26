@@ -1,0 +1,15 @@
+{
+  "ticker": "KXFED-26MAY-TARGET-425",
+  "candlesticks": [
+    {
+      "end_period_ts": 1777636800,
+      "price": {
+        "open_dollars": "0.4000",
+        "low_dollars": "0.3900",
+        "high_dollars": "0.4500",
+        "close_dollars": "0.4200"
+      },
+      "volume_fp": "125.00"
+    }
+  ]
+}

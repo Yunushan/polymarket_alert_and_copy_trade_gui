@@ -1,0 +1,25 @@
+{
+  "trades": [
+    {
+      "trade_id": "trd_8a7b6c5d",
+      "order_id": "ord_992837",
+      "market_id": "us-election-2028",
+      "outcome_id": "vance",
+      "side": "buy",
+      "price": 0.35,
+      "qty": 14285.71,
+      "notional_usd": 5000.0,
+      "executed_at": "2024-12-01T09:15:00.456Z"
+    },
+    {
+      "trade_id": "trd_other_market",
+      "market_id": "other-market",
+      "outcome_id": "vance",
+      "side": "buy",
+      "price": 0.2,
+      "qty": 10,
+      "executed_at": "2024-12-01T09:15:00.456Z"
+    }
+  ],
+  "next_cursor": null
+}

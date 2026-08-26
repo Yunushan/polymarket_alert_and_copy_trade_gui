@@ -1,0 +1,53 @@
+[
+  {
+    "proxyWallet": "0x0000000000000000000000000000000000000001",
+    "timestamp": 1780344003000,
+    "marketId": "market-1",
+    "conditionId": "condition-1",
+    "type": "TRADE",
+    "size": 4.0,
+    "usdcSize": 1.76,
+    "transactionHash": "0xprobabletrade1",
+    "price": 0.44,
+    "asset": "token-yes",
+    "side": "BUY",
+    "outcomeIndex": 0,
+    "title": "Will BTC reach $100k by year end?",
+    "slug": "btc-100k",
+    "outcome": "Yes"
+  },
+  {
+    "proxyWallet": "0x0000000000000000000000000000000000000001",
+    "timestamp": 1780344004000,
+    "marketId": "market-1",
+    "conditionId": "condition-1",
+    "type": "TRADE",
+    "size": 2.0,
+    "usdcSize": 1.12,
+    "transactionHash": "0xprobabletrade2",
+    "price": 0.56,
+    "asset": "token-no",
+    "side": "SELL",
+    "outcomeIndex": 1,
+    "title": "Will BTC reach $100k by year end?",
+    "slug": "btc-100k",
+    "outcome": "No"
+  },
+  {
+    "proxyWallet": "0x0000000000000000000000000000000000000001",
+    "timestamp": 1780344005000,
+    "marketId": "market-1",
+    "conditionId": "condition-1",
+    "type": "SPLIT",
+    "size": 7.0,
+    "usdcSize": 0.0,
+    "transactionHash": "0xprobablesplit",
+    "price": 0.5,
+    "asset": "token-yes",
+    "side": "BUY",
+    "outcomeIndex": 0,
+    "title": "Will BTC reach $100k by year end?",
+    "slug": "btc-100k",
+    "outcome": "Yes"
+  }
+]

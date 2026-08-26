@@ -46,8 +46,17 @@ sudo systemd-tmpfiles --create /etc/tmpfiles.d/market-sentinel.conf
 
 sudo mkdir -p /opt/market-sentinel
 sudo chown "$USER" /opt/market-sentinel
+RELEASE_VERSION="<RELEASE_VERSION>"
 git clone https://github.com/Yunushan/market-sentinel.git /opt/market-sentinel
 cd /opt/market-sentinel
+git fetch --tags --force origin
+git switch --detach "v${RELEASE_VERSION}"
+EXPECTED_SOURCE_REVISION="$(git rev-parse --verify HEAD^{commit})"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+# Install the exact locked frontend tree before the strict verifier builds it.
+npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+
 # Validate the checked-out source with the test dependency set before deployment.
 python3 -m venv .verify-venv
 .verify-venv/bin/python -m pip install --require-hashes -r requirements-bootstrap.lock
@@ -71,13 +80,23 @@ workflow:
 .venv/bin/python -m pip install --require-hashes -r requirements-live.lock
 ```
 
-Build the React frontend before starting the service:
+The strict verifier above built the React frontend. Capture its reviewed
+fingerprint before starting the service:
 
 ```bash
-cd /opt/market-sentinel/frontend
-npm ci
-npm run build
+cd /opt/market-sentinel
+
+# Capture this from the reviewed, clean release build before the service starts.
+EXPECTED_FRONTEND_SHA256="$(.venv/bin/python -c 'from pathlib import Path; from core.deployment_identity import frontend_tree_sha256; print(frontend_tree_sha256(Path("frontend/dist")))')"
+printf '%s\n' "${EXPECTED_FRONTEND_SHA256}" | sudo tee /etc/market-sentinel/frontend-dist.sha256 >/dev/null
+sudo chmod 0600 /etc/market-sentinel/frontend-dist.sha256
 ```
+
+Treat `/etc/market-sentinel/frontend-dist.sha256` as deployment evidence, not
+as a value to regenerate immediately before verification. It must be captured
+from the reviewed clean release build before the service starts and kept under
+root ownership. Rebuilding or changing `frontend/dist` requires recording a new
+reviewed fingerprint and restarting the service.
 
 Install the systemd unit and validate it:
 
@@ -100,6 +119,14 @@ sudo journalctl -u market-sentinel-web -f
 /opt/market-sentinel/.venv/bin/market-sentinel doctor --strict --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
 ```
 
+The CLI `serve --frontend-dir` option is supported for deployment-relative
+builds and is validated before the socket is opened. The resolved directory
+must remain beneath the release/resource root, so a typo or an unsafe path
+fails closed instead of changing the HTTP static-file root.
+The static catalog is built once from that canonical root; each candidate is
+resolved and checked relative to the root before it is read, so request URLs
+never construct filesystem paths.
+
 The web and health units use strict systemd sandboxes, private device and
 hostname/clock namespaces, restricted network address families, and a root-owned
 environment file. The web unit has a strict read-only `doctor` preflight before
@@ -118,13 +145,21 @@ state directory. The initial install command remains useful for inspecting
 ownership before the first start.
 
 The backup timer runs a local, network-isolated state backup each day with a
-14-artifact retention limit. It writes archives and SHA-256 manifests only to
+14-pair retention limit. It writes archives and SHA-256 manifests only to
 `/var/lib/market-sentinel-backups`, owned by the service account and separate
 from the live state directory. Place `/var/lib` on encrypted storage or change
 the backup destination to an encrypted mounted volume before using this in
-production. Archive, manifest, and retention updates are published atomically
-and their directory changes are synced on POSIX filesystems. SQLite state databases are captured with SQLite's online backup API
-instead of copying WAL sidecar files. The archive intentionally excludes
+production. The archive and then its manifest are each published atomically,
+with their directory changes synced on POSIX filesystems. Retention counts only
+cryptographically verified, restorable archive/manifest pairs. An orphan left
+by an interrupted publication and an invalid pair are preserved for operator
+inspection, do not consume a retention slot, and cannot evict a valid backup.
+SQLite state databases are captured with SQLite's online backup API instead of
+copying WAL, shared-memory, or rollback-journal sidecar files. Other regular
+files are copied to a private stable snapshot and rejected if they change while
+being copied. Creation enforces the same member, payload, compressed-archive,
+and bounded tar-overhead limits as verification; it verifies the staged pair
+before publishing the archive and then the manifest. The archive intentionally excludes
 `/etc/market-sentinel` and its credentials; protect and back up that root-owned
 configuration through the host's secret-management and configuration process.
 
@@ -159,40 +194,58 @@ proxy response, cache policy, the required browser-security header directives,
 and removal of the public `Server` header.
 It also verifies the root-owned, private service environment file and private
 state/backup directories used by the bundled systemd units.
-It also requires a successful backup completed within the last 26 hours; enable
-the timer and run the service once before collecting deployment evidence.
+It also requires a successful backup service completion and independently opens
+at least one archive/manifest pair from the trusted private backup directory,
+verifies its SHA-256 digest and bounded archive structure, and requires its
+manifest timestamp to be within the last 26 hours. Enable the timer and run the
+service once before collecting deployment evidence. The bundled directory is
+the safe default; use `--backup-directory` only when the systemd backup
+destination was intentionally changed to another absolute, private,
+service-owned path with no symbolic-link components.
 `--expected-version` is required: it prevents a healthy but stale deployment
 from being accepted as release evidence.
 `--expected-source-revision` is also required: it prevents a healthy service
 from being accepted when the checkout does not match the intended release
 commit. Resolve it from the trusted release tag before running the verifier.
+`--expected-frontend-sha256` binds both the running process and the files served
+from disk to the fingerprint captured from the reviewed frontend build. The
+verifier does not derive this expected value from the mutable live tree.
 It does not place orders, contact market APIs, or enable any live feature.
 
 ```bash
 export MARKET_SENTINEL_PUBLIC_BASIC_USER="operator"
 export MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD="the-existing-caddy-password"
+export MARKET_SENTINEL_API_TOKEN="the-existing-market-sentinel-api-token"
 RELEASE_VERSION="<RELEASE_VERSION>"
-EXPECTED_SOURCE_REVISION="$(git -C /opt/market-sentinel rev-list -n1 "v${RELEASE_VERSION}")"
+EXPECTED_SOURCE_REVISION="$(git -C /opt/market-sentinel rev-parse --verify "v${RELEASE_VERSION}^{commit}")"
+EXPECTED_FRONTEND_SHA256="$(sudo cat /etc/market-sentinel/frontend-dist.sha256)"
 
-sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD \
+sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD,MARKET_SENTINEL_API_TOKEN \
   /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_production_deployment.py \
   --expected-version "${RELEASE_VERSION}" \
   --expected-source-revision "${EXPECTED_SOURCE_REVISION}" \
+  --expected-frontend-sha256 "${EXPECTED_FRONTEND_SHA256}" \
+  --frontend-dir /opt/market-sentinel/frontend/dist \
+  --backup-directory /var/lib/market-sentinel-backups \
   --public-url https://analytics.example.com \
   --output /var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json
 ```
 
-Keep the password only in the environment. Do not pass it on the command line.
+Keep the password and API token only in the environment. Do not pass either
+secret on the command line. The API token must exactly match the token in the
+root-owned service environment file; it lets the verifier prove both that the
+loopback API rejects tokenless requests and that Caddy injects the configured
+token only after successful Basic Auth.
 The generated JSON contains a schema version, UTC collection timestamp, and source version/revision status but no credentials; `--output` requires an existing,
 private root-owned parent directory, writes atomically with mode `0600`, and
 syncs the replacement directory entry on POSIX so a service account cannot
 replace the release-change record. Repeat
 the verification after every restore drill. The command
 uses `sudo` because it verifies the root-owned service environment file; it
-preserves only the two explicitly named Basic Auth variables for the public
-proxy check. For a
+preserves only the two explicitly named Basic Auth variables and the API token
+needed for the public proxy and loopback authentication checks. For a
 loopback-only staging host, omit `--public-url`; the script will still validate
-the local service and timer, but retain both expected identity arguments for the
+the local service and timer, but retain all three expected identity arguments for the
 deployed release.
 
 For a non-Linux or isolated local loopback smoke test only, add
@@ -227,12 +280,15 @@ not production-host evidence.
   duration, and an unexpected loss of request traffic.
 - Backups: back up `/var/lib/market-sentinel` daily with encryption and tested
   retention. `market-sentinel-backup.timer` performs an integrity-manifested
-  daily archive with 14 retained copies. The directory contains local
+  daily archive with 14 retained, cryptographically verified archive/manifest
+  pairs. Orphaned and invalid entries remain visible for operator investigation
+  but do not displace a restorable pair. The directory contains local
   configuration, paper records, and redacted live-validation reports. Do not
   back up `.env` files to shared or unencrypted storage.
 - Restore drill: quarterly, select an archive from
   `/var/lib/market-sentinel-backups`, verify it, then restore it only into a
-  new empty directory on an isolated host:
+  brand-new path on an isolated host. The destination itself must not exist;
+  create and permission its trusted parent in advance:
 
   ```bash
   /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/restore_state_backup.py \
@@ -243,15 +299,29 @@ not production-host evidence.
   ```
 
   The restore command rejects checksum mismatches, unsafe archive paths,
-  archive bombs beyond its stated safety limits, and nonempty destinations.
+  compressed archives larger than 256 MiB, expanded archives larger than
+  the 1 GiB file-payload limit plus strictly bounded tar headers, padding, and
+  extension metadata, archives with more than 10,000 members, oversized
+  cumulative PAX/GNU metadata, and every pre-existing
+  destination (including an empty directory or file). The compressed and
+  expanded limits can be lowered for a drill with `--max-archive-bytes` and
+  `--max-bytes`; do not raise them without reviewing the expected backup size.
+  The tool resolves an existing parent and atomically creates the final restore
+  directory with private permissions, reducing final-component symlink races.
   Start the service loopback-only from the restored state, run the health
   check, and confirm no live trading is enabled by restored configuration.
 - Configuration recovery: an existing malformed `config.json` now fails closed
-  and is never silently replaced with defaults. Preserve that file for
-  investigation, restore the most recent verified backup to
-  `/var/lib/market-sentinel/config.json`, then run the health check before
-  restarting the service. Do not delete the damaged file until the restored
-  configuration has been verified.
+  and is never silently replaced with defaults. Stop the service and use the
+  restore command above to extract the most recent verified backup into a
+  brand-new private sibling directory; the restore destination is a directory,
+  never the `config.json` path itself. Run `market-sentinel doctor --config
+  <new-directory>/config.json` and review that live trading remains disabled or
+  intentionally configured. Preserve the malformed file in a root-only
+  incident directory, install the verified recovered file through a temporary
+  `0600` path with the service account's ownership, and atomically rename that
+  temporary file over `/var/lib/market-sentinel/config.json`. Run the loopback
+  health checks before restarting public access. Do not delete the damaged file
+  until the restored configuration has been verified.
 
 ## Incident response
 

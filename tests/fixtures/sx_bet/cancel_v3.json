@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "data": {
+    "cancelled": [{"orderId": "0xd9b693a1075ab77c0638fe98fcd3144dbb8f91d0f7ee454d442bf25ca7cbcb66", "commandId": "74a01fe8-6555-4492-8d28-879c151aef8b"}],
+    "notCancelled": [],
+    "unconfirmed": []
+  }
+}

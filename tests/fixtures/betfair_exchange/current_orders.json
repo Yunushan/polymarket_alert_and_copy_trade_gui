@@ -1,0 +1,45 @@
+{
+  "result": {
+    "currentOrders": [
+      {
+        "betId": "bet_matched_101",
+        "marketId": "1.234",
+        "selectionId": 101,
+        "handicap": 0.0,
+        "priceSize": {"price": 2.0, "size": 10.0},
+        "side": "BACK",
+        "status": "EXECUTION_COMPLETE",
+        "orderType": "LIMIT",
+        "placedDate": "2026-06-01T20:00:00.000Z",
+        "matchedDate": "2026-06-01T20:00:03.000Z",
+        "averagePriceMatched": 2.0,
+        "sizeMatched": 4.0,
+        "sizeRemaining": 0.0,
+        "sizeCancelled": 6.0
+      },
+      {
+        "betId": "bet_other_runner",
+        "marketId": "1.234",
+        "selectionId": 102,
+        "side": "LAY",
+        "status": "EXECUTION_COMPLETE",
+        "placedDate": "2026-06-01T20:00:04.000Z",
+        "matchedDate": "2026-06-01T20:00:05.000Z",
+        "averagePriceMatched": 1.8,
+        "sizeMatched": 3.0
+      },
+      {
+        "betId": "bet_unmatched",
+        "marketId": "1.234",
+        "selectionId": 101,
+        "side": "BACK",
+        "status": "EXECUTABLE",
+        "placedDate": "2026-06-01T20:00:06.000Z",
+        "averagePriceMatched": 0.0,
+        "sizeMatched": 0.0,
+        "sizeRemaining": 5.0
+      }
+    ],
+    "moreAvailable": false
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "orderId": 123,
+  "clientOrderId": "prob-client-1",
+  "status": "OPEN",
+  "symbol": "market-1",
+  "side": "BUY",
+  "price": "0.44",
+  "origQty": "5",
+  "executedQty": "0",
+  "tokenId": "token-yes",
+  "ctfTokenId": "token-yes"
+}

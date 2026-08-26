@@ -1,0 +1,16 @@
+{
+  "data": {
+    "bets": [
+      {
+        "id": "current-303-1",
+        "event-id": 101,
+        "market-id": 202,
+        "runner-id": 303,
+        "side": "back",
+        "odds": 2.4,
+        "stake": 3.0,
+        "status": "OPEN"
+      }
+    ]
+  }
+}

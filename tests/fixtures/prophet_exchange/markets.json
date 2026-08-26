@@ -1,0 +1,60 @@
+{
+  "data": [
+    {
+      "market_id": 555,
+      "event_id": 101,
+      "market_type": "moneyline",
+      "liquidity": 4250.0,
+      "selections": [
+        [
+          {
+            "outcome_id": 1,
+            "name": "Patriots",
+            "price": 1.95,
+            "line": null,
+            "line_id": "line_1",
+            "strike_id": "strike_1",
+            "quantity": 2100.0
+          }
+        ],
+        [
+          {
+            "outcome_id": 2,
+            "name": "Jets",
+            "price": 1.95,
+            "line": null,
+            "line_id": "line_2",
+            "strike_id": "strike_2",
+            "quantity": 2150.0
+          }
+        ]
+      ]
+    },
+    {
+      "market_id": 556,
+      "event_id": 101,
+      "market_type": "total",
+      "liquidity": 1000.0,
+      "selections": [
+        {
+          "outcome_id": 3,
+          "name": "Over",
+          "price": 2.1,
+          "line": 2.5,
+          "line_id": "total_over",
+          "strike_id": "strike_3",
+          "quantity": 500.0
+        },
+        {
+          "outcome_id": 4,
+          "name": "Under",
+          "price": 1.8,
+          "line": 2.5,
+          "line_id": "total_under",
+          "strike_id": "strike_4",
+          "quantity": 500.0
+        }
+      ]
+    }
+  ]
+}

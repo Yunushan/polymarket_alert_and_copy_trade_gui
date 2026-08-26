@@ -1,0 +1,15 @@
+{
+  "market": "btc-150k-2025",
+  "outcome": "YES",
+  "timestamp": 1704153600,
+  "bids": [
+    {"price": 0.349, "quantity": 5000, "orders": 12},
+    {"price": 0.348, "quantity": 8500, "orders": 23}
+  ],
+  "asks": [
+    {"price": 0.351, "quantity": 4200, "orders": 8},
+    {"price": 0.352, "quantity": 6100, "orders": 15}
+  ],
+  "spread": 0.002,
+  "midPrice": 0.35
+}

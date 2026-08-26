@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "id": "position-1",
+      "market": {"id": "market-1", "name": "Will the election result be certified?"},
+      "outcome": {"id": "outcome-yes", "name": "Yes"},
+      "quantity": 10,
+      "averagePrice": 0.44,
+      "currentPrice": 0.47,
+      "unrealizedPnL": 0.3
+    }
+  ],
+  "total": 1
+}

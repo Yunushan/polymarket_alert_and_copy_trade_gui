@@ -1,0 +1,55 @@
+{
+  "data": [
+    {
+      "user": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "action": "buy",
+      "marketTitle": "BTC above $100k",
+      "marketSlug": "btc-above-100k-2026",
+      "marketId": 501,
+      "networkId": 56,
+      "outcomeTitle": "Yes",
+      "outcomeId": 1,
+      "shares": 20.0,
+      "value": 12.2,
+      "timestamp": 1787395200,
+      "blockNumber": 123456,
+      "txId": "0xmyriadbuy"
+    },
+    {
+      "user": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "action": "sell",
+      "marketTitle": "BTC above $100k",
+      "marketSlug": "btc-above-100k-2026",
+      "marketId": 501,
+      "networkId": 56,
+      "outcomeTitle": "No",
+      "outcomeId": 2,
+      "shares": 4.0,
+      "value": 1.56,
+      "timestamp": 1787395100,
+      "blockNumber": 123455,
+      "txId": "0xmyriadsell"
+    },
+    {
+      "user": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "action": "add_liquidity",
+      "marketId": 501,
+      "outcomeId": 1,
+      "shares": 100,
+      "value": 50,
+      "timestamp": 1787395000,
+      "txId": "0xmyriadliquidity"
+    },
+    {
+      "user": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "action": "buy",
+      "marketId": 501,
+      "outcomeId": 1,
+      "shares": 0,
+      "value": 0,
+      "timestamp": 1787394900,
+      "txId": "0xmyriadinvalid"
+    }
+  ],
+  "pagination": {"page": 1, "limit": 25, "total": 4}
+}

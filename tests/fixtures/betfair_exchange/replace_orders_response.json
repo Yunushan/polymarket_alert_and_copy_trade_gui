@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "status": "SUCCESS",
+    "marketId": "1.234",
+    "instructionReports": [
+      {
+        "status": "SUCCESS",
+        "cancelledBetId": "bet-1",
+        "placedBetId": "bet-2",
+        "placedSize": 2.0,
+        "averagePriceMatched": 2.0
+      }
+    ]
+  },
+  "id": 1
+}

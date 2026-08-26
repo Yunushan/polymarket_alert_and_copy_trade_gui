@@ -5,7 +5,24 @@
   "state": "open",
   "networkId": 56,
   "outcomes": [
-    {"id": 1, "title": "Yes", "price": "0.61", "shares": "1000"},
-    {"id": 2, "title": "No", "price": "0.39", "shares": "800"}
+    {
+      "id": 1,
+      "title": "Yes",
+      "price": "0.61",
+      "bestBid": 0.60,
+      "bestAsk": 0.62,
+      "shares": "1000",
+      "price_charts": {
+        "24h": [
+          [1719831600000, 0.50, 0.55, 0.48, 0.54, 12.0],
+          [1719835200000, 0.54, 0.62, 0.52, 0.61, 18.0]
+        ],
+        "7d": [
+          {"timestamp": 1719748800, "open": 0.42, "high": 0.58, "low": 0.40, "close": 0.54, "volume": 44.0},
+          {"t": 1719835200000, "p": 0.61}
+        ]
+      }
+    },
+    {"id": 2, "title": "No", "price": "0.39", "bestBid": null, "bestAsk": null, "shares": "800"}
   ]
 }

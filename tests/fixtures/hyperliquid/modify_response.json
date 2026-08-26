@@ -1,0 +1,9 @@
+{
+  "status": "ok",
+  "response": {
+    "type": "batchModify",
+    "data": {
+      "statuses": ["success"]
+    }
+  }
+}

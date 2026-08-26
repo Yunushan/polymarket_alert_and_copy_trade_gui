@@ -1,0 +1,29 @@
+{
+  "limit": 2,
+  "next_cursor": "LTE=",
+  "count": 2,
+  "data": [
+    {
+      "id": "clob-trade-1",
+      "market": "0xmarket",
+      "asset_id": "token-yes",
+      "side": "BUY",
+      "size": "12500000",
+      "price": "0.4500",
+      "status": "TRADE_STATUS_CONFIRMED",
+      "match_time": "1760000100",
+      "outcome": "YES"
+    },
+    {
+      "id": "clob-trade-2",
+      "market": "0xmarket",
+      "asset_id": "token-yes",
+      "side": "SELL",
+      "size": "2500000",
+      "price": "0.4700",
+      "status": "TRADE_STATUS_CONFIRMED",
+      "match_time": "1760000200",
+      "outcome": "YES"
+    }
+  ]
+}

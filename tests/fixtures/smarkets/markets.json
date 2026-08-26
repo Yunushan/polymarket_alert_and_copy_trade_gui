@@ -1,0 +1,10 @@
+{
+  "markets": [
+    {
+      "id": "market-1",
+      "name": "BTC above threshold",
+      "event_id": "event-1",
+      "state": "open"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "eventTicker": "BTC100K2026",
+  "contracts": [
+    {
+      "symbol": "GEMI-BTC100K26-YES",
+      "totalQty": "1250",
+      "buyQty": "800",
+      "sellQty": "450"
+    },
+    {
+      "symbol": "GEMI-BTC100K26-NO",
+      "totalQty": "900",
+      "buyQty": "400",
+      "sellQty": "500"
+    }
+  ]
+}

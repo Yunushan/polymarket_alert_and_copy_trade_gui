@@ -1,0 +1,39 @@
+{
+  "markets": [
+    {
+      "ticker": "KXFED-26MAY-TARGET-425",
+      "event_ticker": "KXFED-26MAY",
+      "series_ticker": "KXFED",
+      "market_type": "binary",
+      "title": "Will the Fed target rate be above 4.25% on May 26?",
+      "subtitle": "Fed target rate above 4.25%",
+      "yes_sub_title": "Above 4.25%",
+      "no_sub_title": "Not above 4.25%",
+      "status": "active",
+      "yes_bid_dollars": "0.4100",
+      "yes_ask_dollars": "0.4300",
+      "no_bid_dollars": "0.5700",
+      "no_ask_dollars": "0.5900",
+      "last_price_dollars": "0.4200",
+      "volume_fp": "1200.00"
+    },
+    {
+      "ticker": "KXFED-26MAY-TARGET-450",
+      "event_ticker": "KXFED-26MAY",
+      "series_ticker": "KXFED",
+      "market_type": "binary",
+      "title": "Will the Fed target rate be above 4.50% on May 26?",
+      "subtitle": "Fed target rate above 4.50%",
+      "yes_sub_title": "Above 4.50%",
+      "no_sub_title": "Not above 4.50%",
+      "status": "active",
+      "yes_bid_dollars": "0.1200",
+      "yes_ask_dollars": "0.1500",
+      "no_bid_dollars": "0.8500",
+      "no_ask_dollars": "0.8800",
+      "last_price_dollars": "0.1400",
+      "volume_fp": "300.00"
+    }
+  ],
+  "cursor": ""
+}

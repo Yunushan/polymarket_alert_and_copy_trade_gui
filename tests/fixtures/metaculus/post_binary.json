@@ -8,9 +8,27 @@
     "title": "Will the demo launch before July?",
     "type": "binary",
     "status": "open",
-    "aggregations": {
-      "recency_weighted": {
-        "latest": {
+      "aggregations": {
+        "recency_weighted": {
+          "history": [
+            {
+              "start_time": 1704067200,
+              "end_time": 1704153600,
+              "centers": [
+                0.4
+              ],
+              "forecaster_count": 8
+            },
+            {
+              "start_time": 1704153600,
+              "end_time": null,
+              "centers": [
+                0.64
+              ],
+              "forecaster_count": 12
+            }
+          ],
+          "latest": {
           "centers": [
             0.64
           ]

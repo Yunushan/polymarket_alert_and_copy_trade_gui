@@ -12,6 +12,19 @@ import type {
   LivePreflightPayload,
   LiveSafetyPayload,
   MarketsPayload,
+  MarketSupportPayload,
+  MarketAccountOperation,
+  MarketAccountPayload,
+  MarketPositionIntentPayload,
+  MarketPositionOperation,
+  MarketOrderManagementOperation,
+  MarketOrderManagementPayload,
+  MarketCandlesPayload,
+  MarketContractsPayload,
+  MarketEventsPayload,
+  MarketOrderbookPayload,
+  MarketPricePayload,
+  MarketTradesPayload,
   PaperFormFillPayload,
   PaperImpactPayload,
   PaperOrderForm,
@@ -137,6 +150,122 @@ export function fetchConfig(): Promise<ConfigPayload> {
 
 export function fetchMarkets(): Promise<MarketsPayload> {
   return request<MarketsPayload>("/api/markets");
+}
+
+function serializePaperOrderForm(form: PaperOrderForm): Record<string, unknown> {
+  const { metadata_json, ...payload } = form;
+  const trimmed = metadata_json.trim();
+  if (!trimmed) {
+    return payload;
+  }
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(trimmed);
+  } catch (error) {
+    throw new Error(`Order metadata must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error("Order metadata must be a JSON object.");
+  }
+  return { ...payload, metadata };
+}
+
+export function fetchMarketSupport(marketId = ""): Promise<MarketSupportPayload> {
+  const path = marketId.trim()
+    ? `/api/markets/${encodeURIComponent(marketId.trim())}/support`
+    : "/api/markets/support-matrix";
+  return request<MarketSupportPayload>(path);
+}
+
+function marketReadQuery(values: Record<string, string | number | boolean | undefined>): string {
+  const params = new URLSearchParams();
+  Object.entries(values).forEach(([key, value]) => {
+    if (value !== undefined && String(value).trim() !== "") {
+      params.set(key, String(value));
+    }
+  });
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+export function fetchMarketEvents(marketId: string, query = "", limit = 50): Promise<MarketEventsPayload> {
+  return request<MarketEventsPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/events${marketReadQuery({ query, limit })}`
+  );
+}
+
+export function fetchMarketContracts(marketId: string, eventId: string): Promise<MarketContractsPayload> {
+  return request<MarketContractsPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/contracts${marketReadQuery({ event_id: eventId })}`
+  );
+}
+
+export function fetchMarketPrice(marketId: string, contractId: string): Promise<MarketPricePayload> {
+  return request<MarketPricePayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/price${marketReadQuery({ contract_id: contractId })}`
+  );
+}
+
+export function fetchMarketOrderbook(marketId: string, contractId: string): Promise<MarketOrderbookPayload> {
+  return request<MarketOrderbookPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/orderbook${marketReadQuery({ contract_id: contractId })}`
+  );
+}
+
+export function fetchMarketTrades(
+  marketId: string,
+  contractId: string,
+  limit = 50,
+  before = "",
+  after = ""
+): Promise<MarketTradesPayload> {
+  return request<MarketTradesPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/trades${marketReadQuery({ contract_id: contractId, limit, before, after })}`
+  );
+}
+
+export function fetchMarketCandles(
+  marketId: string,
+  contractId: string,
+  resolution = "1h",
+  from = "",
+  to = ""
+): Promise<MarketCandlesPayload> {
+  return request<MarketCandlesPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/candles${marketReadQuery({ contract_id: contractId, resolution, from, to })}`
+  );
+}
+
+export function fetchMarketAccount(
+  marketId: string,
+  operation: MarketAccountOperation,
+  values: Record<string, string | number | boolean | undefined> = {}
+): Promise<MarketAccountPayload> {
+  return request<MarketAccountPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/account/${encodeURIComponent(operation)}${marketReadQuery(values)}`
+  );
+}
+
+export function requestMarketPositionIntent(
+  marketId: string,
+  operation: MarketPositionOperation,
+  payload: Record<string, unknown>
+): Promise<MarketPositionIntentPayload> {
+  return request<MarketPositionIntentPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/positions`,
+    { method: "POST", body: JSON.stringify({ operation, ...payload }) }
+  );
+}
+
+export function manageMarketOrders(
+  marketId: string,
+  operation: MarketOrderManagementOperation,
+  payload: Record<string, unknown>
+): Promise<MarketOrderManagementPayload> {
+  return request<MarketOrderManagementPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/orders/${encodeURIComponent(operation)}`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
 }
 
 export function fetchAlerts(): Promise<AlertsPayload> {
@@ -467,7 +596,7 @@ export function previewCopyTrade(form: CopyPreviewForm): Promise<CopyPreviewPayl
 export function previewLivePreflight(form: PaperOrderForm): Promise<LivePreflightPayload> {
   return request<LivePreflightPayload>("/api/live-safety/preflight", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
@@ -481,28 +610,28 @@ export function clearPaperHistory(): Promise<PaperPayload> {
 export function refreshPaperQuote(form: PaperOrderForm): Promise<PaperQuotePayload> {
   return request<PaperQuotePayload>("/api/paper/quote", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
 export function fillPaperQuoteLimit(form: PaperOrderForm): Promise<{ limit_price: number; message: string }> {
   return request<{ limit_price: number; message: string }>("/api/paper/quote-limit", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
 export function previewPaperImpact(form: PaperOrderForm): Promise<PaperImpactPayload> {
   return request<PaperImpactPayload>("/api/paper/preview-impact", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 
 export function submitPaperOrder(form: PaperOrderForm): Promise<PaperOrderResponse> {
   return request<PaperOrderResponse>("/api/paper/orders", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify(serializePaperOrderForm(form))
   });
 }
 

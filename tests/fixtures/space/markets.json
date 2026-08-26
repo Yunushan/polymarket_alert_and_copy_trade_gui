@@ -1,0 +1,27 @@
+{
+  "markets": [
+    {
+      "id": "btc-150k-2025",
+      "question": "Will BTC close above $150,000 in 2025?",
+      "category": "crypto",
+      "expiresAt": 1735689599,
+      "status": "active",
+      "volume24h": 1250000,
+      "liquidity": 450000,
+      "probability": 0.35
+    },
+    {
+      "id": "eth-10k-2025",
+      "question": "Will ETH close above $10,000 in 2025?",
+      "category": "crypto",
+      "expiresAt": 1735689599,
+      "status": "active",
+      "volume24h": 300000,
+      "liquidity": 120000,
+      "probability": 0.22
+    }
+  ],
+  "total": 2,
+  "limit": 50,
+  "offset": 0
+}

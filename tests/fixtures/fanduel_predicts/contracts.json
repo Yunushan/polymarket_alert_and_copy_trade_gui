@@ -1,0 +1,16 @@
+{
+  "data": [
+    {
+      "id": "fanduel-og-world-cup-yes",
+      "symbol": "FD-OG-WC-HOST-YES",
+      "title": "Yes",
+      "status": "active"
+    },
+    {
+      "id": "fanduel-og-world-cup-no",
+      "symbol": "FD-OG-WC-HOST-NO",
+      "title": "No",
+      "status": "active"
+    }
+  ]
+}

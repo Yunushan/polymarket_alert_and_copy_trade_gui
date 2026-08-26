@@ -122,6 +122,13 @@ class CopyTradeSettings:
     conflict_guard: bool = True
     conflict_window_seconds: int = 300
 
+    @staticmethod
+    def _stored_identity(value: object) -> str:
+        text = str(value or "").strip()
+        if text.lower().startswith("solana:"):
+            return "solana:" + text.split(":", 1)[1].strip()
+        return text.lower()
+
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["follow_wallets"] = self.normalized_follow_wallets()
@@ -132,7 +139,7 @@ class CopyTradeSettings:
     def normalized_follow_wallets(self) -> List[str]:
         wallets: List[str] = []
         for value in [self.follow_wallet, *(self.follow_wallets or [])]:
-            wallet = str(value or "").strip().lower()
+            wallet = self._stored_identity(value)
             if wallet and wallet not in wallets:
                 wallets.append(wallet)
         return wallets
@@ -158,7 +165,7 @@ class CopyTradeSettings:
             raw_wallets = []
         wallets: List[str] = []
         for value in [data.get("follow_wallet", ""), *raw_wallets]:
-            wallet = str(value or "").strip().lower()
+            wallet = CopyTradeSettings._stored_identity(value)
             if wallet and wallet not in wallets:
                 wallets.append(wallet)
         data["follow_wallet"] = wallets[0] if wallets else ""

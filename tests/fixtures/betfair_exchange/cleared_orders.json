@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "clearedOrders": [
+      {
+        "eventTypeId": "7",
+        "eventId": "987654",
+        "marketId": "1.234",
+        "selectionId": 101,
+        "betId": "bet-1",
+        "placedDate": "2026-06-01T10:00:00.000Z",
+        "settledDate": "2026-06-01T11:00:00.000Z",
+        "side": "BACK",
+        "orderType": "LIMIT",
+        "betOutcome": "WON",
+        "priceMatched": 2.0,
+        "sizeSettled": 4.0,
+        "profit": 4.0
+      }
+    ],
+    "moreAvailable": false
+  },
+  "id": 1
+}

@@ -1,0 +1,10 @@
+{
+  "market": "blinq-market-1",
+  "asset_id": "blinq-token-yes",
+  "bids": [
+    {"price": "0.60", "size": "12"}
+  ],
+  "asks": [
+    {"price": "0.64", "size": "8"}
+  ]
+}

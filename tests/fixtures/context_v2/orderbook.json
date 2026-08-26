@@ -1,0 +1,14 @@
+{
+  "outcomes": [
+    {
+      "outcomeIndex": 0,
+      "bids": [{"price": 0.42, "size": 12}, {"price": 0.40, "size": 20}],
+      "asks": [{"price": 0.46, "size": 10}, {"price": 0.48, "size": 15}]
+    },
+    {
+      "outcomeIndex": 1,
+      "bids": [{"price": 0.54, "size": 8}],
+      "asks": [{"price": 0.58, "size": 9}]
+    }
+  ]
+}

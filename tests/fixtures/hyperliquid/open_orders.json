@@ -1,0 +1,12 @@
+[
+  {
+    "coin": "#10",
+    "limitPx": "0.6400",
+    "oid": 2001,
+    "side": "B",
+    "sz": "5.0000",
+    "origSz": "5.0000",
+    "timestamp": 1788264000000,
+    "orderType": "Limit"
+  }
+]

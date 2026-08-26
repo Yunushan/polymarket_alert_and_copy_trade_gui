@@ -1,0 +1,12 @@
+{
+  "events": [
+    {
+      "id": 101,
+      "name": "BTC vs ETH",
+      "state": "open",
+      "url-name": "btc-vs-eth"
+    }
+  ],
+  "offset": 0,
+  "total": 1
+}

@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "id": "xorder-1",
+      "marketId": "market-1",
+      "outcomeId": "outcome-yes",
+      "status": "open",
+      "side": "buy",
+      "price": 0.44,
+      "quantity": 10
+    },
+    {
+      "id": "xorder-filled-1",
+      "marketId": "market-1",
+      "outcomeId": "outcome-yes",
+      "status": "filled",
+      "side": "buy",
+      "price": 0.46,
+      "averagePrice": 0.45,
+      "quantity": 4,
+      "filledQuantity": 4,
+      "filledAt": "2026-08-23T10:15:00Z"
+    }
+  ],
+  "total": 2
+}

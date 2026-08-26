@@ -1,0 +1,7 @@
+{
+  "archive_only": true,
+  "prices_file": "All-ifps-all-prices-260714.csv",
+  "outcomes_file": "Winning-outcomes-all-260714.txt",
+  "columns": ["timestamp", "ifpid", "outcome", "price", "qty"],
+  "price_scale": "0-100"
+}

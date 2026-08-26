@@ -1,0 +1,72 @@
+{
+  "data": {
+    "v3Bets": [
+      {
+        "id": "bet-v3-1",
+        "betId": "7",
+        "type": "Ordinar",
+        "amount": "10000000",
+        "odds": "1850000000000",
+        "potentialPayout": "18500000",
+        "payout": null,
+        "status": "Accepted",
+        "result": null,
+        "createdBlockTimestamp": "1773511660",
+        "createdTxHash": "0xv3bet",
+        "selections": [
+          {
+            "odds": "1850000000000",
+            "result": null,
+            "conditionKind": "Match",
+            "outcome": {
+              "outcomeId": "29",
+              "condition": {
+                "conditionId": "300610060000000000649714110000000000000227249395"
+              }
+            }
+          }
+        ],
+        "_gamesIds": ["30061006000000000029214016"]
+      }
+    ],
+    "liveBets": [
+      {
+        "id": "live-bet-1",
+        "betId": "8",
+        "status": "Accepted",
+        "amount": "10000000",
+        "odds": "1850000000000",
+        "createdAt": "1773511661",
+        "potentialPayout": "18500000",
+        "payout": null,
+        "result": null,
+        "selections": [
+          {
+            "odds": "1850000000000",
+            "result": null,
+            "outcome": {
+              "id": "outcome-29",
+              "outcomeId": "29",
+              "condition": {
+                "id": "condition-1",
+                "conditionId": "300610060000000000649714110000000000000227249395",
+                "status": "Open",
+                "gameId": "30061006000000000029214016"
+              }
+            }
+          }
+        ],
+        "isRedeemed": false,
+        "isRedeemable": false,
+        "txHash": "0xlivebet",
+        "core": {
+          "address": "0xF9548Be470A4e130c90ceA8b179FCD66D2972AC7",
+          "liquidityPool": {
+            "address": "0x0000000000000000000000000000000000000002",
+            "tokenSymbol": "USDT"
+          }
+        }
+      }
+    ]
+  }
+}

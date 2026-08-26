@@ -1,0 +1,22 @@
+{
+  "code": 0,
+  "msg": "success",
+  "result": {
+    "total": 1,
+    "list": [
+      {
+        "orderId": "order-1",
+        "status": 2,
+        "statusEnum": "Filled",
+        "marketId": 77,
+        "side": 1,
+        "sideEnum": "Buy",
+        "outcome": "Yes",
+        "orderShares": "4",
+        "filledShares": "4",
+        "createdAt": 1733312400000,
+        "trades": []
+      }
+    ]
+  }
+}

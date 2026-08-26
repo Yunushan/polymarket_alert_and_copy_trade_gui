@@ -1,0 +1,13 @@
+{
+  "g1003": {
+    "label": "Economic Indicators",
+    "markets": [
+      {
+        "name": "US Fed Funds Target Rate",
+        "symbol": "FF",
+        "status": "active",
+        "url": "https://forecastex.com/markets/"
+      }
+    ]
+  }
+}

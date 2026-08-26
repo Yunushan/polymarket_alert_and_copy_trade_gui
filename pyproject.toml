@@ -21,7 +21,7 @@ dependencies = [
     "cryptography>=50.0.0",
     "eth-account>=0.13.0",
     "eth-abi>=5.0.0,<6.0.0",
-    "tomli>=2.0.0; python_version < '3.11'",
+    "tomli>=2.4.1; python_version < '3.11'",
 ]
 
 classifiers = [
@@ -38,15 +38,16 @@ classifiers = [
 [project.optional-dependencies]
 build = [
     "build==1.5.0",
-    "setuptools==83.0.0",
+    "setuptools==84.0.0",
 ]
 live = [
     "py-clob-client>=0.34.0",
+    "opinion-clob-sdk>=0.7.0",
 ]
 test = [
     "pytest>=8.0",
     "coverage[toml]>=7.6",
-    "ruff==0.16.2",
+    "ruff==0.16.4",
 ]
 
 [tool.setuptools]

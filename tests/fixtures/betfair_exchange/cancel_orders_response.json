@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "status": "SUCCESS",
+    "marketId": "1.234",
+    "instructionReports": [
+      {
+        "status": "SUCCESS",
+        "betId": "bet-1",
+        "sizeCancelled": 1.25,
+        "cancelledDate": "2026-06-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "id": 1
+}

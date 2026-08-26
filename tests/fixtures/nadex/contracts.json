@@ -1,0 +1,16 @@
+{
+  "data": [
+    {
+      "id": "nadex-cdna-sports-2026-yes",
+      "symbol": "NADEX-CDNA-US500-YES",
+      "title": "Yes",
+      "status": "active"
+    },
+    {
+      "id": "nadex-cdna-sports-2026-no",
+      "symbol": "NADEX-CDNA-US500-NO",
+      "title": "No",
+      "status": "active"
+    }
+  ]
+}

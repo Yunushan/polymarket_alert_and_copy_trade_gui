@@ -1,0 +1,9 @@
+{
+  "accounts": [
+    {
+      "currency": "GBP",
+      "available_balance": "100.00",
+      "exposure": "0.00"
+    }
+  ]
+}

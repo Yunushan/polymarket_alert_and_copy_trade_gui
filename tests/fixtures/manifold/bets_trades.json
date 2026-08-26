@@ -1,0 +1,61 @@
+[
+  {
+    "id": "trade-bet-1",
+    "userId": "mf-user-1",
+    "contractId": "mf-binary-1",
+    "outcome": "YES",
+    "amount": 6.0,
+    "shares": 10.0,
+    "probBefore": 0.55,
+    "probAfter": 0.61,
+    "createdTime": 1760000020000,
+    "isFilled": true,
+    "isCancelled": false,
+    "isRedemption": false,
+    "fills": [
+      {"amount": 2.0, "shares": 3.3333333333, "timestamp": 1760000015000},
+      {"amount": 4.0, "shares": 6.6666666667, "timestamp": 1760000020000}
+    ]
+  },
+  {
+    "id": "trade-bet-2",
+    "userId": "mf-user-1",
+    "contractId": "mf-binary-1",
+    "outcome": "NO",
+    "amount": -4.0,
+    "shares": -6.25,
+    "probBefore": 0.42,
+    "probAfter": 0.38,
+    "createdTime": 1760000010000,
+    "isFilled": true,
+    "isCancelled": false,
+    "isRedemption": false
+  },
+  {
+    "id": "trade-multi-1",
+    "userId": "mf-user-1",
+    "contractId": "mf-multi-1",
+    "answerId": "answer-a",
+    "outcome": "Alpha",
+    "amount": 3.0,
+    "shares": 5.0,
+    "limitProb": 0.35,
+    "createdTime": 1760000008000,
+    "isFilled": true,
+    "isCancelled": false,
+    "isRedemption": false
+  },
+  {
+    "id": "trade-open-limit",
+    "userId": "mf-user-1",
+    "contractId": "mf-binary-1",
+    "outcome": "YES",
+    "amount": 0.0,
+    "shares": 10.0,
+    "limitProb": 0.5,
+    "createdTime": 1760000007000,
+    "isFilled": false,
+    "isCancelled": false,
+    "isRedemption": false
+  }
+]

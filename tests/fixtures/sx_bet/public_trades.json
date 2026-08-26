@@ -1,0 +1,38 @@
+{
+  "status": "success",
+  "data": {
+    "trades": [
+      {
+        "tradeId": "0xtrade-one",
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "isBettingOutcomeOne": true,
+        "isParlay": false,
+        "totalStake": "2500000",
+        "totalReturn": "6250000",
+        "weightedAverageOdds": "40000000000000000000",
+        "betTime": "2026-06-01T20:00:03.000Z",
+        "eventId": "L18272456"
+      },
+      {
+        "tradeId": "0xtrade-two",
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "isBettingOutcomeOne": false,
+        "isParlay": false,
+        "totalStake": "4000000",
+        "totalReturn": "10000000",
+        "weightedAverageOdds": "55000000000000000000",
+        "betTime": "2026-06-01T20:00:04.000Z",
+        "eventId": "L18272456"
+      },
+      {
+        "tradeId": "0xtrade-other-market",
+        "marketHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "isBettingOutcomeOne": true,
+        "isParlay": false,
+        "totalStake": "1000000",
+        "weightedAverageOdds": "50000000000000000000",
+        "betTime": "2026-06-01T20:00:05.000Z"
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "quotes": [
+    {
+      "contract_id": "contract-yes",
+      "back_offers": [{"price": 4200, "quantity": 120000}, {"price": 4000, "quantity": 200000}],
+      "lay_offers": [{"price": 4600, "quantity": 100000}, {"price": 4800, "quantity": 150000}],
+      "last_executed_price": 4300
+    },
+    {
+      "contract_id": "contract-no",
+      "back_offers": [{"price": 5400, "quantity": 80000}],
+      "lay_offers": [{"price": 5800, "quantity": 90000}],
+      "last_executed_price": 5700
+    }
+  ]
+}

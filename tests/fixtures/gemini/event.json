@@ -10,13 +10,49 @@
       "id": "contract_yes",
       "instrumentSymbol": "GEMI-BTC100K26-YES",
       "name": "Yes",
-      "status": "active"
+      "status": "active",
+      "ticker": "BTC100K26-YES",
+      "prices": {
+        "bestBid": "0.42",
+        "bestAsk": "0.45",
+        "lastTradePrice": "0.44"
+      },
+      "priceHistory": [
+        {"timestamp": "2026-08-22T07:00:00Z", "price": "0.40"},
+        {"timestamp": "2026-08-22T08:00:00Z", "price": "0.44"}
+      ]
     },
     {
       "id": "contract_no",
       "instrumentSymbol": "GEMI-BTC100K26-NO",
       "name": "No",
-      "status": "active"
+      "status": "active",
+      "ticker": "BTC100K26-NO",
+      "prices": {
+        "bestBid": "0.55",
+        "bestAsk": "0.58",
+        "lastTradePrice": "0.56"
+      },
+      "priceHistory": [
+        {"timestamp": "2026-08-22T07:00:00Z", "price": "0.60"},
+        {"timestamp": "2026-08-22T08:00:00Z", "price": "0.56"}
+      ]
     }
-  ]
+  ],
+  "contractOrderbooks": {
+    "GEMI-BTC100K26-YES": {
+      "bids": [
+        {"price": "0.42", "quantity": "100"},
+        {"price": "0.40", "quantity": "50"}
+      ],
+      "asks": [
+        {"price": "0.45", "quantity": "80"},
+        {"price": "0.47", "quantity": "120"}
+      ]
+    },
+    "GEMI-BTC100K26-NO": {
+      "bids": [{"price": "0.55", "quantity": "80"}],
+      "asks": [{"price": "0.58", "quantity": "90"}]
+    }
+  }
 }

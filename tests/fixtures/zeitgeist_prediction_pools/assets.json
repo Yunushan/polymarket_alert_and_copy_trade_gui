@@ -1,0 +1,13 @@
+{
+  "data": {
+    "assets": [
+      {
+        "id": "asset-yes",
+        "assetId": "CategoricalOutcome:90:0",
+        "poolId": 17,
+        "price": 0.8076745721806113,
+        "amountInPool": "1200"
+      }
+    ]
+  }
+}

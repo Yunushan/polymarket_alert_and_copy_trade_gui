@@ -1,0 +1,17 @@
+{
+  "id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "ORDER_STATUS_LIVE",
+  "owner": "owner-1",
+  "maker_address": "0x1111111111111111111111111111111111111111",
+  "market": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "asset_id": "1234567890",
+  "side": "BUY",
+  "original_size": "1000000",
+  "size_matched": "0",
+  "price": "0.5",
+  "outcome": "YES",
+  "expiration": "1735689600",
+  "order_type": "GTC",
+  "associate_trades": [],
+  "created_at": 1700000000
+}

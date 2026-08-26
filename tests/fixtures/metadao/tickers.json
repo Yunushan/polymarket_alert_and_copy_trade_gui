@@ -1,0 +1,21 @@
+[
+    {
+      "ticker_id": "ZKFHiLAfAFMTcDAuCtjNW54VzpERvoe7PBF9mYgmeta_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "base_currency": "ZKFHiLAfAFMTcDAuCtjNW54VzpERvoe7PBF9mYgmeta",
+      "target_currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "base_symbol": "META",
+      "base_name": "Meta DAO Token",
+      "target_symbol": "USDC",
+      "target_name": "USD Coin",
+      "pool_id": "5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE",
+      "last_price": "0.081340728222",
+      "base_volume": "30024.81040000",
+      "target_volume": "2441.23456789",
+      "liquidity_in_usd": "180138.45",
+      "bid": "0.080934024581",
+      "ask": "0.081747431863",
+      "high_24h": "0.085000000000",
+      "low_24h": "0.078000000000",
+      "startDate": "2024-12-01"
+    }
+]

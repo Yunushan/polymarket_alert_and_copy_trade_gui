@@ -1,21 +1,33 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from dataclasses import replace
 import math
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
-from .types import MarketContract, MarketEvent, PriceSnapshot
+from .types import MarketCandle, MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
 
 
 DEFAULT_METACULUS_BASE_URL = "https://www.metaculus.com/api"
+METACULUS_ACCOUNT_OPERATIONS = ("forecast_posts",)
 
 
 class MetaculusAdapter(MarketAdapter):
-    """Metaculus read-only adapter using the official authenticated API."""
+    """Metaculus adapter using the official authenticated API.
+
+    Metaculus is a forecasting platform rather than an exchange.  The shared
+    order methods are retained as an explicit compatibility envelope: paper
+    orders only build a forecast payload locally, while live orders submit the
+    documented forecast request behind the normal acknowledgement and kill
+    switch gates.  No exchange fill semantics are implied.
+    """
 
     metadata = get_market_metadata("metaculus")
+    live_order_sides = ("BUY",)
+    account_recovery_operations = METACULUS_ACCOUNT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -33,7 +45,11 @@ class MetaculusAdapter(MarketAdapter):
                 "data_access_note": (
                     "Metaculus API data access requires authentication; Community Prediction data is access-limited."
                 ),
-                "trading_supported": False,
+                "trading_supported": True,
+                "forecast_submission_supported": True,
+                "trading_semantics": "forecast_submission_not_exchange_execution",
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": ["/posts/?forecaster_id=..."],
             }
         )
         return health
@@ -97,6 +113,140 @@ class MetaculusAdapter(MarketAdapter):
             raw={"post": dict(post), "question": dict(question)},
         )
 
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Community Prediction aggregation history as point candles.
+
+        Metaculus is a forecasting platform rather than a traded venue.  Its
+        official API exposes irregularly-timed aggregation snapshots, not
+        exchange OHLCV bars.  The generic candle shape is therefore used as a
+        compatibility envelope: open/high/low/close are the same forecast
+        value, volume is intentionally left unset, and the original
+        aggregation entry is preserved in ``raw``.  No resampling is claimed.
+        """
+
+        self.ensure_capability("price_reading")
+        requested_resolution = str(resolution or "1h").strip().lower()
+        if requested_resolution not in {"raw", "forecast", "1h", "1d"}:
+            raise MarketConfigurationError(
+                "Metaculus forecast history accepts resolution 'raw', 'forecast', '1h', or '1d'; "
+                "the irregular official snapshots are not resampled."
+            )
+        lower = self._optional_timestamp(from_timestamp, "from_timestamp")
+        upper = self._optional_timestamp(to_timestamp, "to_timestamp")
+        if lower is not None and upper is not None and upper < lower:
+            raise MarketConfigurationError("Metaculus forecast history to_timestamp must not precede from_timestamp.")
+
+        post_id, question_id, outcome, choice_id = self._split_contract_id(contract_id)
+        post = self._get_post(post_id)
+        question = self._find_question(post, question_id)
+        if question is None:
+            raise MarketConfigurationError(f"Metaculus post {post_id} did not include question {question_id}.")
+
+        aggregation_method = str(self.config.get("metaculus_aggregation_method") or "").strip().lower()
+        aggregation = self._aggregation_for_history(question, aggregation_method)
+        if aggregation is None:
+            method_text = aggregation_method or "an accessible aggregation"
+            raise MarketConfigurationError(
+                f"Metaculus response did not include {method_text} history for question {question_id}. "
+                "Community Prediction history is access-limited by the official API."
+            )
+        history = aggregation.get("history")
+        if not isinstance(history, list):
+            raise MarketConfigurationError(
+                f"Metaculus response did not include an accessible history list for question {question_id}."
+            )
+
+        candles: List[MarketCandle] = []
+        for entry in history:
+            if not isinstance(entry, Mapping):
+                continue
+            timestamp = self._history_timestamp(entry)
+            if timestamp is None or (lower is not None and timestamp < lower) or (upper is not None and timestamp > upper):
+                continue
+            value = self._history_value(question, outcome, choice_id, entry)
+            if value is None:
+                continue
+            canonical_contract = self._contract_id(post_id, question_id, outcome, choice_id)
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical_contract,
+                    timestamp=timestamp,
+                    open=value,
+                    high=value,
+                    low=value,
+                    close=value,
+                    volume=None,
+                    raw={
+                        "source": "metaculus_api",
+                        "aggregation_method": aggregation_method or "recency_weighted",
+                        "resolution_requested": requested_resolution,
+                        "post_id": post_id,
+                        "question_id": question_id,
+                        "outcome": outcome,
+                        "choice_id": choice_id,
+                        "history_entry": dict(entry),
+                    },
+                )
+            )
+        candles.sort(key=lambda candle: candle.timestamp)
+        return candles
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read posts/questions on which a Metaculus user has forecast.
+
+        Metaculus' documented ``GET /api/posts/`` feed accepts a
+        ``forecaster_id`` filter.  The endpoint is authenticated and returns
+        the official post/question payload, so this operation deliberately
+        preserves the upstream response rather than pretending forecasts are
+        exchange fills or positions.  A forecaster id must be supplied either
+        per call or as ``metaculus_forecaster_id`` in the market settings.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            supported = ", ".join(self.account_recovery_operations)
+            raise MarketConfigurationError(
+                f"Metaculus account operation must be one of: {supported}."
+            )
+
+        raw_forecaster_id = kwargs.get("forecaster_id")
+        if raw_forecaster_id in (None, ""):
+            raw_forecaster_id = self.config.get("metaculus_forecaster_id")
+        forecaster_id = self._bounded_account_int(
+            raw_forecaster_id,
+            "forecaster_id",
+            minimum=1,
+            maximum=2_147_483_647,
+            required=True,
+        )
+        limit = self._bounded_account_int(
+            kwargs.get("limit", 50), "limit", minimum=1, maximum=100, required=True
+        )
+        offset = self._bounded_account_int(
+            kwargs.get("offset", 0), "offset", minimum=0, maximum=100_000, required=True
+        )
+        params: Dict[str, Any] = {
+            "forecaster_id": forecaster_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        for key in ("with_cp", "include_cp_history", "include_descriptions"):
+            if key in kwargs and kwargs[key] is not None:
+                params[key] = self._account_bool(kwargs[key], key)
+
+        response = self._get("/posts/", params=params)
+        if not isinstance(response, (Mapping, list)):
+            raise MarketConfigurationError("Metaculus forecast_posts returned an invalid posts response.")
+        return response
+
     def get_orderbook(self, contract_id: str):
         raise UnsupportedFeatureError(
             self.market_id,
@@ -104,11 +254,357 @@ class MetaculusAdapter(MarketAdapter):
             "Metaculus is a forecasting platform and does not expose a trading orderbook.",
         )
 
+    def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
+        """Validate and preview the official forecast payload without I/O."""
+
+        self.ensure_capability("paper_trading")
+        payload, endpoint, canonical, selected_probability = self._submission_payload(order)
+        return PaperOrderResult(
+            market_id=self.market_id,
+            contract_id=canonical,
+            accepted=True,
+            message=(
+                f"DRY RUN: would submit Metaculus forecast for {canonical}; "
+                "no upstream request was sent."
+            ),
+            filled_size=0.0,
+            average_price=selected_probability,
+            raw={
+                "endpoint": endpoint,
+                "request": [payload],
+                "semantics": "forecast_submission",
+            },
+        )
+
+    def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
+        """Submit one forecast through Metaculus' documented forecast route."""
+
+        self.ensure_capability("live_trading")
+        # A zero binary probability is valid in Metaculus' [0, 1] forecast
+        # domain, while the shared exchange-oriented preflight treats a
+        # supplied limit of zero as invalid.  Omit it only from the safety
+        # preview; the payload validator below still enforces the real range.
+        safety_order = order
+        if order.limit_price is not None:
+            try:
+                is_zero_probability = float(order.limit_price) == 0.0
+            except (TypeError, ValueError):
+                is_zero_probability = False
+            if is_zero_probability:
+                safety_order = replace(order, limit_price=None)
+        preflight = self.preflight_live_order(safety_order, feature_name="forecast submission")
+        payload, endpoint, canonical, _selected_probability = self._submission_payload(order)
+        response = self.runtime.request_json(
+            "POST",
+            self._url(endpoint),
+            json_body=[payload],
+            headers=self._auth_headers(),
+        )
+        return {
+            "market_id": self.market_id,
+            "contract_id": canonical,
+            "live": True,
+            "endpoint": endpoint,
+            "preflight": preflight,
+            "request": [payload],
+            "response": response,
+            "semantics": "forecast_submission",
+        }
+
+    def _submission_payload(
+        self,
+        order: PaperOrderRequest,
+    ) -> Tuple[Dict[str, Any], str, str, Optional[float]]:
+        """Build a validated ``POST /api/questions/forecast/`` payload.
+
+        The official API accepts a list of forecast objects.  Binary forecasts
+        use ``probability_yes``; multiple-choice forecasts use a complete
+        ``probability_yes_per_category`` distribution; numeric/date forecasts
+        use the documented 201-point ``continuous_cdf``.  Metadata is used for
+        the latter two shapes because a scalar order price cannot represent
+        their full distributions.
+        """
+
+        self.ensure_order_market(order)
+        if str(order.side or "").strip().upper() != "BUY":
+            raise MarketConfigurationError("Metaculus forecast submission only accepts side BUY.")
+        try:
+            size = float(order.size)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Metaculus forecast size must be numeric.") from exc
+        if not math.isfinite(size) or size <= 0:
+            raise MarketConfigurationError("Metaculus forecast size must be positive.")
+
+        post_id, question_id, outcome, choice_id = self._split_contract_id(order.contract_id)
+        canonical = self._contract_id(post_id, question_id, outcome, choice_id)
+        metadata = dict(order.metadata or {})
+        question_ref = int(question_id) if question_id.isdigit() else question_id
+        payload: Dict[str, Any] = {
+            "question": question_ref,
+            "source": "api",
+            "probability_yes": None,
+            "probability_yes_per_category": None,
+            "continuous_cdf": None,
+        }
+        selected_probability: Optional[float] = None
+
+        if outcome in {"YES", "NO"}:
+            raw_probability = metadata.get("forecast_probability", order.limit_price)
+            probability = self._forecast_probability(raw_probability)
+            payload["probability_yes"] = probability if outcome == "YES" else 1.0 - probability
+            selected_probability = probability
+        elif outcome == "CHOICE":
+            distribution = metadata.get("probability_yes_per_category")
+            if distribution is None:
+                distribution = metadata.get("forecast_distribution")
+            if not isinstance(distribution, Mapping) or not distribution:
+                raise MarketConfigurationError(
+                    "Metaculus multiple-choice forecasts require metadata.probability_yes_per_category "
+                    "as a complete label-to-probability mapping."
+                )
+            normalized: Dict[str, float] = {}
+            for label, raw_value in distribution.items():
+                key = str(label).strip()
+                if not key:
+                    raise MarketConfigurationError("Metaculus forecast distribution labels cannot be empty.")
+                normalized[key] = self._forecast_probability(raw_value, label=f"probability for {key}")
+            total = sum(normalized.values())
+            if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-6):
+                raise MarketConfigurationError(
+                    f"Metaculus multiple-choice forecast probabilities must sum to 1.0 (got {total:.8f})."
+                )
+            payload["probability_yes_per_category"] = normalized
+            selected_probability = normalized.get(choice_id or "")
+        else:
+            raw_cdf = metadata.get("continuous_cdf")
+            if raw_cdf is None:
+                raw_cdf = metadata.get("forecast_cdf")
+            if not isinstance(raw_cdf, (list, tuple)) or len(raw_cdf) != 201:
+                raise MarketConfigurationError(
+                    "Metaculus numeric/date forecasts require metadata.continuous_cdf with exactly 201 values."
+                )
+            cdf: List[float] = []
+            previous = -math.inf
+            for index, raw_value in enumerate(raw_cdf):
+                value = self._forecast_probability(raw_value, label=f"continuous_cdf[{index}]")
+                if value < previous:
+                    raise MarketConfigurationError("Metaculus continuous_cdf must be monotonically non-decreasing.")
+                cdf.append(value)
+                previous = value
+            payload["continuous_cdf"] = cdf
+
+        end_time = metadata.get("end_time") or metadata.get("forecast_end_time")
+        if end_time not in (None, ""):
+            if not isinstance(end_time, str) or not end_time.strip():
+                raise MarketConfigurationError("Metaculus forecast end_time must be a non-empty ISO-8601 string.")
+            payload["end_time"] = end_time.strip()
+        return payload, "/questions/forecast/", canonical, selected_probability
+
+    @staticmethod
+    def _forecast_probability(value: Any, *, label: str = "forecast probability") -> float:
+        try:
+            probability = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Metaculus {label} must be numeric in [0, 1].") from exc
+        if not math.isfinite(probability) or probability < 0.0 or probability > 1.0:
+            raise MarketConfigurationError(f"Metaculus {label} must be numeric in [0, 1].")
+        return probability
+
     def _get_post(self, ref: str) -> Optional[Mapping[str, Any]]:
         if not ref:
             return None
         data = self._get(f"/posts/{ref}/")
         return data if isinstance(data, Mapping) else None
+
+    @classmethod
+    def _aggregation_for_history(
+        cls,
+        question: Mapping[str, Any],
+        configured_method: str = "",
+    ) -> Optional[Mapping[str, Any]]:
+        aggregations = question.get("aggregations")
+        if not isinstance(aggregations, Mapping):
+            return None
+        supported = {"recency_weighted", "metaculus_prediction", "community", "unweighted"}
+        if configured_method and configured_method not in supported:
+            raise MarketConfigurationError(
+                "Metaculus metaculus_aggregation_method must be one of: "
+                + ", ".join(sorted(supported))
+                + "."
+            )
+        methods = [configured_method] if configured_method else [
+            "recency_weighted",
+            "metaculus_prediction",
+            "community",
+            "unweighted",
+        ]
+        for method in methods:
+            aggregation = aggregations.get(method)
+            if isinstance(aggregation, Mapping) and isinstance(aggregation.get("history"), list):
+                return aggregation
+        return None
+
+    @classmethod
+    def _history_value(
+        cls,
+        question: Mapping[str, Any],
+        outcome: str,
+        choice_id: Optional[str],
+        entry: Mapping[str, Any],
+    ) -> Optional[float]:
+        if outcome in {"YES", "NO"}:
+            probability = cls._history_binary_probability(entry)
+            if probability is None:
+                return None
+            return 1.0 - probability if outcome == "NO" else probability
+        if outcome == "CHOICE":
+            if not choice_id:
+                raise MarketConfigurationError("Metaculus choice contract requires a choice id.")
+            return cls._history_choice_probability(question, choice_id, entry)
+        return cls._history_numeric_value(entry)
+
+    @classmethod
+    def _history_binary_probability(cls, entry: Mapping[str, Any]) -> Optional[float]:
+        for key in ("probability", "prob", "center", "median", "q2"):
+            probability = cls._probability_from_value(entry.get(key))
+            if probability is not None:
+                return probability
+        for key in ("centers", "forecast_values", "means"):
+            values = entry.get(key)
+            if isinstance(values, Mapping):
+                for candidate in ("YES", "yes", "probability", "prob", "center"):
+                    if candidate in values:
+                        probability = cls._probability_from_value(values[candidate])
+                        if probability is not None:
+                            return probability
+                values = list(values.values())
+            if isinstance(values, list) and values:
+                probability = cls._probability_from_value(values[0])
+                if probability is not None:
+                    return probability
+        return None
+
+    @classmethod
+    def _history_choice_probability(
+        cls,
+        question: Mapping[str, Any],
+        choice_id: str,
+        entry: Mapping[str, Any],
+    ) -> Optional[float]:
+        for key in ("forecast_values", "choice_probabilities", "choiceProbabilities", "answerProbs"):
+            values = entry.get(key)
+            if isinstance(values, Mapping):
+                if choice_id in values:
+                    return cls._probability_from_value(values.get(choice_id))
+                for raw_key, raw_value in values.items():
+                    if str(raw_key) == choice_id:
+                        return cls._probability_from_value(raw_value)
+            elif isinstance(values, list):
+                index = cls._choice_index(question, choice_id)
+                if index is not None and index < len(values):
+                    return cls._probability_from_value(values[index])
+        return None
+
+    @classmethod
+    def _history_numeric_value(cls, entry: Mapping[str, Any]) -> Optional[float]:
+        for key in ("median", "center", "q2", "mean"):
+            value = cls._number_from_value(entry.get(key))
+            if value is not None:
+                return value
+        for key in ("centers", "means"):
+            values = entry.get(key)
+            if isinstance(values, list) and values:
+                value = cls._number_from_value(values[len(values) // 2])
+                if value is not None:
+                    return value
+        return None
+
+    @classmethod
+    def _choice_index(cls, question: Mapping[str, Any], choice_id: str) -> Optional[int]:
+        for index, (raw_id, _label) in enumerate(cls._choices_from_question(question)):
+            if raw_id == choice_id:
+                return index
+        try:
+            index = int(choice_id)
+        except (TypeError, ValueError):
+            return None
+        return index if index >= 0 else None
+
+    @staticmethod
+    def _optional_timestamp(value: Optional[float], label: str) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Metaculus {label} must be numeric.") from exc
+        if not math.isfinite(timestamp):
+            raise MarketConfigurationError(f"Metaculus {label} must be finite.")
+        return timestamp
+
+    @staticmethod
+    def _bounded_account_int(
+        value: Any,
+        label: str,
+        *,
+        minimum: int,
+        maximum: int,
+        required: bool = False,
+    ) -> Optional[int]:
+        if value in (None, ""):
+            if required:
+                raise MarketConfigurationError(f"Metaculus account {label} is required.")
+            return None
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Metaculus account {label} must be an integer.")
+        text = str(value).strip()
+        if not text or (text.startswith("+") and not text[1:].isdigit()) or (
+            text.startswith("-") and not text[1:].isdigit()
+        ) or (not text.lstrip("+-").isdigit()):
+            raise MarketConfigurationError(f"Metaculus account {label} must be an integer.")
+        parsed = int(text)
+        if parsed < minimum or parsed > maximum:
+            raise MarketConfigurationError(
+                f"Metaculus account {label} must be between {minimum} and {maximum}."
+            )
+        return parsed
+
+    @staticmethod
+    def _account_bool(value: Any, label: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise MarketConfigurationError(f"Metaculus account {label} must be a boolean.")
+
+    @staticmethod
+    def _history_timestamp(entry: Mapping[str, Any]) -> Optional[float]:
+        raw = entry.get("start_time")
+        if raw is None:
+            raw = entry.get("timestamp") or entry.get("time") or entry.get("end_time")
+        if raw is None:
+            return None
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            value = float(raw)
+            return value if math.isfinite(value) else None
+        text = str(raw).strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+            return value if math.isfinite(value) else None
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params, headers=self._auth_headers())

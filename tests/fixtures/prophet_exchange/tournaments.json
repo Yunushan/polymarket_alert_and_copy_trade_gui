@@ -1,0 +1,12 @@
+{
+  "data": {
+    "tournaments": [
+      {
+        "id": 123,
+        "name": "NFL - Regular Season",
+        "sport": "football",
+        "has_active_events": true
+      }
+    ]
+  }
+}

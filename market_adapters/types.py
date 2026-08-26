@@ -10,6 +10,8 @@ class MarketCapabilities:
     event_listing: bool = False
     price_reading: bool = False
     orderbook_reading: bool = False
+    trade_history: bool = False
+    candle_history: bool = False
     alerts: bool = False
     paper_trading: bool = False
     live_trading: bool = False
@@ -25,6 +27,8 @@ class MarketCapabilities:
             "event_listing": self.event_listing,
             "price_reading": self.price_reading,
             "orderbook_reading": self.orderbook_reading,
+            "trade_history": self.trade_history,
+            "candle_history": self.candle_history,
             "alerts": self.alerts,
             "paper_trading": self.paper_trading,
             "live_trading": self.live_trading,
@@ -92,6 +96,35 @@ class OrderBookSnapshot:
     contract_id: str
     bids: List[OrderBookLevel] = field(default_factory=list)
     asks: List[OrderBookLevel] = field(default_factory=list)
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MarketTrade:
+    """A normalized public trade from a market's documented trade feed."""
+
+    market_id: str
+    contract_id: str
+    trade_id: str
+    side: str
+    price: float
+    size: float
+    timestamp: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MarketCandle:
+    """A normalized OHLCV candle from a market's documented history feed."""
+
+    market_id: str
+    contract_id: str
+    timestamp: float
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: Optional[float] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
 

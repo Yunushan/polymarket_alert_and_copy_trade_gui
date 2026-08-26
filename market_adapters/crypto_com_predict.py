@@ -8,11 +8,25 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .runtime import AdapterRuntime
-from .types import MarketContract, MarketEvent, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import (
+    MarketContract,
+    MarketEvent,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 DEFAULT_CRYPTO_COM_PREDICT_BASE_URL = "https://data-api.crypto.com/api/v1/predictions"
 CRYPTO_COM_PREDICT_REFERENCES = (
+    "https://data.crypto.com/docs",
+    "https://data.crypto.com/quickstart",
+)
+FANATICS_MARKETS_REFERENCES = (
+    "https://fanaticsmarkets.com/legal/availability",
+    "https://crypto.com/en/prediction/partners",
     "https://data.crypto.com/docs",
     "https://data.crypto.com/quickstart",
 )
@@ -22,6 +36,10 @@ class CryptoComPredictAdapter(MarketAdapter):
     """Crypto.com Predictions adapter for the official read-only market-data API."""
 
     metadata = get_market_metadata("crypto_com_predict")
+    provider_label = "Crypto.com Predictions"
+    market_homepage_url = "https://crypto.com/prediction/"
+    price_source = "crypto_com_predictions_market_data"
+    references = CRYPTO_COM_PREDICT_REFERENCES
 
     def _create_runtime(self) -> AdapterRuntime:
         interval = self.config.get("min_request_interval_seconds", 0.6)
@@ -42,7 +60,7 @@ class CryptoComPredictAdapter(MarketAdapter):
         health.update(
             {
                 "api_base_url": self.api_base_url,
-                "references": list(CRYPTO_COM_PREDICT_REFERENCES),
+                "references": list(self.references),
                 "anonymous_read_access": True,
                 "anonymous_rate_limit_per_minute": 100,
                 "anonymous_rate_limit_per_day": 50_000,
@@ -52,7 +70,8 @@ class CryptoComPredictAdapter(MarketAdapter):
                     "Personal non-commercial reads are anonymous; redistribution, commercial use, "
                     "or model training requires a Crypto.com Market Data License."
                 ),
-                "orderbook_supported": False,
+                "orderbook_supported": True,
+                "orderbook_depth_supported": False,
                 "live_trading_supported": False,
                 "copy_trading_supported": False,
             }
@@ -110,15 +129,31 @@ class CryptoComPredictAdapter(MarketAdapter):
             bid=bid,
             ask=ask,
             midpoint=midpoint,
-            source="crypto_com_predictions_market_data",
+            source=self.price_source,
             raw=dict(payload),
         )
 
-    def get_orderbook(self, contract_id: str):
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "orderbook_reading",
-            "Crypto.com's Predictions Market Data API exposes bid, ask, midpoint, and probability, not depth or size.",
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        """Return the official bid/ask quote as a one-level book.
+
+        The market-data contract does not publish quote depth or quantities,
+        so sizes are explicitly represented as unknown ``0.0`` values and the
+        raw response marks this as a top-of-book-only snapshot.
+        """
+        self.ensure_capability("orderbook_reading")
+        price = self.get_price(contract_id)
+        bids = [OrderBookLevel(price=price.bid, size=0.0)] if price.bid is not None else []
+        asks = [OrderBookLevel(price=price.ask, size=0.0)] if price.ask is not None else []
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=price.contract_id,
+            bids=bids,
+            asks=asks,
+            raw={
+                "price": dict(price.raw),
+                "depth": "top_of_book_only",
+                "size_available": False,
+            },
         )
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
@@ -129,7 +164,7 @@ class CryptoComPredictAdapter(MarketAdapter):
             contract_id=str(order.contract_id).strip(),
             accepted=True,
             message=(
-                f"DRY RUN: would place Crypto.com Predictions {str(order.side).upper()} "
+                f"DRY RUN: would place {self.provider_label} {str(order.side).upper()} "
                 f"for {float(order.size):.4f} contracts"
                 + (f" at limit {float(order.limit_price):.4f}" if order.limit_price is not None else "")
             ),
@@ -142,14 +177,14 @@ class CryptoComPredictAdapter(MarketAdapter):
         raise UnsupportedFeatureError(
             self.market_id,
             "live_trading",
-            "Crypto.com's official Predictions API is market-data-only and publishes no order endpoint.",
+            f"{self.provider_label}'s official Predictions API is market-data-only and publishes no order endpoint.",
         )
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
             "copy_trading",
-            "Crypto.com's official Predictions API publishes no account activity mirroring endpoint.",
+            f"{self.provider_label}'s official Predictions API publishes no account activity mirroring endpoint.",
         )
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
@@ -178,7 +213,7 @@ class CryptoComPredictAdapter(MarketAdapter):
             market_id=self.market_id,
             event_id=event_id,
             title=str(payload.get("title") or event_id),
-            url=str(payload.get("url") or "https://crypto.com/prediction/").strip(),
+            url=str(payload.get("url") or self.market_homepage_url).strip(),
             status=str(payload.get("status") or "").strip().lower(),
             raw=dict(payload),
         )
@@ -192,7 +227,7 @@ class CryptoComPredictAdapter(MarketAdapter):
             event_id=event_id,
             title=title,
             outcome=title,
-            url=str(payload.get("url") or "https://crypto.com/prediction/").strip(),
+            url=str(payload.get("url") or self.market_homepage_url).strip(),
             status=str(payload.get("status") or "").strip().lower(),
             raw=dict(payload),
         )
@@ -200,21 +235,21 @@ class CryptoComPredictAdapter(MarketAdapter):
     def _validate_order(self, order: PaperOrderRequest) -> None:
         self.ensure_order_market(order)
         if not str(order.contract_id or "").strip():
-            raise MarketConfigurationError("Crypto.com Predictions paper order requires a contract symbol.")
+            raise MarketConfigurationError(f"{self.provider_label} paper order requires a contract symbol.")
         if str(order.side or "").upper() not in {"BUY", "SELL"}:
-            raise MarketConfigurationError("Crypto.com Predictions paper order side must be BUY or SELL.")
+            raise MarketConfigurationError(f"{self.provider_label} paper order side must be BUY or SELL.")
         if not self._is_positive_number(order.size):
-            raise MarketConfigurationError("Crypto.com Predictions paper order size must be positive.")
+            raise MarketConfigurationError(f"{self.provider_label} paper order size must be positive.")
         if order.limit_price is not None:
             try:
                 limit_price = float(order.limit_price)
             except (TypeError, ValueError) as exc:
                 raise MarketConfigurationError(
-                    "Crypto.com Predictions paper order limit price must be between 0 and 1."
+                    f"{self.provider_label} paper order limit price must be between 0 and 1."
                 ) from exc
             if not math.isfinite(limit_price) or not 0.0 <= limit_price <= 1.0:
                 raise MarketConfigurationError(
-                    "Crypto.com Predictions paper order limit price must be between 0 and 1."
+                    f"{self.provider_label} paper order limit price must be between 0 and 1."
                 )
 
     @staticmethod
@@ -258,3 +293,56 @@ class CryptoComPredictAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return False
         return math.isfinite(number) and number > 0
+
+
+class FanaticsMarketsAdapter(CryptoComPredictAdapter):
+    """Read-only Fanatics Markets alias backed by the official CDNA data API.
+
+    Fanatics documents its market product as an intermediary/partner experience
+    whose event contracts are listed and priced on Crypto.com Derivatives North
+    America (CDNA).  No Fanatics-specific public order endpoint is published,
+    so this adapter intentionally exposes only discovery, prices, alerts, and
+    local dry-run orders.
+    """
+
+    metadata = get_market_metadata("fanatics_markets")
+    provider_label = "Fanatics Markets/CDNA"
+    market_homepage_url = "https://fanaticsmarkets.com"
+    price_source = "cdna_predictions_market_data"
+    references = FANATICS_MARKETS_REFERENCES
+
+    @property
+    def api_base_url(self) -> str:
+        configured = (
+            self.config.get("fanatics_markets_api_base_url")
+            or self.config.get("crypto_com_predict_api_base_url")
+            or self.config.get("api_base_url")
+        )
+        return str(configured or DEFAULT_CRYPTO_COM_PREDICT_BASE_URL).rstrip("/")
+
+    def health_check(self) -> Dict[str, Any]:
+        health = super().health_check()
+        health.update(
+            {
+                "alias_of": "crypto_com_predict",
+                "underlying_market_data_provider": "Crypto.com Derivatives North America (CDNA)",
+                "intermediary": "Fanatics Markets / Paragon Global Markets",
+                "fanatics_order_api_supported": False,
+                "live_trading_supported": False,
+                "copy_trading_supported": False,
+                "license_notice": (
+                    "CDNA Predictions API anonymous reads are for personal non-commercial use; "
+                    "commercial redistribution or model-training use requires a Market Data License. "
+                    "Fanatics account trading is not automated here."
+                ),
+            }
+        )
+        return health
+
+    def _api_key(self):
+        return self.resolve_credential(
+            "fanatics_markets_api_key",
+            ("FANATICS_MARKETS_API_KEY", "CRYPTO_COM_PREDICTIONS_API_KEY"),
+            required=False,
+            label="Fanatics Markets/CDNA Predictions API key",
+        )

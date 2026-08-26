@@ -1,0 +1,16 @@
+{
+  "market_id": "us-election-2028",
+  "outcome_id": "vance",
+  "interval": "1h",
+  "candles": [
+    {
+      "timestamp": "2024-12-01T09:00:00Z",
+      "open": 0.34,
+      "high": 0.36,
+      "low": 0.33,
+      "close": 0.35,
+      "volume": 125000.0,
+      "trade_count": 847
+    }
+  ]
+}

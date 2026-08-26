@@ -1,0 +1,29 @@
+{
+  "markets": [
+    {
+      "id": 202,
+      "name": "Match Odds",
+      "market-type": "one_x_two",
+      "state": "open",
+      "runners": [
+        {
+          "id": 303,
+          "name": "Bitcoin",
+          "prices": [
+            {"side": "back", "odds": 2.0, "available-amount": 10.0},
+            {"side": "back", "odds": 2.1, "available-amount": 8.0},
+            {"side": "lay", "odds": 2.2, "available-amount": 7.0},
+            {"side": "lay", "odds": 2.3, "available-amount": 5.0}
+          ]
+        },
+        {
+          "id": 304,
+          "name": "Ethereum",
+          "prices": []
+        }
+      ]
+    }
+  ],
+  "offset": 0,
+  "total": 1
+}

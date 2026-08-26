@@ -66,8 +66,8 @@ WORKFLOW_ACTION_PINS = {
         "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
         "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
         "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-        "github/codeql-action/init": (4, "5595ccaf912efad79be6eef63a5619ff05969be3"),
-        "github/codeql-action/analyze": (4, "5595ccaf912efad79be6eef63a5619ff05969be3"),
+        "github/codeql-action/init": (4, "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28"),
+        "github/codeql-action/analyze": (4, "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28"),
     },
 }
 WORKFLOW_ACTION_REF_RE = re.compile(
@@ -77,16 +77,54 @@ WORKFLOW_ACTION_REF_RE = re.compile(
 
 IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "polymarket": ("polymarket", "test_polymarket_adapter.py"),
+    "betmgm": ("betmgm", "test_betmgm_adapter.py"),
+    "blinq": ("blinq", "test_blinq_adapter.py"),
+    "context_v2": ("context_v2", "test_additional_official_adapters.py"),
+    "smarkets": ("smarkets", "test_additional_official_adapters.py"),
+    "thales_market": ("thales_market", "test_additional_official_adapters.py"),
+    "metadao": ("metadao", "test_additional_official_adapters.py"),
+    "seer": ("seer", "test_additional_official_adapters.py"),
+    "hyperliquid": ("hyperliquid", "test_additional_official_adapters.py"),
+    "trueo": ("trueo", "test_additional_official_adapters.py"),
+    "zeitgeist_sdk_markets": ("zeitgeist_sdk_markets", "test_legacy_web3_adapters.py"),
+    "zeitgeist_prediction_pools": ("zeitgeist_prediction_pools", "test_legacy_web3_adapters.py"),
+    "ibkr_forecasttrader": ("ibkr_forecasttrader", "test_additional_official_adapters.py"),
+    "iowa_electronic_markets": ("iowa_electronic_markets", "test_iowa_electronic_markets.py"),
+    "hypermind": ("hypermind", "test_hypermind_adapter.py"),
+    "scicast": ("scicast", "test_scicast_adapter.py"),
+    "forecastex": ("forecastex", "test_additional_official_adapters.py"),
+    "cme_prediction_markets": ("cme_prediction_markets", "test_additional_official_adapters.py"),
+    "probable": ("probable", "test_additional_official_adapters.py"),
+    "matchbook": ("matchbook", "test_additional_official_adapters.py"),
+    "prophet_exchange": ("prophet_exchange", "test_prophet_exchange_adapter.py"),
+    "prdt_finance": ("prdt_finance", "test_prdt_finance_adapter.py"),
+    "zetarium_world": ("zetarium_world", "test_zetarium_adapter.py"),
+    "lamas_finance": ("lamas_finance", "test_lamas_finance_adapter.py"),
+    "dflow": ("dflow", "test_additional_official_adapters.py"),
+    "drift_bet": ("drift_bet", "test_drift_bet_adapter.py"),
+    "frenzy_finance": ("frenzy_finance", "test_frenzy_finance_adapter.py"),
+    "space": ("space", "test_space_adapter.py"),
+    "hedgehog_markets": ("hedgehog_markets", "test_hedgehog_markets_adapter.py"),
     "kalshi": ("kalshi", "test_kalshi_adapter.py"),
     "predictit": ("predictit", "test_predictit_adapter.py"),
     "crypto_com_predict": ("crypto_com_predict", "test_crypto_com_predict_adapter.py"),
+    "fanatics_markets": ("fanatics_markets", "test_fanatics_markets_adapter.py"),
+    "fanduel_predicts": ("fanduel_predicts", "test_fanduel_predicts_adapter.py"),
+    "nadex": ("nadex", "test_nadex_adapter.py"),
+    "coinbase_prediction_markets": ("coinbase_prediction_markets", "test_coinbase_prediction_adapter.py"),
+    "robinhood_prediction_markets": ("robinhood_prediction_markets", "test_distribution_alias_adapters.py"),
+    "kalshi_via_robinhood": ("robinhood_prediction_markets", "test_distribution_alias_adapters.py"),
+    "draftkings_predictions": ("draftkings_predictions", "test_distribution_alias_adapters.py"),
     "manifold": ("manifold", "test_manifold_adapter.py"),
     "metaculus": ("metaculus", "test_metaculus_adapter.py"),
+    "good_judgment_open": ("good_judgment_open", "test_good_judgment_open_adapter.py"),
     "limitless_exchange": ("limitless_exchange", "test_limitless_adapter.py"),
     "sx_bet": ("sx_bet", "test_sx_bet_adapter.py"),
     "azuro": ("azuro", "test_azuro_adapter.py"),
     "augur": ("augur", "test_legacy_web3_adapters.py"),
+    "reality_eth_markets": ("reality_eth_markets", "test_legacy_web3_adapters.py"),
     "omen": ("omen", "test_legacy_web3_adapters.py"),
+    "gnosis_prediction_markets": ("gnosis_prediction_markets", "test_legacy_web3_adapters.py"),
     "zeitgeist": ("zeitgeist", "test_legacy_web3_adapters.py"),
     "myriad_markets": ("myriad_markets", "test_additional_official_adapters.py"),
     "xo_market": ("xo_market", "test_additional_official_adapters.py"),
@@ -179,7 +217,16 @@ def run_static_analysis() -> None:
 
 
 def run_adapter_catalog_check() -> None:
-    from market_adapters import MARKET_CATALOG, MARKET_IDS, build_default_registry
+    from market_adapters import (
+        MARKET_CATALOG,
+        MARKET_IDS,
+        account_surface_issues,
+        build_default_registry,
+        capability_contract_issues,
+        support_matrix_entry,
+        VERIFIED_BLOCKERS,
+    )
+    import market_sentinel_cli
 
     if len(MARKET_IDS) != len(set(MARKET_IDS)):
         raise SystemExit("Adapter catalog contains duplicate market ids.")
@@ -193,7 +240,112 @@ def run_adapter_catalog_check() -> None:
         raise SystemExit("Default adapter registry is missing adapters: " + ", ".join(missing_adapters))
     if not registry.has_adapter("polymarket"):
         raise SystemExit("Default adapter registry must include the Polymarket adapter.")
+    capability_issues = {
+        market_id: capability_contract_issues(registry.create(market_id))
+        for market_id in MARKET_IDS
+    }
+    failures = [
+        f"{market_id}: {'; '.join(issues)}"
+        for market_id, issues in capability_issues.items()
+        if issues
+    ]
+    if failures:
+        raise SystemExit("Advertised adapter capabilities are not implementation-backed: " + " | ".join(failures))
+    account_failures = [
+        f"{market_id}: {'; '.join(issues)}"
+        for market_id in MARKET_IDS
+        if (
+            issues := account_surface_issues(
+                registry.create(market_id),
+                cli_account_operations=frozenset(market_sentinel_cli.MARKET_ACCOUNT_OPERATIONS),
+                cli_order_operations=frozenset(market_sentinel_cli.MARKET_ORDER_MANAGEMENT_OPERATIONS),
+            )
+        )
+    ]
+    if account_failures:
+        raise SystemExit("Authenticated operation surfaces are incomplete: " + " | ".join(account_failures))
+    support_failures = []
+    for market_id in MARKET_IDS:
+        metadata = registry.get_metadata(market_id)
+        adapter = registry.create(market_id)
+        row = support_matrix_entry(metadata, adapter, blocker=VERIFIED_BLOCKERS.get(market_id))
+        if row["implementation_status"] not in {"implemented", "verified_blocked"}:
+            support_failures.append(f"{market_id}: invalid implementation status")
+        if not row["audit"]["ok"]:
+            support_failures.append(f"{market_id}: support matrix audit failed")
+        if market_id in VERIFIED_BLOCKERS:
+            if row["implementation_status"] != "verified_blocked" or any(
+                item["status"] != "blocked" for item in row["operations"].values()
+            ):
+                support_failures.append(f"{market_id}: verified blocker is not represented as blocked")
+        elif any(item["status"] == "blocked" for item in row["operations"].values()):
+            support_failures.append(f"{market_id}: non-blocked adapter has a blocked operation")
+    if support_failures:
+        raise SystemExit("Support matrix is incomplete: " + " | ".join(support_failures))
     print(f"[ok] adapter catalog ({len(MARKET_CATALOG)} markets)")
+
+
+def run_support_matrix_snapshot_check() -> None:
+    """Keep the human catalog snapshot synchronized with the canonical matrix."""
+
+    from market_adapters import (
+        MARKET_CATALOG,
+        VERIFIED_BLOCKERS,
+        build_default_registry,
+        support_matrix_entry,
+        support_matrix_summary,
+    )
+
+    registry = build_default_registry()
+    rows = [
+        support_matrix_entry(
+            registry.get_metadata(market_id),
+            registry.create(market_id),
+            blocker=VERIFIED_BLOCKERS.get(market_id),
+        )
+        for market_id in (market.market_id for market in MARKET_CATALOG)
+    ]
+    summary = support_matrix_summary(rows)
+    goal_text = (ROOT / "GOAL.md").read_text(encoding="utf-8")
+
+    implementation = summary["implementation"]
+    expected_header_lines = (
+        f"- Total markets: {summary['total_markets']}",
+        f"- Implemented adapters: {implementation.get('implemented', 0)}",
+        f"- Verified-blocked adapters: {implementation.get('verified_blocked', 0)}",
+    )
+    missing = [line for line in expected_header_lines if line not in goal_text]
+    if missing:
+        raise SystemExit("GOAL.md catalog snapshot is stale: " + "; ".join(missing))
+
+    labels = {
+        "market_discovery": "Market/event discovery supported",
+        "alerts": "Alerts supported",
+        "price_reading": "Read-only price data supported",
+        "orderbook_reading": "Orderbook reading supported",
+        "trade_history": "Trade history supported",
+        "candle_history": "Candle history supported",
+        "paper_trading": "Paper trading supported",
+        "live_trading": "Live trading supported",
+        "copy_trading": "Copy trading supported",
+    }
+    expected_operation_lines: list[str] = []
+    for operation, label in labels.items():
+        counts = summary["operations"][operation]
+        parts = []
+        if counts.get("supported"):
+            parts.append(f"{counts['supported']} yes")
+        if counts.get("guarded"):
+            parts.append(f"{counts['guarded']} guarded/off by default")
+        if counts.get("unsupported"):
+            parts.append(f"{counts['unsupported']} unsupported")
+        if counts.get("blocked"):
+            parts.append(f"{counts['blocked']} blocked")
+        expected_operation_lines.append(f"- {label}: {', '.join(parts)}")
+    missing = [line for line in expected_operation_lines if line not in goal_text]
+    if missing:
+        raise SystemExit("GOAL.md capability snapshot is stale: " + "; ".join(missing))
+    print("[ok] support matrix snapshot")
 
 
 def run_project_metadata_check() -> None:
@@ -477,30 +629,44 @@ def run_fixture_check() -> None:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise SystemExit(f"Invalid fixture JSON at {path.relative_to(ROOT)}: {exc}") from exc
-        if not isinstance(data, dict):
-            raise SystemExit(f"Fixture must contain a JSON object: {path.relative_to(ROOT)}")
+        # Some official endpoints (notably IBKR Client Portal) return a
+        # top-level array rather than an object.  Accept either response shape,
+        # but reject scalar/null payloads and empty fixtures.
+        if not isinstance(data, (dict, list)) or not data:
+            raise SystemExit(f"Fixture must contain a non-empty JSON object or array: {path.relative_to(ROOT)}")
 
     required = {
         fixture_root / "polymarket" / "market.json",
         fixture_root / "polymarket" / "event.json",
         fixture_root / "polymarket" / "orderbook.json",
         fixture_root / "polymarket" / "activity_buy.json",
+        fixture_root / "polymarket" / "clob_trades.json",
+        fixture_root / "polymarket" / "price_history.json",
         fixture_root / "kalshi" / "markets.json",
         fixture_root / "kalshi" / "orderbook.json",
+        fixture_root / "kalshi" / "trades.json",
+        fixture_root / "kalshi" / "candlesticks.json",
         fixture_root / "manifold" / "search_markets.json",
         fixture_root / "manifold" / "market_binary.json",
         fixture_root / "manifold" / "market_multi.json",
         fixture_root / "manifold" / "prob_binary.json",
         fixture_root / "manifold" / "prob_multi.json",
+        fixture_root / "manifold" / "bets_trades.json",
         fixture_root / "metaculus" / "posts.json",
         fixture_root / "metaculus" / "post_binary.json",
         fixture_root / "metaculus" / "post_multiple.json",
         fixture_root / "metaculus" / "post_numeric.json",
+        fixture_root / "good_judgment_open" / "questions.json",
+        fixture_root / "good_judgment_open" / "prediction_sets.json",
+        fixture_root / "good_judgment_open" / "oauth_token.json",
+        fixture_root / "good_judgment_open" / "prediction_submission.json",
         fixture_root / "predictit" / "all.json",
         fixture_root / "predictit" / "market.json",
         fixture_root / "limitless_exchange" / "active.json",
         fixture_root / "limitless_exchange" / "market.json",
         fixture_root / "limitless_exchange" / "orderbook.json",
+        fixture_root / "limitless_exchange" / "historical_price.json",
+        fixture_root / "limitless_exchange" / "events.json",
         fixture_root / "sx_bet" / "active_markets.json",
         fixture_root / "sx_bet" / "market_find.json",
         fixture_root / "sx_bet" / "orders.json",
@@ -524,11 +690,24 @@ def run_fixture_check() -> None:
         fixture_root / "myriad_markets" / "question.json",
         fixture_root / "myriad_markets" / "market.json",
         fixture_root / "myriad_markets" / "orderbook.json",
+        fixture_root / "myriad_markets" / "trades.json",
         fixture_root / "myriad_markets" / "order_response.json",
         fixture_root / "opinion_labs" / "markets.json",
         fixture_root / "opinion_labs" / "market.json",
         fixture_root / "opinion_labs" / "price.json",
         fixture_root / "opinion_labs" / "orderbook.json",
+        fixture_root / "opinion_labs" / "price_history.json",
+        fixture_root / "probable" / "activity.json",
+        fixture_root / "probable" / "prices_history.json",
+        fixture_root / "ibkr_forecasttrader" / "history.json",
+        fixture_root / "iowa_electronic_markets" / "market.json",
+        fixture_root / "iowa_electronic_markets" / "powell_price_data.txt",
+        fixture_root / "hypermind" / "export_metadata.json",
+        fixture_root / "hypermind" / "prices.csv",
+        fixture_root / "hypermind" / "outcomes.txt",
+        fixture_root / "scicast" / "questions.json",
+        fixture_root / "scicast" / "question_history.json",
+        fixture_root / "scicast" / "trade_history.json",
         fixture_root / "predict_fun" / "markets.json",
         fixture_root / "predict_fun" / "market.json",
         fixture_root / "predict_fun" / "orderbook.json",
@@ -540,6 +719,19 @@ def run_fixture_check() -> None:
         fixture_root / "betfair_exchange" / "market_catalogue.json",
         fixture_root / "betfair_exchange" / "market_book.json",
         fixture_root / "betfair_exchange" / "place_order_response.json",
+        fixture_root / "hedgehog_markets" / "program_accounts.json",
+        fixture_root / "frenzy_finance" / "rpc_responses.json",
+        fixture_root / "prdt_finance" / "rpc_responses.json",
+        fixture_root / "zetarium_world" / "rpc_responses.json",
+        fixture_root / "lamas_finance" / "rpc_responses.json",
+        fixture_root / "nadex" / "events.json",
+        fixture_root / "nadex" / "contracts.json",
+        fixture_root / "nadex" / "price.json",
+        fixture_root / "hyperliquid" / "candles.json",
+        fixture_root / "blinq" / "market.json",
+        fixture_root / "blinq" / "event.json",
+        fixture_root / "blinq" / "orderbook.json",
+        fixture_root / "betmgm" / "fixtures.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:
@@ -1194,7 +1386,7 @@ def run_ci_cd_workflow_check() -> None:
         ),
         ROOT / "scripts" / "generate_release_sbom.py": (
             "SPDX-2.3",
-            "requirements.lock",
+            "requirements-live.lock",
             "package-lock.json",
         ),
         ROOT / "scripts" / "sign_windows_release.py": (
@@ -1460,6 +1652,7 @@ def main() -> None:
     run_compile_check()
     run_static_analysis()
     run_adapter_catalog_check()
+    run_support_matrix_snapshot_check()
     run_project_metadata_check()
     run_release_version_check()
     run_config_example_check()

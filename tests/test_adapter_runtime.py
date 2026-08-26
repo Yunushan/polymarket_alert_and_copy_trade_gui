@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -18,13 +19,31 @@ from market_adapters.runtime import DEFAULT_USER_AGENT, load_market_fixture
 
 
 class FakeResponse:
-    def __init__(self, status_code: int = 200, payload=None, text: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int = 200,
+        payload=None,
+        text: str = "",
+        *,
+        raw_body: bytes | None = None,
+        headers=None,
+    ) -> None:
         self.status_code = status_code
         self._payload = payload if payload is not None else {"ok": True}
         self.text = text
+        self.raw_body = raw_body if raw_body is not None else json.dumps(self._payload).encode("utf-8")
+        self.headers = dict(headers or {})
+        self.closed = False
 
     def json(self):
         return self._payload
+
+    def iter_content(self, chunk_size: int):
+        for offset in range(0, len(self.raw_body), chunk_size):
+            yield self.raw_body[offset : offset + chunk_size]
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeSession:
@@ -75,6 +94,53 @@ class AdapterRuntimeTests(unittest.TestCase):
 
         self.assertIn("HTTP 429", str(ctx.exception))
         self.assertIn("rate limited", str(ctx.exception))
+
+    def test_http_runtime_bounds_streamed_json_before_decoding(self) -> None:
+        body = json.dumps({"events": [{"id": 1}]}).encode("utf-8")
+        response = FakeResponse(raw_body=body)
+        session = FakeSession(response)
+        runtime = AdapterRuntime("dummy", session=session)
+
+        data = runtime.get_json(
+            "https://example.test/events", max_response_bytes=len(body)
+        )
+
+        self.assertEqual(data, {"events": [{"id": 1}]})
+        self.assertTrue(session.calls[0][1]["stream"])
+        self.assertTrue(response.closed)
+
+        oversized = FakeResponse(raw_body=body)
+        with self.assertRaisesRegex(MarketHTTPError, "byte cap"):
+            AdapterRuntime("dummy", session=FakeSession(oversized)).get_json(
+                "https://example.test/events", max_response_bytes=len(body) - 1
+            )
+        self.assertTrue(oversized.closed)
+
+        declared = FakeResponse(raw_body=body, headers={"Content-Length": str(len(body))})
+        with self.assertRaisesRegex(MarketHTTPError, "byte cap"):
+            AdapterRuntime("dummy", session=FakeSession(declared)).get_json(
+                "https://example.test/events", max_response_bytes=len(body) - 1
+            )
+        self.assertTrue(declared.closed)
+
+        parser_failures = (
+            (
+                b'{"n":' + (b"1" * 5000) + b"}",
+                ValueError("integer string conversion limit exceeded"),
+            ),
+            ((b"[" * 2000) + b"0" + (b"]" * 2000), RecursionError("too deeply nested")),
+        )
+        for malformed_body, parser_error in parser_failures:
+            with self.subTest(parser_error=type(parser_error).__name__):
+                malformed = FakeResponse(raw_body=malformed_body)
+                with patch(
+                    "market_adapters.runtime.json.loads", side_effect=parser_error
+                ), self.assertRaisesRegex(MarketHTTPError, "valid JSON"):
+                    AdapterRuntime("dummy", session=FakeSession(malformed)).get_json(
+                        "https://example.test/events",
+                        max_response_bytes=len(malformed_body),
+                    )
+                self.assertTrue(malformed.closed)
 
     def test_rate_limiter_uses_configured_delay_without_real_sleep(self) -> None:
         clock_values = [0.0, 0.25, 0.25]
@@ -186,7 +252,8 @@ class AdapterRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(preflight["market_id"], "live_dummy")
-        self.assertEqual(preflight["approx_notional"], 2.0)
+        self.assertEqual(preflight["approx_notional"], 4.0)
+        self.assertEqual(preflight["exposure_model"], "full_size_upper_bound")
         self.assertEqual(preflight["metadata_keys"], ["client_order_id", "private_key"])
         self.assertIn("credentials_required", preflight["warnings"])
         self.assertIn("kyc_required", preflight["warnings"])
@@ -198,8 +265,12 @@ class AdapterRuntimeTests(unittest.TestCase):
         self.assertIn("size", str(size_ctx.exception))
 
         with self.assertRaises(MarketConfigurationError) as notional_ctx:
-            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 4.0, 2.0))
+            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 6.0, 0.5))
         self.assertIn("notional", str(notional_ctx.exception))
+
+        with self.assertRaises(MarketConfigurationError) as high_price_ctx:
+            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 3.0, 2.0))
+        self.assertIn("notional 6", str(high_price_ctx.exception))
 
     def test_live_preflight_rejects_noncanonical_contracts_and_order_sides(self) -> None:
         adapter = LiveAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})

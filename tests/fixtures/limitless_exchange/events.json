@@ -1,0 +1,45 @@
+{
+  "events": [
+    {
+      "createdAt": "2025-01-15T12:30:00.000Z",
+      "makerAmount": "750000",
+      "matchedSize": "1500000",
+      "price": 0.75,
+      "profile": {
+        "username": "trader",
+        "displayName": "Trader"
+      },
+      "side": 0,
+      "takerAmount": "750000",
+      "title": "$DOGE above $0.21652 on Sep 1, 12:00 UTC?",
+      "tokenId": "1111111111111111111111111111111111111111111111111111111111111111",
+      "txHash": "0xtrade-yes-1"
+    },
+    {
+      "createdAt": "2025-01-15T12:15:00.000Z",
+      "makerAmount": "250000",
+      "matchedSize": "500000",
+      "price": 0.5,
+      "side": 1,
+      "takerAmount": "250000",
+      "title": "$DOGE above $0.21652 on Sep 1, 12:00 UTC?",
+      "tokenId": "2222222222222222222222222222222222222222222222222222222222222222",
+      "txHash": "0xtrade-no-1"
+    },
+    {
+      "createdAt": "2025-01-15T12:00:00.000Z",
+      "makerAmount": "600000",
+      "matchedSize": "1000000",
+      "price": 0.6,
+      "side": "BUY",
+      "takerAmount": "600000",
+      "title": "$DOGE above $0.21652 on Sep 1, 12:00 UTC?",
+      "tokenId": "1111111111111111111111111111111111111111111111111111111111111111",
+      "txHash": "0xtrade-yes-2"
+    }
+  ],
+  "limit": 3,
+  "page": 1,
+  "totalPages": 1,
+  "totalRows": 3
+}

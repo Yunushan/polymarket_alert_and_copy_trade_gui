@@ -1,0 +1,18 @@
+{
+  "orders": [
+    {
+      "orderId": "order-0999",
+      "symbol": "GEMI-BTC100K26-YES",
+      "side": "buy",
+      "outcome": "yes",
+      "orderType": "limit",
+      "price": "0.41",
+      "quantity": "2",
+      "filledQuantity": "2",
+      "status": "filled",
+      "createdAt": 1787385600000,
+      "updatedAt": 1787385660000
+    }
+  ],
+  "pagination": {"limit": 50, "offset": 0, "count": 1}
+}

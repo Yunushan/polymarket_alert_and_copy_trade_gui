@@ -1,0 +1,32 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "pubkey": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
+      "account": {
+        "data": [
+          "AwEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBBwAAAAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwOA2NtwAAAAALzY23AAAAAAvNjbcAAAAAB9APoAAAACYK4KAAAAAADgkwQAAAAAABgAAABpcGZzOi8vaGVkZ2Vob2ctbWFya2V0LTc=",
+          "base64"
+        ],
+        "executable": false,
+        "lamports": 1,
+        "owner": "PARrVs6F5egaNuz8g6pKJyU4ze3eX5xGZCFb3GLiVvu",
+        "rentEpoch": 0
+      }
+    },
+    {
+      "pubkey": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+      "account": {
+        "data": [
+          "AwoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCAAAAAsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwA8VNlAAAAADzxU2UAAAAAPPFTZQAAAAB9APoAAQECkNADAAAAAACwcQsAAAAAACIAAABodHRwczovL2V4YW1wbGUuaW52YWxpZC9oZWRnZWhvZy04",
+          "base64"
+        ],
+        "executable": false,
+        "lamports": 1,
+        "owner": "PARrVs6F5egaNuz8g6pKJyU4ze3eX5xGZCFb3GLiVvu",
+        "rentEpoch": 0
+      }
+    }
+  ]
+}

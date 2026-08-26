@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from market_adapters import PaperOrderRequest, SxBetAdapter
-from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sx_bet"
@@ -24,6 +24,7 @@ class SxBetAdapterTests(unittest.TestCase):
         market_find = load_fixture("market_find")
         orders = load_fixture("orders")
         best_odds = load_fixture("best_odds")
+        public_trades = load_fixture("public_trades")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/markets/active"):
@@ -36,6 +37,9 @@ class SxBetAdapterTests(unittest.TestCase):
                 return orders
             if url.endswith("/orders/odds/best"):
                 return best_odds
+            if url.endswith("/trades-v3/public"):
+                self.assertEqual((params or {}).get("marketHash"), MARKET_HASH)
+                return public_trades
             raise AssertionError(f"unexpected SX Bet URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -50,10 +54,12 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.event_listing)
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.trade_history)
+        self.assertTrue(adapter.capabilities.candle_history)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("api.sx.bet", health["api_base_url"])
         self.assertIn("realtime.sx.bet", health["websocket_url"])
 
@@ -95,6 +101,55 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertEqual(price.bid, 0.4)
         self.assertEqual(price.ask, 0.45)
         self.assertAlmostEqual(price.midpoint or 0, 0.425)
+
+    def test_list_trades_normalizes_public_trade_tape_and_filters_outcome(self) -> None:
+        adapter = self.make_adapter()
+
+        trades = adapter.list_trades(
+            f"{MARKET_HASH}:ONE",
+            limit=5,
+            after=1780344000,
+            before=1780344050,
+        )
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].trade_id, "0xtrade-one")
+        self.assertEqual(trades[0].side, "BUY")
+        self.assertAlmostEqual(trades[0].price, 0.4)
+        self.assertAlmostEqual(trades[0].size, 2.5)
+        self.assertEqual(trades[0].timestamp, 1780344003.0)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{MARKET_HASH}:ONE", limit=101)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{MARKET_HASH}:ONE", after=10, before=9)
+
+    def test_list_candles_derives_bounded_ohlcv_from_public_trade_tape(self) -> None:
+        adapter = self.make_adapter()
+
+        candles = adapter.list_candles(
+            f"{MARKET_HASH}:ONE",
+            resolution="1m",
+            from_timestamp=1780344000,
+            to_timestamp=1780344060,
+        )
+
+        self.assertEqual(len(candles), 1)
+        candle = candles[0]
+        self.assertEqual(candle.timestamp, 1780344000.0)
+        self.assertAlmostEqual(candle.open, 0.4)
+        self.assertAlmostEqual(candle.high, 0.4)
+        self.assertAlmostEqual(candle.low, 0.4)
+        self.assertAlmostEqual(candle.close, 0.4)
+        self.assertAlmostEqual(candle.volume or 0, 2.5)
+        self.assertTrue(candle.raw["derived"])
+        self.assertEqual(candle.raw["source"], "sx_bet_public_trade_tape")
+        self.assertEqual(candle.raw["trade_ids"], ["0xtrade-one"])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(f"{MARKET_HASH}:ONE", resolution="2h")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(f"{MARKET_HASH}:ONE", from_timestamp=10, to_timestamp=9)
 
     def test_paper_order_builds_unsigned_order_payload(self) -> None:
         adapter = self.make_adapter()
@@ -195,14 +250,124 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertEqual(body["orders"][0]["totalBetSize"], "2000000")
         self.assertTrue(str(body["orders"][0]["signature"]).startswith("0x"))
 
-    def test_copy_trading_is_clear_unsupported_feature(self) -> None:
+    def test_copy_trading_builds_simulation_preview_from_authenticated_fill(self) -> None:
         adapter = self.make_adapter()
+        fill = load_fixture("fills_v3")["data"]["fills"][0]
 
-        with self.assertRaises(UnsupportedFeatureError) as ctx:
-            adapter.copy_trade_from_activity({})
+        result = adapter.copy_trade_from_activity(fill)
 
-        self.assertEqual(ctx.exception.feature, "copy_trading")
-        self.assertIn("unsupported", str(ctx.exception))
+        self.assertTrue(adapter.capabilities.copy_trading)
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.contract_id, f"{MARKET_HASH}:TWO")
+        self.assertEqual(result.average_price, 0.4)
+        self.assertAlmostEqual(result.filled_size, 0.0)
+        self.assertIn("BUY", result.message)
+        self.assertEqual(result.raw["source"], "sx_bet_authenticated_fills")
+        self.assertEqual(result.raw["fill_id"], fill["id"])
+        self.assertEqual(result.raw["status"], "LOCKED")
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fill, "status": "FAILED"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fill, "fillAmount": "0"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.copy_trade_from_activity({**fill, "side": "SELL"})
+
+    def test_v3_account_reads_use_allowlisted_paths_and_api_key(self) -> None:
+        adapter = SxBetAdapter({"sx_bet_api_key": "fixture-key"})
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, dict(params or {}), dict(headers or {})))
+            if url.endswith("/orders-v3"):
+                return {"status": "success", "data": {"orders": [{"id": "0x" + "1" * 64}]}}
+            if url.endswith("/trades-v3"):
+                return {"status": "success", "data": {"trades": []}}
+            if url.endswith("/fills-v3"):
+                return {"status": "success", "data": {"fills": []}}
+            if url.endswith("/positions-v3"):
+                return {"status": "success", "data": {"positions": []}}
+            if url.endswith("/user/balance-v3"):
+                return {"status": "success", "data": {"balances": []}}
+            if url.endswith("/orders-v3/0x" + "2" * 64):
+                return {"status": "success", "data": {"order": {"id": "0x" + "2" * 64}}}
+            if url.endswith("/orders-v3/client/mm-1"):
+                return {"status": "success", "data": {"order": {"clientOrderId": "mm-1"}}}
+            raise AssertionError(f"unexpected SX Bet v3 URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        adapter.account_recovery("balance")
+        adapter.account_recovery("active_orders", market_hash=MARKET_HASH, event_id="L18272456", limit=7, cursor="next")
+        adapter.account_recovery("order_detail", order_id="0x" + "2" * 64)
+        adapter.account_recovery("order_by_client_id", client_order_id="mm-1")
+        adapter.account_recovery("order_history", status="SETTLED", start_date="2026-01-01T00:00:00Z", end_date="2026-01-02T00:00:00Z")
+        adapter.account_recovery("fills", trade_id="0x" + "3" * 64, limit=3)
+        adapter.account_recovery("positions", status="MATCHED,LOCKED", event_id="L18272456")
+
+        self.assertEqual(calls[0][2], {"x-sx-api-key": "fixture-key"})
+        self.assertEqual(calls[1][0], "https://api.sx.bet/orders-v3")
+        self.assertEqual(calls[1][1]["marketHash"], MARKET_HASH)
+        self.assertEqual(calls[1][1]["eventId"], "L18272456")
+        self.assertEqual(calls[1][1]["perPage"], 7)
+        self.assertEqual(calls[4][1]["status"], "SETTLED")
+        self.assertEqual(calls[5][1]["tradeId"], "0x" + "3" * 64)
+        self.assertEqual(calls[6][1]["status"], "MATCHED,LOCKED")
+
+    def test_v3_account_reads_validate_path_and_query_inputs(self) -> None:
+        adapter = SxBetAdapter({"sx_bet_api_key": "fixture-key"})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_detail", order_id="../../secret")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_by_client_id", client_order_id="bad/id")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("positions", status="")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_history", start_date="2026-01-02T00:00:00Z", end_date="2026-01-01T00:00:00Z")
+
+    def test_v3_cancellation_is_guarded_and_uses_documented_delete_routes(self) -> None:
+        adapter = SxBetAdapter(
+            {
+                "sx_bet_api_key": "fixture-key",
+                "sx_bet_order_management_enabled": True,
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+            }
+        )
+        calls = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            calls.append((method, url, dict(params or {}), json_body, dict(headers or {})))
+            return {"status": "success", "data": {"cancelled": []}}
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        order_a = "0x" + "a" * 64
+        order_b = "0x" + "b" * 64
+        adapter.manage_orders(
+            "cancel_orders",
+            order_ids=[order_a, order_b, order_a],
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        adapter.manage_orders(
+            "cancel_event_orders",
+            event_id="L18272456",
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        adapter.manage_orders(
+            "cancel_all_orders",
+            confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+
+        self.assertEqual(calls[0][0:2], ("DELETE", "https://api.sx.bet/orders-v3"))
+        self.assertEqual(calls[0][3], {"orders": [{"orderId": order_a}, {"orderId": order_b}]})
+        self.assertEqual(calls[0][4]["x-sx-api-key"], "fixture-key")
+        self.assertEqual(calls[1][1], "https://api.sx.bet/orders-v3/event")
+        self.assertEqual(calls[1][2], {"eventId": "L18272456"})
+        self.assertEqual(calls[2][1], "https://api.sx.bet/orders-v3/all")
+
+    def test_v3_cancellation_requires_opt_in_confirmation(self) -> None:
+        adapter = SxBetAdapter({"sx_bet_api_key": "fixture-key", "live_trading_enabled": True, "live_trading_confirmed": True})
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_all_orders", confirm_order_management="CANCEL ALL")
 
 
 if __name__ == "__main__":

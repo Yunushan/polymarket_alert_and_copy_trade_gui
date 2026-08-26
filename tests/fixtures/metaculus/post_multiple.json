@@ -24,6 +24,26 @@
       },
       "aggregations": {
         "recency_weighted": {
+          "history": [
+            {
+              "start_time": "2024-01-01T00:00:00Z",
+              "end_time": "2024-01-02T00:00:00Z",
+              "forecast_values": [
+                0.6,
+                0.4
+              ],
+              "forecaster_count": 9
+            },
+            {
+              "start_time": "2024-01-02T00:00:00Z",
+              "end_time": null,
+              "forecast_values": [
+                0.25,
+                0.75
+              ],
+              "forecaster_count": 14
+            }
+          ],
           "latest": {
             "forecast_values": {
               "alpha": 0.25,

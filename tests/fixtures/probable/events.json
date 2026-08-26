@@ -1,0 +1,16 @@
+{
+  "events": [
+    {
+      "id": "event-1",
+      "title": "Will BTC reach $100k?",
+      "slug": "btc-100k",
+      "status": "active",
+      "closed": false
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 50,
+    "hasMore": false
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "trades": [
+    {
+      "id": 901,
+      "createdAt": 1760008800,
+      "eventType": "UserOrder",
+      "wallet": "11111111111111111111111111111111",
+      "marketTicker": "KXBTC-26DEC31-100K",
+      "inputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "outputMint": "mint-yes",
+      "contracts": 4,
+      "usdPricePerContract": 0.44,
+      "side": "YES",
+      "transactionSignature": "dflow-signature-1"
+    },
+    {
+      "id": 902,
+      "createdAt": 1760005200,
+      "eventType": "UserOrder",
+      "wallet": "11111111111111111111111111111111",
+      "marketTicker": "KXBTC-26DEC31-100K",
+      "inputMint": "mint-no",
+      "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "contracts": "2.5",
+      "usdPricePerContract": "0.56",
+      "side": "NO",
+      "transactionSignature": "dflow-signature-2"
+    }
+  ],
+  "cursor": null
+}

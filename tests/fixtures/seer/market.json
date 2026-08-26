@@ -1,0 +1,18 @@
+{
+  "chainId": 100,
+  "id": "0x1111111111111111111111111111111111111111",
+  "marketName": "Will Bitcoin exceed $100,000 by year end?",
+  "marketStatus": "Active",
+  "type": "Generic",
+  "outcomes": ["Yes", "No"],
+  "odds": [0.62, 0.38],
+  "wrappedTokens": [
+    "0x2222222222222222222222222222222222222222",
+    "0x3333333333333333333333333333333333333333"
+  ],
+  "collateralToken": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+  "liquidityUSD": 12500.5,
+  "hasLiquidity": true,
+  "verification": {"status": "verified"},
+  "url": "https://app.seer.pm/market/will-bitcoin-exceed-100k"
+}
