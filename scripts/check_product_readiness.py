@@ -3598,7 +3598,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--minimum-score", type=int, default=0, help="Return failure when the score is below this value.")
     parser.add_argument("--require-100", action="store_true", help="Return failure unless every point is proven.")
-    parser.add_argument("--json", action="store_true", help="Print the complete report as JSON.")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a redacted readiness report as JSON; evidence and probe payloads are omitted.",
+    )
     return parser
 
 
@@ -3905,18 +3909,120 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+_PUBLIC_REPORT_MISSING_MESSAGES = {
+    "architecture_scope": "Required architecture or capability documentation is missing.",
+    "tests_correctness": "Run the full local verification profile before claiming a ready result.",
+    "security_safety": "Fresh trusted repository-settings evidence is required.",
+    "ci_cd_release": "Attested release evidence is required for the current release.",
+    "operations_recovery": "Attested production deployment evidence is required.",
+    "platform_evidence": "Hosted platform CI and platform evidence are required; evidence_type='platform-ci' must be declared.",
+    "live_acceptance": "Attested public, credentialed, and funded live evidence is required.",
+}
+
+
+def _safe_status(value: Any) -> str:
+    """Return a fixed, non-sensitive status suitable for command-line output."""
+
+    if value == "pass":
+        return "pass"
+    if value == "fail":
+        return "fail"
+    return "not_run"
+
+
+def _safe_report_for_output(report: dict[str, Any]) -> dict[str, Any]:
+    """Build a redacted CLI report without serializing evidence or probe payloads.
+
+    The internal report contains paths, workflow responses, hashes, and details
+    derived from user-supplied evidence files.  None of those values belong in
+    logs.  Keep the public shape useful while exposing only fixed labels,
+    bounded score integers, and coarse statuses.
+    """
+
+    raw_categories = report.get("categories")
+    category_by_name: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_categories, list):
+        for item in raw_categories:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if name in CATEGORY_WEIGHTS and name not in category_by_name:
+                category_by_name[name] = item
+
+    categories: list[dict[str, Any]] = []
+    for name, possible in CATEGORY_WEIGHTS.items():
+        item = category_by_name.get(name)
+        earned_value = item.get("earned") if isinstance(item, dict) else None
+        earned = earned_value if type(earned_value) is int else 0
+        earned = max(0, min(earned, possible))
+        missing = [_PUBLIC_REPORT_MISSING_MESSAGES[name]] if earned < possible else []
+        categories.append(
+            {
+                "name": name,
+                "earned": earned,
+                "possible": possible,
+                "missing": missing,
+            }
+        )
+
+    score = sum(item["earned"] for item in categories)
+    raw_checks = report.get("checks")
+    safe_checks: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_checks, dict):
+        for name in (
+            "local",
+            "public_live",
+            "release_evidence",
+            "deployment_evidence",
+            "repository_settings_evidence",
+            "release_environment_evidence",
+            "platform_ci_evidence",
+            "platform_evidence",
+            "credentialed_evidence",
+            "funded_evidence",
+        ):
+            check = raw_checks.get(name)
+            if isinstance(check, dict):
+                safe_checks[name] = {"status": _safe_status(check.get("status"))}
+        repository = raw_checks.get("repository")
+        if isinstance(repository, dict):
+            safe_checks["repository"] = {
+                "status": _safe_status(repository.get("status")),
+                "initial_clean": repository.get("initial_clean") is True,
+                "final_clean": repository.get("final_clean") is True,
+                "revision_stable": (
+                    repository.get("initial_clean") is True
+                    and repository.get("final_clean") is True
+                    and bool(repository.get("initial_revision"))
+                    and repository.get("initial_revision") == repository.get("final_revision")
+                ),
+            }
+
+    missing = [detail for category in categories for detail in category["missing"]]
+    return {
+        "score": score,
+        "out_of": 100,
+        "status": "ready" if score == 100 else "not_ready",
+        "categories": categories,
+        "missing": missing,
+        "checks": safe_checks,
+        "scope": "Repository readiness plus explicitly supplied external evidence; not a certification.",
+    }
+
+
 def main() -> int:
     args = _parser().parse_args()
     report = build_report(args)
+    public_report = _safe_report_for_output(report)
     if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
+        print(json.dumps(public_report, indent=2, sort_keys=True))
     else:
-        print(f"Production readiness: {report['score']}/{report['out_of']}")
-        for category in report["categories"]:
+        print(f"Production readiness: {public_report['score']}/{public_report['out_of']}")
+        for category in public_report["categories"]:
             print(f"- {category['name']}: {category['earned']}/{category['possible']}")
-        if report["missing"]:
+        if public_report["missing"]:
             print("Missing evidence:")
-            for item in report["missing"]:
+            for item in public_report["missing"]:
                 print(f"- {item}")
     minimum = 100 if args.require_100 else max(0, args.minimum_score)
     return 0 if report["score"] >= minimum else 1

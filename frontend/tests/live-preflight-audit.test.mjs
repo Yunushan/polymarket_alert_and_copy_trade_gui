@@ -67,6 +67,6 @@ test("contradictory failure data fails closed and exposes a safely escaped error
   assert.match(html, /role="alert"/);
   assert.match(html, />Result<\/span><strong>blocked<\/strong>/);
   assert.match(html, />Redaction<\/span><strong>disabled<\/strong>/);
-  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<script>/i);
   assert.match(html, /&lt;script&gt;alert\(&quot;credential&quot;\)&lt;\/script&gt;/);
 });
