@@ -1203,7 +1203,7 @@ def _attested_release_report(
     if not _is_nonblank_string(path_value):
         return _release_evidence_result(
             "not_run",
-            "Provide a fresh GitHub-attested release-evidence.json report.",
+            "Attested release evidence is required: provide a fresh GitHub-attested release-evidence.json report.",
         )
     if not _COMMIT_RE.fullmatch(expected_revision or ""):
         return _release_evidence_result(
