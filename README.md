@@ -735,7 +735,7 @@ completed its required checks.
 
 Current audit result (2026-08-26): the repository's repeatable local checklist
 is **83/100**, while the independent deployment-oriented assessment is
-**58/100 — NO-GO**. Schema-v2 hosted collectors now provide a structural path
+**57/100 — NO-GO**. Schema-v2 hosted collectors now provide a structural path
 to all 100 formal points, but none of their external points is awarded without
 a clean exact revision, successful trusted workflow/job, uploaded artifact,
 and exact-byte attestation. The funded workflow also remains fail-closed until
