@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -21,20 +20,18 @@ from .types import (
 )
 from polymarket import clob_rest, gamma
 from polymarket import clob_auth
-from polymarket.auth_readiness import build_clob_auth_readiness, parse_signature_type, validate_sdk_trading_readiness
+from polymarket.auth_readiness import build_clob_auth_readiness
+from polymarket.constants import (
+    POLYMARKET_CLOB_V2_MIGRATION_URL,
+    POLYMARKET_LIVE_MUTATION_BLOCKER,
+    POLYMARKET_LIVE_MUTATIONS_SUPPORTED,
+)
 from polymarket.geoblock import check_geoblock
-from polymarket.http_client import PolymarketValidationError
-from polymarket.trader import PolymarketTrader, TraderConfig
 
 
 POLYMARKET_PRICE_HISTORY_INTERVALS = ("max", "all", "1m", "1w", "1d", "6h", "1h")
 POLYMARKET_ACCOUNT_OPERATIONS = ("active_orders", "order_detail", "fills")
-POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
-    "cancel_order",
-    "cancel_orders",
-    "cancel_all_orders",
-    "cancel_market_orders",
-)
+POLYMARKET_ORDER_MANAGEMENT_OPERATIONS: tuple[str, ...] = ()
 POLYMARKET_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 POLYMARKET_ORDER_MANAGEMENT_REFERENCES = (
     "https://docs.polymarket.com/api-reference/trade/get-user-orders",
@@ -65,21 +62,27 @@ class PolymarketAdapter(MarketAdapter):
         readiness = build_clob_auth_readiness(self.config)
         health.update(
             {
-                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "live_trading_requested": self.config_bool("live_trading_enabled", False),
+                # Report the effective state. A stale/legacy config request
+                # cannot re-advertise a capability that the catalog and every
+                # mutation boundary deliberately disable during CLOB V2
+                # migration.
+                "live_trading_enabled": False,
+                "live_mutations_supported": POLYMARKET_LIVE_MUTATIONS_SUPPORTED,
+                "live_mutation_blocker": POLYMARKET_LIVE_MUTATION_BLOCKER,
+                "clob_v2_migration_reference": POLYMARKET_CLOB_V2_MIGRATION_URL,
                 "credential_sources": credential_sources,
                 "credential_requirement": "live_trading_only",
                 "geoblock_required_for_live": True,
                 "clob_auth_readiness": readiness,
                 "account_recovery_operations": list(self.account_recovery_operations),
                 "order_management_operations": list(self.order_management_operations),
-                "order_management_enabled": self.config_bool("polymarket_order_management_enabled", False),
+                # This is the effective capability state, not merely the
+                # requested config value.  A legacy opt-in must not make the
+                # health payload advertise CLOB V1 mutations as enabled.
+                "order_management_enabled": False,
                 "authenticated_account_endpoints": ["GET /data/orders", "GET /order/{orderID}", "GET /trades"],
-                "order_management_endpoints": [
-                    "DELETE /order",
-                    "DELETE /orders",
-                    "DELETE /cancel-all",
-                    "DELETE /cancel-market-orders",
-                ],
+                "order_management_endpoints": [],
             }
         )
         return health
@@ -384,73 +387,9 @@ class PolymarketAdapter(MarketAdapter):
         raise MarketConfigurationError(f"Polymarket account recovery supports only: {supported}.")
 
     def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
-        """Run one guarded Polymarket CLOB order-management mutation.
+        """Fail closed until a reviewed Polymarket CLOB V2 mutation client exists."""
 
-        Every mutation uses a fixed documented endpoint, explicit L2 headers,
-        the shared live-safety gates, a separate adapter opt-in, and exact
-        operator confirmation.  No caller-provided URL, method, or headers are
-        accepted.
-        """
-
-        normalized = str(operation or "").strip().lower()
-        if normalized not in self.order_management_operations:
-            supported = ", ".join(self.order_management_operations)
-            raise MarketConfigurationError(f"Polymarket order management supports only: {supported}.")
-        self.ensure_capability("live_trading")
-        if not self.config_bool("polymarket_order_management_enabled", False):
-            raise MarketConfigurationError(
-                "Polymarket order management is disabled by adapter config. "
-                "Set polymarket_order_management_enabled=true only after reviewing cancellation risk."
-            )
-        self.ensure_live_trading_enabled("Polymarket order management")
-        if str(kwargs.get("confirm_order_management") or "").strip() != POLYMARKET_ORDER_MANAGEMENT_CONFIRMATION:
-            raise MarketConfigurationError(
-                "Polymarket order management requires exact confirmation text "
-                f"{POLYMARKET_ORDER_MANAGEMENT_CONFIRMATION}."
-            )
-
-        headers = self._l2_read_headers()
-        request: Dict[str, Any] = {}
-        if normalized == "cancel_order":
-            order_id = self._order_management_id(kwargs.get("order_id"), label="order_id")
-            request = {"orderID": order_id}
-            response = clob_auth.cancel_order(order_id, headers)
-        elif normalized == "cancel_orders":
-            order_ids = self._order_management_ids(kwargs.get("orders", kwargs.get("instructions")))
-            request = {"orders": order_ids}
-            response = clob_auth.cancel_orders(order_ids, headers)
-        elif normalized == "cancel_all_orders":
-            response = clob_auth.cancel_all_orders(headers)
-        else:
-            market_id = self._account_filter(kwargs.get("market_id"), "market_id")
-            asset_id = self._account_filter(
-                kwargs.get("asset_id") or kwargs.get("contract_id"), "asset_id"
-            )
-            if not market_id or not asset_id:
-                raise MarketConfigurationError(
-                    "Polymarket cancel_market_orders requires both market_id and asset_id."
-                )
-            request = {"market": market_id, "asset_id": asset_id}
-            response = clob_auth.cancel_market_orders(market_id, asset_id, headers)
-
-        return {
-            "market_id": self.market_id,
-            "operation": normalized,
-            "live": True,
-            "preflight": {
-                "market_id": self.market_id,
-                "display_name": self.display_name,
-                "feature": "order management",
-                "operation": normalized,
-                "live_trading_enabled": True,
-                "order_management_enabled": True,
-                "confirmed": True,
-                "requires_credentials": True,
-                "references": list(POLYMARKET_ORDER_MANAGEMENT_REFERENCES),
-            },
-            "request": request,
-            "response": response,
-        }
+        raise MarketConfigurationError(POLYMARKET_LIVE_MUTATION_BLOCKER)
 
     def list_candles(
         self,
@@ -533,71 +472,7 @@ class PolymarketAdapter(MarketAdapter):
         )
 
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
-        self.ensure_capability("live_trading")
-        self._validate_order(order)
-        preflight = self.preflight_live_order(order)
-        if order.limit_price is None:
-            raise MarketConfigurationError("Polymarket live trading requires a limit price.")
-
-        geo = self.check_geoblock()
-        if geo.get("blocked") is True:
-            raise MarketConfigurationError("Polymarket geoblock check blocked live trading.")
-
-        private_key = self.resolve_credential(
-            "private_key",
-            ("PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY"),
-            required=True,
-            label="PRIVATE_KEY",
-        )
-
-        funder_credential = self.resolve_credential(
-            "funder_address",
-            ("FUNDER_ADDRESS", "POLYMARKET_FUNDER_ADDRESS", "DEPOSIT_WALLET_ADDRESS"),
-            label="FUNDER_ADDRESS",
-        )
-        funder = funder_credential.value.strip() if funder_credential else None
-        try:
-            signature_type = parse_signature_type(
-                self.config.get("signature_type")
-                or self.config.get("polymarket_signature_type")
-                or os.getenv("SIGNATURE_TYPE")
-                or os.getenv("POLYMARKET_SIGNATURE_TYPE")
-                or "0"
-            )
-        except PolymarketValidationError as exc:
-            raise MarketConfigurationError(str(exc)) from exc
-        try:
-            validate_sdk_trading_readiness(
-                private_key=private_key.value,
-                signature_type=signature_type,
-                funder_address=funder,
-            )
-        except PolymarketValidationError as exc:
-            raise MarketConfigurationError(str(exc)) from exc
-        try:
-            trader = PolymarketTrader(
-                TraderConfig(
-                    private_key=private_key.value,
-                    funder_address=funder,
-                    signature_type=signature_type,
-                )
-            )
-        except PolymarketValidationError as exc:
-            raise MarketConfigurationError(str(exc)) from exc
-        response = trader.place_limit_order(
-            token_id=order.contract_id,
-            side=order.side,
-            price=order.limit_price,
-            size=order.size,
-            tif=str(order.metadata.get("tif") or "FOK"),
-        )
-        return {
-            "market_id": self.market_id,
-            "contract_id": order.contract_id,
-            "live": True,
-            "preflight": preflight,
-            "response": response,
-        }
+        raise MarketConfigurationError(POLYMARKET_LIVE_MUTATION_BLOCKER)
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         self.ensure_capability("copy_trading")

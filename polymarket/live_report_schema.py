@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any, Dict, Mapping, Optional
 
 
 LIVE_VALIDATION_REPORT_SCHEMA_VERSION = 1
+EXPECTED_REPOSITORY_ORIGIN = "github.com/yunushan/market-sentinel"
+CREDENTIAL_PROMOTION_CHECKS = (
+    "clob_l2_orders",
+    "relayer_recent_transactions",
+)
+CREDENTIAL_PROMOTION_SEMANTICS = {
+    "clob_l2_orders": "authenticated_order_collection",
+    "relayer_recent_transactions": "authenticated_collection",
+}
+PUBLIC_PROMOTION_CHECKS = (
+    "clob_time",
+    "gamma_markets",
+    "data_leaderboard",
+    "bridge_supported_assets",
+)
 ACCEPTED_LIVE_VALIDATION_REPORT_MODES = {
     "strict_cli",
     "local_readiness_only",
@@ -30,6 +46,20 @@ BOOLEAN_STAGE_GATE_FIELDS = (
     "requires_explicit_live_approval",
 )
 KNOWN_CHECK_STATUSES = {"ok", "failed", "blocked", "skipped", "dry_run", "ready_to_execute"}
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+SOURCE_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "repository",
+        "repository_origin",
+        "source_revision",
+        "initial_revision",
+        "final_revision",
+        "initial_clean",
+        "final_clean",
+        "stable",
+    }
+)
 
 
 class LiveValidationReportSchemaError(ValueError):
@@ -125,6 +155,7 @@ def compact_schema_validation(validation: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _validate_live_stage_report(report: Mapping[str, Any], errors: list[str], warnings: list[str]) -> None:
+    _validate_source_provenance(report.get("source_provenance"), errors, warnings)
     stage_gates = report.get("stage_gates")
     if not isinstance(stage_gates, Mapping):
         errors.append("stage_gates must be an object for live-validation reports.")
@@ -148,6 +179,50 @@ def _validate_live_stage_report(report: Mapping[str, Any], errors: list[str], wa
         warnings.append("funded_live_order_check.status is missing.")
     elif str(funded.get("status")) not in KNOWN_CHECK_STATUSES:
         warnings.append(f"funded_live_order_check.status has an unrecognized value: {funded.get('status')!r}.")
+
+
+def _validate_source_provenance(value: Any, errors: list[str], warnings: list[str]) -> None:
+    if value is None:
+        warnings.append("source_provenance is missing; this report cannot prove an exact clean source revision.")
+        return
+    if not isinstance(value, Mapping):
+        errors.append("source_provenance must be an object when present.")
+        return
+    if set(value) != SOURCE_PROVENANCE_FIELDS:
+        errors.append("source_provenance does not match the exact reviewed field contract.")
+        return
+    if value.get("schema_version") != 1 or value.get("repository") != "market-sentinel":
+        errors.append("source_provenance schema_version or repository is invalid.")
+    repository_origin = value.get("repository_origin")
+    if not isinstance(repository_origin, str) or repository_origin not in {"", EXPECTED_REPOSITORY_ORIGIN}:
+        errors.append("source_provenance.repository_origin is not the canonical reviewed GitHub origin.")
+    for field in ("initial_clean", "final_clean", "stable"):
+        if type(value.get(field)) is not bool:
+            errors.append(f"source_provenance.{field} must be boolean.")
+    for field in ("initial_revision", "final_revision"):
+        revision = value.get(field)
+        if not isinstance(revision, str) or (revision and not _COMMIT_RE.fullmatch(revision)):
+            errors.append(f"source_provenance.{field} must be empty or a 40-character lowercase commit SHA.")
+    source_revision = value.get("source_revision")
+    if not isinstance(source_revision, str) or (source_revision and not _COMMIT_RE.fullmatch(source_revision)):
+        errors.append("source_provenance.source_revision must be empty or a 40-character lowercase commit SHA.")
+    if value.get("stable") is True:
+        revisions_match = (
+            bool(source_revision)
+            and source_revision == value.get("initial_revision") == value.get("final_revision")
+        )
+        if (
+            value.get("initial_clean") is not True
+            or value.get("final_clean") is not True
+            or repository_origin != EXPECTED_REPOSITORY_ORIGIN
+            or not revisions_match
+        ):
+            errors.append(
+                "stable source_provenance requires the canonical repository origin and matching clean "
+                "initial/final/source revisions."
+            )
+    elif source_revision:
+        errors.append("unstable source_provenance must not claim source_revision.")
 
 
 def _validate_runbook_report(report: Mapping[str, Any], errors: list[str], warnings: list[str]) -> None:

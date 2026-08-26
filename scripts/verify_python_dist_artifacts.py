@@ -23,6 +23,7 @@ REQUIRED_SDIST_MEMBERS = {
     ".github/actionlint.yaml",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
+    ".github/workflows/deployment-evidence.yml",
     "CONTRIBUTING.md",
     "LICENSE",
     "MANIFEST.in",
@@ -56,6 +57,8 @@ REQUIRED_SDIST_MEMBERS = {
     "scripts/collect_platform_evidence.py",
     "scripts/run_platform_evidence.py",
     "scripts/review_platform_evidence.py",
+    "scripts/review_deployment_evidence.py",
+    "scripts/generate_deployment_evidence.py",
     "scripts/backup_state.py",
     "scripts/verify_polymarket_live.py",
     "scripts/restore_state_backup.py",
@@ -147,11 +150,11 @@ def verify_wheel(path: Path, expected_version: str) -> None:
         live_dependency_entries = [
             value
             for value in metadata.get_all("Requires-Dist", [])
-            if value.lower().startswith("py-clob-client")
+            if value.lower().startswith("py-clob-client-v2")
         ]
         if len(live_dependency_entries) != 1 or 'extra == "live"' not in live_dependency_entries[0]:
             raise SystemExit(
-                f"Wheel {path.name} must expose py-clob-client only through the live extra."
+                f"Wheel {path.name} must expose py-clob-client-v2 only through the live extra."
             )
         _verify_license_text(archive.read(license_name).decode("utf-8"), f"Wheel {path.name} LICENSE")
         if "market-sentinel = market_sentinel_cli:main" not in archive.read(entry_points_name).decode("utf-8"):

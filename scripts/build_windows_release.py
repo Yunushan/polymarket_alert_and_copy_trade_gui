@@ -110,7 +110,7 @@ def build_pyinstaller(work_dir: Path, package_dir: Path) -> None:
         "--collect-submodules",
         "polymarket",
         "--collect-all",
-        "py_clob_client",
+        "py_clob_client_v2",
         "--collect-all",
         "opinion_clob_sdk",
         str(ROOT / "app.py"),

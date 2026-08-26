@@ -97,6 +97,8 @@ import {
   usePaperPosition
 } from "./api";
 import type { MarketPatch } from "./api";
+import { formatAuditValue, formatNumber } from "./formatting";
+import { LivePreflightAudit } from "./live-preflight-audit";
 import type {
   AlertForm,
   AlertsPayload,
@@ -316,16 +318,6 @@ function initialTabFromUrl(): Tab {
   return isTab(value) ? value : "overview";
 }
 
-function formatNumber(value: number | null | undefined, digits = 4): string {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "-";
-  }
-  return value.toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits
-  });
-}
-
 function formatUsd(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "-";
@@ -396,19 +388,6 @@ function proposalValue(row: Record<string, unknown> | undefined, key: string): s
   } catch {
     return String(value);
   }
-}
-
-function formatAuditValue(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value.length ? value.map((item) => String(item)).join(", ") : "-";
-  }
-  if (value === null || value === undefined || value === "") {
-    return "-";
-  }
-  if (typeof value === "object") {
-    return JSON.stringify(value);
-  }
-  return String(value);
 }
 
 function enabledCapabilities(market: Market): string[] {
@@ -7022,86 +7001,6 @@ function LiveReportSchemaDiagnostics({
       ) : (
         <div className="empty-state compact">No schema errors or warnings.</div>
       )}
-    </div>
-  );
-}
-
-function LivePreflightAudit({ payload }: { payload: LivePreflightPayload }) {
-  const preflight = payload.preflight;
-  return (
-    <div className="audit-box">
-      <div className="diagnostic-grid">
-        <div>
-          <span>Result</span>
-          <strong>{payload.blocked ? "blocked" : "passed"}</strong>
-        </div>
-        <div>
-          <span>Market</span>
-          <strong>{payload.order.market_id}</strong>
-        </div>
-        <div>
-          <span>Contract</span>
-          <strong>{payload.order.contract_id}</strong>
-        </div>
-        <div>
-          <span>Order</span>
-          <strong>
-            {payload.order.side} {formatNumber(payload.order.size, 4)} @ {formatNumber(payload.order.limit_price, 4)}
-          </strong>
-        </div>
-        <div>
-          <span>Notional</span>
-          <strong>{formatNumber(payload.order.approx_notional, 4)}</strong>
-        </div>
-        <div>
-          <span>Gate</span>
-          <strong>{payload.live_safety.status}</strong>
-        </div>
-        <div>
-          <span>Metadata keys</span>
-          <strong>{payload.order.metadata_keys.length ? payload.order.metadata_keys.join(", ") : "-"}</strong>
-        </div>
-        <div>
-          <span>Redaction</span>
-          <strong>{payload.live_safety.redaction.audit_payloads_redacted ? "enabled" : "unknown"}</strong>
-        </div>
-      </div>
-      {preflight ? (
-        <div className="diagnostic-grid">
-          <div>
-            <span>Adapter</span>
-            <strong>{formatAuditValue(preflight.display_name)}</strong>
-          </div>
-          <div>
-            <span>Feature</span>
-            <strong>{formatAuditValue(preflight.feature)}</strong>
-          </div>
-          <div>
-            <span>Max size</span>
-            <strong>{formatAuditValue(preflight.max_size)}</strong>
-          </div>
-          <div>
-            <span>Max notional</span>
-            <strong>{formatAuditValue(preflight.max_notional)}</strong>
-          </div>
-          <div>
-            <span>Warnings</span>
-            <strong>{formatAuditValue(preflight.warnings)}</strong>
-          </div>
-          <div>
-            <span>Credentials</span>
-            <strong>{formatAuditValue(preflight.requires_credentials)}</strong>
-          </div>
-          <div>
-            <span>KYC</span>
-            <strong>{formatAuditValue(preflight.requires_kyc)}</strong>
-          </div>
-          <div>
-            <span>Region limited</span>
-            <strong>{formatAuditValue(preflight.region_limited)}</strong>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }

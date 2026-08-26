@@ -1,0 +1,132 @@
+name: Platform evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful exact-revision CI run ID to review
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: platform-evidence-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  review:
+    name: Review and attest platform evidence
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Verify exact clean source before review
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Download exact CI run metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" \
+            > "${RUNNER_TEMP}/platform-source-run.json"
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/jobs?filter=latest&per_page=100" \
+            > "${RUNNER_TEMP}/platform-source-jobs.json"
+
+      - name: Generate exact platform evidence
+        shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/platform-evidence"
+          mkdir -p "${output}"
+          python scripts/trusted_readiness_evidence.py platform \
+            --run-input "${RUNNER_TEMP}/platform-source-run.json" \
+            --jobs-input "${RUNNER_TEMP}/platform-source-jobs.json" \
+            --source-run-id "${SOURCE_RUN_ID}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --source-revision "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --output-directory "${output}"
+
+      - name: Review platform evidence before attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/platform-evidence"
+          python scripts/trusted_readiness_evidence.py validate \
+            --input "${output}/platform-ci-evidence.json" \
+            --evidence-type platform-ci \
+            --expected-revision "${GITHUB_SHA}"
+          python scripts/trusted_readiness_evidence.py validate \
+            --input "${output}/platform-evidence.json" \
+            --evidence-type platform \
+            --expected-revision "${GITHUB_SHA}"
+
+      - name: Reverify exact clean source after review
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Attest platform-CI evidence
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/platform-evidence/platform-ci-evidence.json
+
+      - name: Attest platform evidence
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/platform-evidence/platform-evidence.json
+
+      - name: Upload platform-CI evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: platform-ci-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/platform-evidence/platform-ci-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload platform evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: platform-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/platform-evidence/platform-evidence.json
+          if-no-files-found: error
+          retention-days: 30

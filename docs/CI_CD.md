@@ -95,10 +95,33 @@ Release jobs:
 - Generate `SHA256SUMS.txt` and an SPDX 2.3 software bill of materials.
 - Create GitHub build-provenance attestations for every release asset.
 - Publish or update a GitHub Release using the built-in `GITHUB_TOKEN`.
+- After a stable release is remotely inventoried, downloaded, and byte-compared,
+  generate, attest, and upload a distinct canonical `release-evidence.json`
+  artifact bound to the exact repository, commit, tag, run, attempt, release
+  history, and asset names/sizes/SHA-256 values.
 
 The publish job targets the `release` environment. Treat this as the release environment for production publishing, and configure protection rules for it in GitHub if releases should require manual approval.
 
 Release reruns are fail-closed. An updatable existing release is returned to draft state before its assets change; a new release starts as a draft. After the verified local files are uploaded, the workflow enumerates every remote asset page, removes only numeric asset IDs belonging to that exact release whose names are absent locally, checks the exact remote names and metadata, downloads every asset, and compares the bytes with the attested local files. The requested draft or published state is applied only after those checks pass. If immutable releases are enabled, GitHub rejects modification of a published release instead of allowing a partial rerun.
+
+For a non-draft, non-prerelease publication, the pinned `ubuntu-24.04`
+publish job then queries the final release, asset inventory, complete bounded
+release history, and its own run identity. `scripts/generate_release_evidence.py`
+fails unless they match the exact verified local bytes and trusted workflow
+coordinates. Only then does the workflow attest and upload
+`release-evidence.json` as
+`release-evidence-<sha>-<run-id>-<attempt>`. This evidence file is not itself a
+release asset, avoiding a checksum/inventory cycle. See
+`docs/PRODUCTION_READINESS.md` for the independent live-state checks performed
+before the readiness scorer awards either release point.
+
+If generation, attestation, or upload of that post-publication evidence fails,
+the workflow runs a compensating cleanup that returns the prepared release to
+draft state and verifies the transition. If GitHub refuses that transition,
+the cleanup also fails loudly and the release requires immediate operator
+reconciliation. The report records a fresh `generated_at` collection time
+independently of the release's original `published_at`, so an unchanged current
+release can be re-evaluated without pretending it was newly published.
 
 See `docs/PLATFORM_SUPPORT.md` for the platform support tiers and the gates required before any additional OS or mobile platform is advertised as fully supported.
 

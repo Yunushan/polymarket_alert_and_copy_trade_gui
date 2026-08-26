@@ -21,6 +21,7 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/.test-dist/
 frontend/*.tsbuildinfo
 
 .env

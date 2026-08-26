@@ -114,7 +114,7 @@ export function apiSchemaValidation(details: unknown): PolymarketLiveValidationR
 
 const vitePorts = new Set(["5173", "4173"]);
 const defaultApiBase = vitePorts.has(window.location.port) ? "http://127.0.0.1:8765" : "";
-const apiBase = (import.meta.env.VITE_API_BASE_URL ?? defaultApiBase).replace(/\/$/, "");
+const apiBase = (import.meta.env?.VITE_API_BASE_URL ?? defaultApiBase).replace(/\/$/, "");
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
@@ -129,7 +129,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const error = payload.error;
     const message = typeof error === "string" ? error : error?.message;
     const code = typeof error === "object" ? error?.code : undefined;
-    const status = typeof error === "object" ? error?.status : response.status;
+    const status = typeof error === "object" ? error?.status ?? response.status : response.status;
     const details = typeof error === "object" ? error?.details : undefined;
     throw new ApiRequestError(`${code ? `${code}: ` : ""}${message ?? `Request failed: ${response.status}`}`, code, status, details);
   }
@@ -316,9 +316,9 @@ export function manageMarketOrders(
   operation: MarketOrderManagementOperation,
   payload: Record<string, unknown>
 ): Promise<MarketOrderManagementPayload> {
-  return request<MarketOrderManagementPayload>(
+  return requestIdempotentMutation<MarketOrderManagementPayload>(
     `/api/markets/${encodeURIComponent(marketId)}/orders/${encodeURIComponent(operation)}`,
-    { method: "POST", body: JSON.stringify(payload) }
+    payload
   );
 }
 
@@ -512,10 +512,7 @@ export function updateConfig(payload: Partial<Pick<ConfigPayload, "selected_mark
 }
 
 export function createAlert(form: AlertForm): Promise<AlertsPayload> {
-  return request<AlertsPayload>("/api/alerts", {
-    method: "POST",
-    body: JSON.stringify(form)
-  });
+  return requestIdempotentMutation<AlertsPayload>("/api/alerts", form);
 }
 
 export function updateAlert(alertId: string, form: Partial<AlertForm>): Promise<AlertsPayload> {
@@ -546,10 +543,7 @@ export function refreshAlert(alertId: string): Promise<AlertRefreshResponse> {
 }
 
 export function createWallet(form: WalletForm): Promise<WalletsPayload> {
-  return request<WalletsPayload>("/api/wallets", {
-    method: "POST",
-    body: JSON.stringify(form)
-  });
+  return requestIdempotentMutation<WalletsPayload>("/api/wallets", form);
 }
 
 export function updateWallet(walletId: string, form: Partial<WalletForm>): Promise<WalletsPayload> {
@@ -680,10 +674,10 @@ export function previewPaperImpact(form: PaperOrderForm): Promise<PaperImpactPay
 }
 
 export function submitPaperOrder(form: PaperOrderForm): Promise<PaperOrderResponse> {
-  return request<PaperOrderResponse>("/api/paper/orders", {
-    method: "POST",
-    body: JSON.stringify(serializePaperOrderForm(form))
-  });
+  return requestIdempotentMutation<PaperOrderResponse>(
+    "/api/paper/orders",
+    serializePaperOrderForm(form)
+  );
 }
 
 export function usePaperHistory(recordId: string): Promise<PaperFormFillPayload> {

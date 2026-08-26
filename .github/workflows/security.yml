@@ -65,8 +65,8 @@ jobs:
       - name: Install frontend lockfile
         run: npm ci --ignore-scripts
 
-      - name: Audit production frontend dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit complete frontend dependency graph
+        run: npm audit --audit-level=high
 
   python-dependency-audit:
     name: Python dependency audit

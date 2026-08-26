@@ -1,4 +1,5 @@
 name: Release
+run-name: Release ${{ inputs.tag_name || github.ref_name }}
 
 on:
   push:
@@ -25,7 +26,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.inputs.tag_name || github.ref_name }}
+  # Share this immutable lock with release-evidence-reconcile.yml so a stale
+  # reconciler can never draft a newer publication while it is being produced.
+  group: release-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -472,7 +475,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs:
       - metadata
@@ -575,6 +578,7 @@ jobs:
           subject-path: release-assets/*
 
       - name: Reconcile and publish GitHub release
+        id: publish_release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
@@ -586,27 +590,106 @@ jobs:
           remote_release_json="${RUNNER_TEMP}/market-sentinel-release.json"
           remote_assets_json="${RUNNER_TEMP}/market-sentinel-release-assets.json"
           stale_asset_ids="${RUNNER_TEMP}/market-sentinel-stale-release-asset-ids.txt"
+          release_preflight_json="${RUNNER_TEMP}/market-sentinel-release-preflight.json"
+          prepared_release_json="${RUNNER_TEMP}/market-sentinel-release-prepared.json"
 
           release_state_flags=(
             "--prerelease=${PRERELEASE}"
             "--draft=${DRAFT}"
           )
 
-          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+          prepared_release_id=""
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+            > "${release_preflight_json}" 2>/dev/null; then
+            if ! jq -e \
+              --arg tag "${TAG_NAME}" \
+              --arg target "${GITHUB_SHA}" \
+              '.id | type == "number" and . > 0' \
+              "${release_preflight_json}" >/dev/null || \
+              ! jq -e \
+                --arg tag "${TAG_NAME}" \
+                --arg target "${GITHUB_SHA}" \
+                '.tag_name == $tag and
+                 .target_commitish == $target and
+                 (.draft | type == "boolean") and
+                 (.prerelease | type == "boolean")' \
+                "${release_preflight_json}" >/dev/null; then
+              echo "Existing release identity, target, or state is not canonical; refusing to mutate it." >&2
+              exit 1
+            fi
+            prepared_release_id="$(jq -er '.id' "${release_preflight_json}")"
+            current_draft="$(jq -er '.draft' "${release_preflight_json}")"
+            current_prerelease="$(jq -er '.prerelease' "${release_preflight_json}")"
+            if [[ "${current_draft}" != "true" &&
+                  "${current_prerelease}" != "${PRERELEASE}" ]]; then
+              echo "Existing published release prerelease state conflicts with ${TAG_NAME}; refusing to unpublish it." >&2
+              exit 1
+            fi
             # Never expose a mixture of assets from two workflow attempts.
-            gh release edit "${TAG_NAME}" --draft=true
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}" \
+              -F draft=true > "${prepared_release_json}"
+            if ! jq -e \
+              --argjson release_id "${prepared_release_id}" \
+              --arg tag "${TAG_NAME}" \
+              --arg target "${GITHUB_SHA}" \
+              '.id == $release_id and
+               .tag_name == $tag and
+               .target_commitish == $target and
+               .draft == true and
+               (.prerelease | type == "boolean")' \
+              "${prepared_release_json}" >/dev/null; then
+              echo "Existing release changed during draft transition; refusing asset mutation." >&2
+              exit 1
+            fi
           else
             gh release create "${TAG_NAME}" \
               --draft \
               --title "${TAG_NAME}" \
               --notes-file release-assets/RELEASE_NOTES.md \
               --target "${GITHUB_SHA}"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+              > "${prepared_release_json}"
+            prepared_release_id="$(jq -er '.id | select(type == "number" and . > 0)' \
+              "${prepared_release_json}")"
+            if ! jq -e \
+              --argjson release_id "${prepared_release_id}" \
+              --arg tag "${TAG_NAME}" \
+              --arg target "${GITHUB_SHA}" \
+              '.id == $release_id and
+               .tag_name == $tag and
+               .target_commitish == $target and
+               .draft == true and
+               .prerelease == false' \
+              "${prepared_release_json}" >/dev/null; then
+              echo "New draft release identity or state is not canonical; refusing asset upload." >&2
+              exit 1
+            fi
           fi
 
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+            > "${prepared_release_json}"
+          if ! jq -e \
+            --argjson release_id "${prepared_release_id}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .target_commitish == $target and
+             .draft == true and
+             (.prerelease | type == "boolean")' \
+            "${prepared_release_json}" >/dev/null; then
+            echo "Release identity changed before asset upload; refusing mutation." >&2
+            exit 1
+          fi
           gh release upload "${TAG_NAME}" release-assets/* --clobber
 
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" > "${remote_release_json}"
           release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
+          if [ "${release_id}" != "${prepared_release_id}" ]; then
+            echo "Release identity changed during asset upload." >&2
+            exit 1
+          fi
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
             --jq 'flatten' > "${remote_assets_json}"
@@ -655,7 +738,131 @@ jobs:
           done
 
           # Publish only after the remote inventory and downloaded bytes match locally.
+          echo "release_prepared=true" >> "${GITHUB_OUTPUT}"
           gh release edit "${TAG_NAME}" \
             --title "${TAG_NAME}" \
             --notes-file release-assets/RELEASE_NOTES.md \
             "${release_state_flags[@]}"
+          final_release_json="${RUNNER_TEMP}/market-sentinel-final-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}" > "${final_release_json}"
+          if ! jq -e \
+            --argjson release_id "${prepared_release_id}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            --argjson expected_draft "${DRAFT}" \
+            --argjson expected_prerelease "${PRERELEASE}" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .target_commitish == $target and
+             .draft == $expected_draft and
+             .prerelease == $expected_prerelease' \
+            "${final_release_json}" >/dev/null; then
+            echo "Final release identity or state does not match the publish request." >&2
+            exit 1
+          fi
+          release_fingerprint="$(
+            jq -cS '{id,tag_name,target_commitish,draft,prerelease,name,body,published_at,updated_at}' \
+              "${final_release_json}" | sha256sum | cut -d ' ' -f 1
+          )"
+          echo "release_id=${prepared_release_id}" >> "${GITHUB_OUTPUT}"
+          echo "release_fingerprint=${release_fingerprint}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate exact published release evidence
+        if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        shell: bash
+        run: |
+          evidence_dir="${RUNNER_TEMP}/market-sentinel-release-evidence"
+          mkdir -p "${evidence_dir}" release-evidence
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+            > "${evidence_dir}/release.json"
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${evidence_dir}/release.json")"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq 'flatten' > "${evidence_dir}/assets.json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq 'flatten' > "${evidence_dir}/history.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${evidence_dir}/run.json"
+          python scripts/generate_release_evidence.py \
+            --asset-dir release-assets \
+            --release-json "${evidence_dir}/release.json" \
+            --assets-json "${evidence_dir}/assets.json" \
+            --history-json "${evidence_dir}/history.json" \
+            --run-json "${evidence_dir}/run.json" \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --revision "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --source-ref "${GITHUB_REF}" \
+            --event "${GITHUB_EVENT_NAME}" \
+            --output release-evidence/release-evidence.json
+
+      - name: Attest exact published release evidence
+        if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-evidence/release-evidence.json
+
+      - name: Upload published release evidence
+        if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-evidence/release-evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Re-draft release after evidence failure
+        if: ${{ always() && steps.publish_release.outputs.release_prepared == 'true' && (failure() || cancelled()) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_ID: ${{ steps.publish_release.outputs.release_id }}
+          RELEASE_FINGERPRINT: ${{ steps.publish_release.outputs.release_fingerprint }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_ID}" =~ ^[1-9][0-9]*$ ]] || [[ ! "${RELEASE_FINGERPRINT}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Release cleanup identity is missing or malformed; refusing mutation." >&2
+            exit 1
+          fi
+          current_release_json="${RUNNER_TEMP}/market-sentinel-cleanup-current-release.json"
+          redrafted_release_json="${RUNNER_TEMP}/market-sentinel-cleanup-redrafted-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "${current_release_json}"
+          current_fingerprint="$(
+            jq -cS '{id,tag_name,target_commitish,draft,prerelease,name,body,published_at,updated_at}' \
+              "${current_release_json}" | sha256sum | cut -d ' ' -f 1
+          )"
+          if [ "${current_fingerprint}" != "${RELEASE_FINGERPRINT}" ]; then
+            echo "Release changed after publication; preserving the newer state instead of re-drafting it." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --argjson release_id "${RELEASE_ID}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and .tag_name == $tag and .target_commitish == $target and .draft == false' \
+            "${current_release_json}" >/dev/null; then
+            echo "Release cleanup preflight identity or state mismatch; refusing mutation." >&2
+            exit 1
+          fi
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=true > "${redrafted_release_json}"
+          if ! jq -e \
+            --argjson release_id "${RELEASE_ID}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and .tag_name == $tag and .target_commitish == $target and .draft == true' \
+            "${redrafted_release_json}" >/dev/null; then
+            echo "Release evidence failed and the exact release could not be returned to draft state." >&2
+            exit 1
+          fi

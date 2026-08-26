@@ -31,7 +31,7 @@ REQUIRED_IMPORTS = {
     "truststore": "truststore",
     "websocket-client": "websocket",
     "python-dotenv": "dotenv",
-    "py-clob-client": "py_clob_client",
+    "py-clob-client-v2": "py_clob_client_v2",
     "packaging": "packaging",
     "pytest": "pytest",
     "coverage": "coverage",
@@ -1311,6 +1311,15 @@ def run_ci_cd_workflow_check() -> None:
             "fetch-depth: 0",
             "scripts/verify_python_dist_artifacts.py",
         ),
+        ROOT / ".github" / "workflows" / "deployment-evidence.yml": (
+            "workflow_dispatch:",
+            "name: production",
+            "market-sentinel-production",
+            "Collect raw production deployment evidence",
+            "Review raw report and bind exact release identity",
+            "actions/attest-build-provenance",
+            "deployment-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+        ),
         ROOT / ".github" / "workflows" / "release.yml": (
             "workflow_dispatch:",
             "environment: release",
@@ -1349,6 +1358,14 @@ def run_ci_cd_workflow_check() -> None:
             "sha256sum * > SHA256SUMS.txt",
             "Generate SPDX SBOM",
             "scripts/generate_release_sbom.py",
+            "runs-on: ubuntu-24.04",
+            "Generate exact published release evidence",
+            "scripts/generate_release_evidence.py",
+            "Attest exact published release evidence",
+            "subject-path: release-evidence/release-evidence.json",
+            "Upload published release evidence",
+            "Re-draft release after evidence failure",
+            "steps.publish_release.outputs.release_prepared == 'true'",
             "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
             "attestations: write",
             "id-token: write",
@@ -1401,6 +1418,13 @@ def run_ci_cd_workflow_check() -> None:
             "SPDX-2.3",
             "requirements-live.lock",
             "package-lock.json",
+        ),
+        ROOT / "scripts" / "generate_release_evidence.py": (
+            "market-sentinel-release-evidence",
+            "verify_remote_asset_inventory",
+            "publishable_assets",
+            "runner_environment",
+            "github-hosted",
         ),
         ROOT / "scripts" / "sign_windows_release.py": (
             "signtool",
@@ -1530,7 +1554,7 @@ def run_frontend_build_check(strict: bool = False) -> None:
         raise SystemExit("frontend/package.json is missing.")
     package = json.loads(package_path.read_text(encoding="utf-8"))
     scripts = package.get("scripts") or {}
-    missing_scripts = [name for name in ("dev", "build", "preview") if name not in scripts]
+    missing_scripts = [name for name in ("dev", "test", "prebuild", "build", "preview") if name not in scripts]
     if missing_scripts:
         raise SystemExit("frontend/package.json is missing scripts: " + ", ".join(missing_scripts))
 

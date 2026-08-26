@@ -1,0 +1,291 @@
+name: Polymarket acceptance evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Acceptance tier to execute
+        required: true
+        type: choice
+        options:
+          - credentialed
+          - funded
+      token_id:
+        description: Allowlisted token ID for the bounded funded order/cancel audit
+        required: false
+        type: string
+      side:
+        description: Funded audit side
+        required: false
+        default: BUY
+        type: choice
+        options:
+          - BUY
+          - SELL
+      price:
+        description: Funded audit limit price
+        required: false
+        type: string
+      size:
+        description: Funded audit size
+        required: false
+        type: string
+      funded_confirmation:
+        description: Exact funded-action confirmation from the checked-in safety harness
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: polymarket-acceptance-evidence
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  credentialed:
+    name: Credentialed Polymarket evidence
+    if: github.ref == 'refs/heads/main' && inputs.tier == 'credentialed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install hash-locked runtime
+        run: |
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock
+
+      - name: Verify credentialed evidence mode
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+        run: test "${TIER}" = credentialed
+
+      - name: Verify exact clean source before probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Run credentialed public and authenticated reads
+        shell: bash
+        env:
+          POLY_ADDRESS: ${{ secrets.POLY_ADDRESS }}
+          POLY_API_KEY: ${{ secrets.POLY_API_KEY }}
+          POLY_API_SECRET: ${{ secrets.POLY_API_SECRET }}
+          POLY_SECRET: ${{ secrets.POLY_SECRET }}
+          POLY_PASSPHRASE: ${{ secrets.POLY_PASSPHRASE }}
+          RELAYER_API_KEY: ${{ secrets.RELAYER_API_KEY }}
+          RELAYER_API_KEY_ADDRESS: ${{ secrets.RELAYER_API_KEY_ADDRESS }}
+          POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
+          POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
+          POLYMARKET_SIGNATURE_TYPE: ${{ secrets.POLYMARKET_SIGNATURE_TYPE }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/polymarket-evidence"
+          mkdir -p "${output}"
+          python scripts/verify_polymarket_live.py \
+            --timeout 15 \
+            --require-authenticated-read-ok \
+            --report-file "${output}/credentialed-raw.json" \
+            > "${RUNNER_TEMP}/credentialed-command-output.json"
+
+      - name: Generate exact credentialed evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/polymarket-evidence"
+          python scripts/trusted_readiness_evidence.py live \
+            --input "${output}/credentialed-raw.json" \
+            --tier credentialed \
+            --repository "${GITHUB_REPOSITORY}" \
+            --source-revision "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --output "${output}/credentialed-polymarket-evidence.json"
+
+      - name: Review credentialed evidence before attestation
+        shell: bash
+        run: |
+          python scripts/trusted_readiness_evidence.py validate \
+            --input "${RUNNER_TEMP}/polymarket-evidence/credentialed-polymarket-evidence.json" \
+            --evidence-type credentialed-polymarket \
+            --expected-revision "${GITHUB_SHA}"
+
+      - name: Reverify exact clean source after probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Attest credentialed evidence
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/polymarket-evidence/credentialed-polymarket-evidence.json
+
+      - name: Upload credentialed evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: credentialed-polymarket-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/polymarket-evidence/credentialed-polymarket-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
+  funded:
+    name: Funded Polymarket order/cancel evidence
+    if: github.ref == 'refs/heads/main' && inputs.tier == 'funded'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install hash-locked runtime
+        run: |
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock
+
+      - name: Verify funded execution approval
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.funded_confirmation }}
+          TOKEN_ID: ${{ inputs.token_id }}
+          PRICE: ${{ inputs.price }}
+          SIZE: ${{ inputs.size }}
+          TIER: ${{ inputs.tier }}
+        run: |
+          set -euo pipefail
+          test "${TIER}" = funded
+          test "${CONFIRMATION}" = "I_UNDERSTAND_THIS_PLACES_A_REAL_POLYMARKET_ORDER"
+          test -n "${TOKEN_ID}"
+          test -n "${PRICE}"
+          test -n "${SIZE}"
+
+      - name: Verify exact clean source before funded action
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Run bounded funded order and immediate cancel
+        shell: bash
+        env:
+          TOKEN_ID: ${{ inputs.token_id }}
+          SIDE: ${{ inputs.side }}
+          PRICE: ${{ inputs.price }}
+          SIZE: ${{ inputs.size }}
+          POLY_ADDRESS: ${{ secrets.POLY_ADDRESS }}
+          POLY_API_KEY: ${{ secrets.POLY_API_KEY }}
+          POLY_API_SECRET: ${{ secrets.POLY_API_SECRET }}
+          POLY_SECRET: ${{ secrets.POLY_SECRET }}
+          POLY_PASSPHRASE: ${{ secrets.POLY_PASSPHRASE }}
+          RELAYER_API_KEY: ${{ secrets.RELAYER_API_KEY }}
+          RELAYER_API_KEY_ADDRESS: ${{ secrets.RELAYER_API_KEY_ADDRESS }}
+          POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
+          POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
+          POLYMARKET_SIGNATURE_TYPE: ${{ secrets.POLYMARKET_SIGNATURE_TYPE }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/polymarket-evidence"
+          recovery_directory="$(mktemp -d "${RUNNER_TEMP}/funded-recovery.XXXXXX")"
+          chmod 700 "${recovery_directory}"
+          mkdir -p "${output}"
+          python scripts/verify_polymarket_live.py \
+            --timeout 15 \
+            --require-authenticated-read-ok \
+            --token-id "${TOKEN_ID}" \
+            --allow-token-id "${TOKEN_ID}" \
+            --side "${SIDE}" \
+            --price "${PRICE}" \
+            --size "${SIZE}" \
+            --tif GTC \
+            --allow-funded-order \
+            --cancel-immediately \
+            --confirm-live-order-cancel I_UNDERSTAND_THIS_PLACES_A_REAL_POLYMARKET_ORDER \
+            --max-verify-size 5.0 \
+            --max-verify-notional 1.0 \
+            --maker-price-buffer 0.005 \
+            --recovery-journal "${recovery_directory}/funded-order-recovery.json" \
+            --report-file "${output}/funded-raw.json" \
+            > "${RUNNER_TEMP}/funded-command-output.json"
+
+      - name: Generate exact funded evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/polymarket-evidence"
+          python scripts/trusted_readiness_evidence.py live \
+            --input "${output}/funded-raw.json" \
+            --tier funded \
+            --repository "${GITHUB_REPOSITORY}" \
+            --source-revision "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --output "${output}/funded-polymarket-evidence.json"
+
+      - name: Review funded evidence before attestation
+        shell: bash
+        run: |
+          python scripts/trusted_readiness_evidence.py validate \
+            --input "${RUNNER_TEMP}/polymarket-evidence/funded-polymarket-evidence.json" \
+            --evidence-type funded-polymarket \
+            --expected-revision "${GITHUB_SHA}"
+
+      - name: Reverify exact clean source after funded action
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Attest funded evidence
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/polymarket-evidence/funded-polymarket-evidence.json
+
+      - name: Upload funded evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: funded-polymarket-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/polymarket-evidence/funded-polymarket-evidence.json
+          if-no-files-found: error
+          retention-days: 30

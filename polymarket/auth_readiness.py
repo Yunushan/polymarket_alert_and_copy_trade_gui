@@ -74,7 +74,7 @@ def build_clob_auth_readiness(
     if funder["present"] and not is_evm_address_like(funder["value"]):
         blockers.append("Funder/deposit wallet address must be a 0x-prefixed EVM address.")
     if signature_type_value == 0 and not funder["present"]:
-        warnings.append("EOA signature type selected without explicit funder; py-clob-client will use the signing wallet flow.")
+        warnings.append("EOA signature type selected without explicit funder; py-clob-client-v2 will use the signing wallet flow.")
     if signature_type_value == 3:
         warnings.append("POLY_1271 is the deposit-wallet flow; verify the funder matches the Polymarket deposit wallet.")
 

@@ -1,0 +1,281 @@
+name: Reconcile release evidence
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+  attestations: read
+
+# Share the release workflow's immutable lock so publishing and destructive
+# reconciliation cannot overlap. Every destructive decision is still revalidated.
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: ${{ github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out trusted reconciliation code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a3a9dd003b7b4f27d34fe8ae5b3594b637b392e9 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Re-draft only the unproven release owned by this run attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${RUN_ID}" =~ ^[1-9][0-9]*$ ||
+                ! "${RUN_NUMBER}" =~ ^[1-9][0-9]*$ ||
+                ! "${RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ||
+                ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release workflow-run identity is not canonical." >&2
+            exit 1
+          fi
+          if [[ "${DISPLAY_TITLE}" != Release\ * ]]; then
+            echo "Release run title does not identify an exact tag." >&2
+            exit 1
+          fi
+          tag="${DISPLAY_TITLE#Release }"
+          version="$(python scripts/release_version.py normalize-tag "${tag}")"
+          if [[ "${tag}" != "v${version}" ]]; then
+            echo "Release tag identity is not canonical." >&2
+            exit 1
+          fi
+
+          run_json="${RUNNER_TEMP}/release-reconcile-run.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" > "${run_json}"
+          current_attempt="$(jq -er '.run_attempt | select(type == "number" and . > 0)' "${run_json}")"
+          if [[ "${current_attempt}" != "${RUN_ATTEMPT}" ]]; then
+            echo "Run ${RUN_ID} has a newer attempt; this reconciliation is stale."
+            exit 0
+          fi
+          if ! jq -e \
+            --argjson run_id "${RUN_ID}" \
+            --argjson run_number "${RUN_NUMBER}" \
+            --argjson run_attempt "${RUN_ATTEMPT}" \
+            --arg conclusion "${RUN_CONCLUSION}" \
+            --arg revision "${HEAD_SHA}" \
+            --arg title "${DISPLAY_TITLE}" \
+            '.id == $run_id and
+             .run_number == $run_number and
+             .run_attempt == $run_attempt and
+             .conclusion == $conclusion and
+             .head_sha == $revision and
+             .display_title == $title and
+             .name == "Release" and
+             .path == ".github/workflows/release.yml" and
+             .status == "completed" and
+             .head_repository.full_name == env.GITHUB_REPOSITORY' \
+            "${run_json}" >/dev/null; then
+            echo "Release workflow-run identity changed or is untrusted." >&2
+            exit 1
+          fi
+
+          release_json="${RUNNER_TEMP}/release-reconcile-current.json"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" > "${release_json}" 2>/dev/null; then
+            exit 0
+          fi
+          if [[ "$(jq -r '.draft or .prerelease' "${release_json}")" == "true" ]]; then
+            exit 0
+          fi
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${release_json}")"
+          if ! jq -e \
+            --arg tag "${tag}" \
+            --arg revision "${HEAD_SHA}" \
+            '.tag_name == $tag and
+             .target_commitish == $revision and
+             .draft == false and
+             .prerelease == false and
+             (.published_at | type == "string" and length > 0)' \
+            "${release_json}" >/dev/null; then
+            echo "Refusing to alter ${tag}: current release identity is not canonical for this run." >&2
+            exit 1
+          fi
+          owned_release_fingerprint="$(jq -cer \
+            '[.id, .tag_name, .target_commitish, .draft, .prerelease, .published_at, .updated_at]' \
+            "${release_json}")"
+
+          current_release_has_valid_evidence() {
+            local artifacts_json artifact_id artifact_name artifact_run_id artifact_revision
+            local candidate_run_id candidate_attempt evidence_dir
+            artifacts_json="$(mktemp "${RUNNER_TEMP}/release-evidence-artifacts.XXXXXX")"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+              --jq '[.[].artifacts[]]' > "${artifacts_json}"
+
+            while IFS=$'\t' read -r artifact_id artifact_name artifact_run_id artifact_revision; do
+              if [[ ! "${artifact_id}" =~ ^[1-9][0-9]*$ ||
+                    ! "${artifact_name}" =~ ^release-evidence-${HEAD_SHA}-([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+                continue
+              fi
+              candidate_run_id="${BASH_REMATCH[1]}"
+              candidate_attempt="${BASH_REMATCH[2]}"
+              if [[ "${artifact_run_id}" != "${candidate_run_id}" ||
+                    "${artifact_revision}" != "${HEAD_SHA}" ]]; then
+                continue
+              fi
+
+              evidence_dir="$(mktemp -d "${RUNNER_TEMP}/release-evidence.${artifact_id}.XXXXXX")"
+              if ! gh run download "${candidate_run_id}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --name "${artifact_name}" \
+                --dir "${evidence_dir}"; then
+                continue
+              fi
+              if python - "${evidence_dir}/release-evidence.json" "${HEAD_SHA}" "${version}" <<'PY'
+          import json
+          import sys
+
+          from scripts.check_product_readiness import _attested_release_report
+
+          result = _attested_release_report(
+              sys.argv[1], expected_revision=sys.argv[2], expected_version=sys.argv[3]
+          )
+          print(json.dumps(result, sort_keys=True))
+          raise SystemExit(0 if result.get("status") == "pass" else 1)
+          PY
+              then
+                echo "Current published release ${tag} is already backed by valid evidence from run ${candidate_run_id} attempt ${candidate_attempt}."
+                return 0
+              fi
+            done < <(
+              jq -r \
+                --arg prefix "release-evidence-${HEAD_SHA}-" \
+                '.[] |
+                 select(.expired == false and (.name | startswith($prefix))) |
+                 [.id, .name, .workflow_run.id, .workflow_run.head_sha] |
+                 @tsv' \
+                "${artifacts_json}"
+            )
+            return 1
+          }
+
+          # A failed, cancelled, or manual rerun cannot demote a release whose
+          # earlier evidence still validates against the current release bytes.
+          if current_release_has_valid_evidence; then
+            exit 0
+          fi
+
+          jobs_json="${RUNNER_TEMP}/release-reconcile-jobs.json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+            --jq '[.[].jobs[]]' > "${jobs_json}"
+          publish_job_count="$(jq \
+            '[.[] | select(.name == "Publish GitHub release")] | length' \
+            "${jobs_json}")"
+          if [[ "${publish_job_count}" != "1" ]]; then
+            echo "This run attempt did not own one publish job; it cannot demote the release."
+            exit 0
+          fi
+          publish_step_conclusion="$(jq -r \
+            '[.[] | select(.name == "Publish GitHub release") |
+              .steps[]? | select(.name == "Reconcile and publish GitHub release")][0].conclusion // ""' \
+            "${jobs_json}")"
+
+          owns_published_state=false
+          publish_started="$(jq -r \
+            '[.[] | select(.name == "Publish GitHub release")][0].started_at |
+             select(type == "string" and length > 0) // ""' \
+            "${jobs_json}")"
+          publish_completed="$(jq -r \
+            '[.[] | select(.name == "Publish GitHub release")][0].completed_at |
+             select(type == "string" and length > 0) // ""' \
+            "${jobs_json}")"
+          published_at="$(jq -er '.published_at' "${release_json}")"
+          updated_at="$(jq -er '.updated_at' "${release_json}")"
+          if [[ "${publish_step_conclusion}" =~ ^(success|failure|cancelled)$ &&
+                -n "${publish_started}" && -n "${publish_completed}" ]] && \
+            python - \
+              "${published_at}" "${updated_at}" \
+              "${publish_started}" "${publish_completed}" <<'PY'
+          import sys
+          from datetime import datetime
+
+          def timestamp(value: str) -> datetime:
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          published, updated, started, completed = map(timestamp, sys.argv[1:])
+          owned = started <= published <= completed and started <= updated <= completed
+          raise SystemExit(0 if owned else 1)
+          PY
+          then
+            # The release timestamps must belong to this exact job window even
+            # when GitHub records the publishing step as successful. This also
+            # covers cancellation immediately after publication.
+            owns_published_state=true
+          fi
+          if [[ "${owns_published_state}" != "true" ]]; then
+            echo "This run attempt did not publish the current release; preserving it."
+            exit 0
+          fi
+
+          # Recheck the attempt and exact release snapshot immediately before
+          # mutation. A later successful attempt changes at least one of these
+          # identities and must win without being raced by this stale job.
+          latest_run_attempt="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" \
+            --jq '.run_attempt')"
+          if [[ "${latest_run_attempt}" != "${RUN_ATTEMPT}" ]]; then
+            echo "A newer run attempt exists; preserving its release state."
+            exit 0
+          fi
+          latest_release_json="${RUNNER_TEMP}/release-reconcile-latest.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${latest_release_json}"
+          latest_release_fingerprint="$(jq -cer \
+            '[.id, .tag_name, .target_commitish, .draft, .prerelease, .published_at, .updated_at]' \
+            "${latest_release_json}")"
+          if [[ "${latest_release_fingerprint}" != "${owned_release_fingerprint}" ]]; then
+            echo "Release ${release_id} changed after inspection; preserving the newer state."
+            exit 0
+          fi
+          if current_release_has_valid_evidence; then
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${latest_release_json}"
+          latest_release_fingerprint="$(jq -cer \
+            '[.id, .tag_name, .target_commitish, .draft, .prerelease, .published_at, .updated_at]' \
+            "${latest_release_json}")"
+          if [[ "${latest_release_fingerprint}" != "${owned_release_fingerprint}" ]]; then
+            echo "Release ${release_id} changed while evidence was rechecked; preserving the newer state."
+            exit 0
+          fi
+
+          drafted_json="${RUNNER_TEMP}/release-reconcile-drafted.json"
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=true > "${drafted_json}"
+          if ! jq -e \
+            --argjson release_id "${release_id}" \
+            --arg tag "${tag}" \
+            --arg revision "${HEAD_SHA}" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .target_commitish == $revision and
+             .draft == true and
+             .prerelease == false' \
+            "${drafted_json}" >/dev/null; then
+            echo "Release evidence failed and the exact release identity was not returned to draft state." >&2
+            exit 1
+          fi

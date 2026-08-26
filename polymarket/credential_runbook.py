@@ -172,7 +172,7 @@ def _sdk_group(clob_readiness: Mapping[str, Any], env: Mapping[str, str]) -> Dic
             "one_of",
             PRIVATE_KEY_ENV_VARS,
             env,
-            purpose="Required for py-clob-client credential derivation and local order signing.",
+            purpose="Required for py-clob-client-v2 credential derivation and local order signing.",
         ),
         _requirement(
             "signature_type",
@@ -194,7 +194,7 @@ def _sdk_group(clob_readiness: Mapping[str, Any], env: Mapping[str, str]) -> Dic
     return {
         "id": "sdk_trading_credentials",
         "label": "SDK trading credentials",
-        "purpose": "Local py-clob-client readiness for authenticated CLOB workflows.",
+        "purpose": "Local py-clob-client-v2 readiness for authenticated CLOB workflows.",
         "status": "ok" if clob_readiness.get("sdk_trading_ready") else "blocked",
         "requirements": requirements,
         "blockers": list(clob_readiness.get("blockers") or []),
@@ -330,8 +330,6 @@ def _credentialed_read_candidates(*, direct_l2_ready: bool, user_ws_ready: bool,
     candidates = []
     if direct_l2_ready:
         candidates.append("clob_l2_orders")
-    if user_ws_ready:
-        candidates.append("user_websocket_connect")
     if relayer_ready:
         candidates.append("relayer_recent_transactions")
     return candidates
@@ -347,6 +345,7 @@ def _operator_commands() -> Dict[str, str]:
         "funded_order_cancel_requires_approval": (
             "python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> "
             "--allow-token-id <TOKEN> --cancel-immediately --allow-funded-order "
+            "--recovery-journal <ABSOLUTE_PRIVATE_JOURNAL_PATH> "
             f"--confirm-live-order-cancel {CONFIRM_LIVE_ORDER_CANCEL} --report-file live-funded-report.json"
         ),
     }

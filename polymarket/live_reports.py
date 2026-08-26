@@ -14,10 +14,21 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 from .live_report_schema import (
+    CREDENTIAL_PROMOTION_CHECKS,
+    CREDENTIAL_PROMOTION_SEMANTICS,
+    EXPECTED_REPOSITORY_ORIGIN,
+    PUBLIC_PROMOTION_CHECKS,
     compact_schema_validation,
     ensure_live_validation_report_valid,
     validate_live_validation_report,
 )
+from .live_verification import (
+    cancel_response_contains,
+    extract_order_id,
+    order_state_is_cancelled,
+    order_zero_fill_evidence,
+)
+from .constants import POLYMARKET_LIVE_MUTATION_BLOCKER, POLYMARKET_LIVE_MUTATIONS_SUPPORTED
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +53,6 @@ POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND = (
 )
 LIVE_VALIDATION_DECISION_TARGET_TIERS = ("public_live_verified", "credential_live_verified", "funded_live_verified")
 LIVE_VALIDATION_DECISIONS = ("accepted", "rejected")
-CREDENTIAL_PROMOTION_CHECKS = ("clob_l2_orders", "relayer_recent_transactions", "user_websocket_connect")
 LOCAL_ONLY_REPORT_MODES = {
     "local_readiness_only",
     "credential_runbook_no_funded_actions",
@@ -1180,8 +1190,10 @@ def live_validation_report_promotion_inventory(path: Optional[Path | str] = None
     return {
         "source": "stored_live_validation_reports",
         "static_coverage_mutated": False,
-        "credential_live_verified": "yes" if credential_candidates else "blocked",
-        "funded_live_verified": "yes" if funded_candidates else "blocked",
+        "credential_live_verified": "candidate_only" if credential_candidates else "blocked",
+        "funded_live_verified": "candidate_only" if funded_candidates else "blocked",
+        "attested_workflow_verified": False,
+        "evidence_trust": "local_unattested_candidate",
         "credential_candidates": credential_candidates,
         "funded_candidates": funded_candidates,
         "blocked_entries": blocked_entries[:10],
@@ -1192,8 +1204,8 @@ def live_validation_report_promotion_inventory(path: Optional[Path | str] = None
             "blocked_entries": len(blocked_entries),
         },
         "note": (
-            "Stored reports are evidence candidates only. Static coverage tiers remain unchanged unless an "
-            "operator explicitly reviews and promotes a report with concrete credentialed/funded evidence."
+            "Stored reports are local unattested evidence candidates only. They never establish a verified "
+            "credentialed or funded tier; production verification requires a trusted workflow and exact-byte attestation."
         ),
     }
 
@@ -2681,6 +2693,7 @@ def live_validation_report_summary(report: Mapping[str, Any]) -> Dict[str, Any]:
         "generated_at": _safe_float(report.get("generated_at")),
         "market_id": report.get("market_id"),
         "mode": report.get("mode"),
+        "source_provenance": _jsonable(report.get("source_provenance") or {}),
         "selected": bool(report.get("selected")),
         "enabled": bool(report.get("enabled")),
         "public_live_checks": stage_gates.get("public_live_checks"),
@@ -2706,6 +2719,7 @@ def live_validation_report_summary(report: Mapping[str, Any]) -> Dict[str, Any]:
 def live_validation_report_promotion(report: Mapping[str, Any]) -> Dict[str, Any]:
     mode = str(report.get("mode") or "").strip()
     local_only = mode in LOCAL_ONLY_REPORT_MODES
+    source_provenance_verified = _stable_source_provenance(report.get("source_provenance"))
     authenticated_checks = (
         report.get("authenticated_read_checks")
         if isinstance(report.get("authenticated_read_checks"), Mapping)
@@ -2717,39 +2731,120 @@ def live_validation_report_promotion(report: Mapping[str, Any]) -> Dict[str, Any
         else {}
     )
     stage_gates = report.get("stage_gates") if isinstance(report.get("stage_gates"), Mapping) else {}
+    public_checks = report.get("public_checks") if isinstance(report.get("public_checks"), Mapping) else {}
+    public_evidence = _public_promotion_evidence(public_checks)
+    public_verified = bool(report.get("ok") is True and len(public_evidence) == len(PUBLIC_PROMOTION_CHECKS))
     credential_evidence = _credential_promotion_evidence(authenticated_checks)
-    funded_evidence = _funded_promotion_evidence(funded_check)
+    source_revision = ""
+    if isinstance(report.get("source_provenance"), Mapping):
+        source_revision = str(report["source_provenance"].get("source_revision") or "")
+    funded_evidence = _funded_promotion_evidence(
+        funded_check,
+        expected_source_revision=source_revision,
+    )
     blockers: List[str] = []
 
     if local_only:
         blockers.append(f"Report mode {mode!r} is local-only and cannot promote production verification tiers.")
+    if not public_verified:
+        blockers.append(
+            "Credential and funded promotion require report.ok=true plus the exact successful semantic public-check inventory."
+        )
+    if mode == "strict_cli" and not source_provenance_verified:
+        blockers.append(
+            "Strict CLI promotion requires matching clean initial/final source revisions in source_provenance."
+        )
     if stage_gates.get("credentialed_read_ok") and not credential_evidence:
         blockers.append("Stage gates claim credentialed_read_ok, but no accepted authenticated-read evidence is present.")
     if stage_gates.get("funded_live_order_check") in {"ok", "passed"} and not funded_evidence:
         blockers.append("Stage gates claim funded verification, but no funded order/cancel audit evidence is present.")
 
-    can_promote_credential = bool(credential_evidence) and not local_only
-    can_promote_funded = bool(funded_evidence) and not local_only
+    can_promote_credential = (
+        public_verified
+        and bool(credential_evidence)
+        and not local_only
+        and source_provenance_verified
+    )
+    # A funded mutation is not independently sufficient evidence of an
+    # authenticated account path.  Promotion requires a successful accepted
+    # non-mutating read from the same report/run as the order/cancel audit.
+    can_promote_funded = (
+        bool(funded_evidence)
+        and bool(credential_evidence)
+        and public_verified
+        and not local_only
+        and source_provenance_verified
+    )
     if not credential_evidence:
         blockers.append(
-            "Credential live verification requires an ok CLOB L2 order-list read, relayer authenticated read, or user WebSocket connection."
+            "Credential live verification requires an ok CLOB L2 order-list or relayer authenticated read."
         )
     if not funded_evidence:
         blockers.append(
-            "Funded live verification requires an ok funded order/cancel result with live_action=true, order id, and post-cancel verification."
+            "Funded live verification requires an exact-source, same-account, post-only order/cancel result with "
+            "geoblock, balance/allowance, zero-fill, and resolved recovery-journal evidence."
         )
+    if not credential_evidence:
+        blockers.append(
+            "Funded live verification also requires accepted non-mutating authenticated-read evidence "
+            "in the same report."
+        )
+    if not POLYMARKET_LIVE_MUTATIONS_SUPPORTED:
+        blockers.append(POLYMARKET_LIVE_MUTATION_BLOCKER)
 
     return {
-        "credential_live_verified": "yes" if can_promote_credential else "blocked",
-        "funded_live_verified": "yes" if can_promote_funded else "blocked",
+        "credential_live_verified": "candidate_only" if can_promote_credential else "blocked",
+        "funded_live_verified": "candidate_only" if can_promote_funded else "blocked",
         "can_promote_credential_live_verified": can_promote_credential,
         "can_promote_funded_live_verified": can_promote_funded,
+        "attested_workflow_verified": False,
+        "evidence_trust": "local_unattested_candidate",
+        "requires_attested_workflow": True,
+        "candidate_limitations": [
+            "Local report bytes are not trusted workflow evidence and cannot establish a verified production tier."
+        ],
+        "source_provenance_verified": source_provenance_verified,
+        "public_checks_verified": public_verified,
+        "public_evidence": public_evidence,
         "credential_evidence": credential_evidence,
         "funded_evidence": funded_evidence,
         "blocked_reasons": _dedupe(blockers),
         "accepted_credential_checks": list(CREDENTIAL_PROMOTION_CHECKS),
-        "accepted_funded_audit_fields": ["status", "live_action", "audit.order_id", "audit.post_cancel_verified"],
+        "accepted_public_checks": list(PUBLIC_PROMOTION_CHECKS),
+        "accepted_funded_audit_fields": [
+            "status",
+            "live_action",
+            "manual_reconciliation_required",
+            "audit.order_id",
+            "audit.cancel",
+            "audit.post_cancel_order",
+            "audit.post_cancel_verified",
+            "audit.zero_fill_evidence",
+            "audit.recovery_journal",
+            "account_authenticated_read_preflight",
+            "account_preflight",
+            "execution_guards",
+            "geoblock_preflight",
+            "source_revision_gate",
+        ],
     }
+
+
+def _stable_source_provenance(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    source_revision = str(value.get("source_revision") or "")
+    return bool(
+        value.get("schema_version") == 1
+        and value.get("repository") == "market-sentinel"
+        and value.get("repository_origin") == EXPECTED_REPOSITORY_ORIGIN
+        and value.get("stable") is True
+        and value.get("initial_clean") is True
+        and value.get("final_clean") is True
+        and len(source_revision) == 40
+        and all(character in "0123456789abcdef" for character in source_revision)
+        and source_revision == value.get("initial_revision") == value.get("final_revision")
+    )
 
 
 def _credential_promotion_evidence(authenticated_checks: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -2758,27 +2853,131 @@ def _credential_promotion_evidence(authenticated_checks: Mapping[str, Any]) -> L
         item = authenticated_checks.get(name)
         if not isinstance(item, Mapping) or item.get("status") != "ok":
             continue
+        records_observed = item.get("records_observed")
+        if not (
+            item.get("semantic_check") == CREDENTIAL_PROMOTION_SEMANTICS[name]
+            and isinstance(records_observed, int)
+            and not isinstance(records_observed, bool)
+            and records_observed >= 0
+        ):
+            continue
         evidence.append(
             {
                 "check": name,
                 "status": "ok",
                 "detail": item.get("detail") or "",
                 "sample_type": item.get("sample_type") or "",
+                "semantic_check": CREDENTIAL_PROMOTION_SEMANTICS[name],
+                "records_observed": records_observed,
             }
         )
     return evidence
 
 
-def _funded_promotion_evidence(funded_check: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _public_promotion_evidence(public_checks: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    expected_semantics = {
+        "clob_time": "current_unix_time",
+        "gamma_markets": "market_identity",
+        "data_leaderboard": "leaderboard_identity",
+        "bridge_supported_assets": "supported_asset_identity",
+    }
+    if set(public_checks) != set(PUBLIC_PROMOTION_CHECKS):
+        return []
+    evidence: List[Dict[str, Any]] = []
+    for name in PUBLIC_PROMOTION_CHECKS:
+        item = public_checks.get(name)
+        if not isinstance(item, Mapping):
+            return []
+        if item.get("status") != "ok" or item.get("semantic_check") != expected_semantics[name]:
+            return []
+        evidence.append(
+            {
+                "check": name,
+                "status": "ok",
+                "semantic_check": expected_semantics[name],
+            }
+        )
+    return evidence
+
+
+def _funded_promotion_evidence(
+    funded_check: Mapping[str, Any],
+    *,
+    expected_source_revision: str,
+) -> List[Dict[str, Any]]:
+    # A historical/local report cannot establish a supported CLOB V2 mutation
+    # while the repository intentionally exposes no V2 order client.
+    if not POLYMARKET_LIVE_MUTATIONS_SUPPORTED:
+        return []
     audit = funded_check.get("audit") if isinstance(funded_check.get("audit"), Mapping) else {}
+    account_read = (
+        funded_check.get("account_authenticated_read_preflight")
+        if isinstance(funded_check.get("account_authenticated_read_preflight"), Mapping)
+        else {}
+    )
+    account = funded_check.get("account_preflight") if isinstance(funded_check.get("account_preflight"), Mapping) else {}
+    guards = funded_check.get("execution_guards") if isinstance(funded_check.get("execution_guards"), Mapping) else {}
+    geoblock = funded_check.get("geoblock_preflight") if isinstance(funded_check.get("geoblock_preflight"), Mapping) else {}
+    source_gate = (
+        funded_check.get("source_revision_gate")
+        if isinstance(funded_check.get("source_revision_gate"), Mapping)
+        else {}
+    )
+    recovery = audit.get("recovery_journal") if isinstance(audit.get("recovery_journal"), Mapping) else {}
     order_id = str(audit.get("order_id") or "").strip()
     post_cancel_verified = bool(audit.get("post_cancel_verified"))
     if funded_check.get("status") != "ok" or funded_check.get("live_action") is not True:
         return []
+    if funded_check.get("manual_reconciliation_required") is not False:
+        return []
     if not order_id or not post_cancel_verified:
+        return []
+    if not (
+        account_read.get("status") == "pass"
+        and account_read.get("same_trading_client") is True
+        and account_read.get("account_identity_present") is True
+    ):
+        return []
+    if not (
+        account.get("status") == "pass"
+        and account.get("sufficient_balance") is True
+        and account.get("sufficient_allowance") is True
+    ):
+        return []
+    if not (
+        guards.get("status") == "pass"
+        and guards.get("post_only") is True
+        and guards.get("time_in_force") == "GTC"
+        and guards.get("maker_price_verified") is True
+    ):
+        return []
+    if not (geoblock.get("status") == "pass" and geoblock.get("blocked") is False):
+        return []
+    if not (
+        source_gate.get("status") == "pass"
+        and source_gate.get("clean") is True
+        and source_gate.get("matches_initial_revision") is True
+        and source_gate.get("repository_origin") == EXPECTED_REPOSITORY_ORIGIN
+        and bool(expected_source_revision)
+        and source_gate.get("source_revision") == expected_source_revision
+    ):
+        return []
+    if not (
+        recovery.get("status") == "resolved"
+        and recovery.get("stage") == "cancel_verified"
+        and recovery.get("resolved") is True
+    ):
         return []
     required_sections = ("placed", "cancel", "post_cancel_order")
     if not all(isinstance(audit.get(section), Mapping) for section in required_sections):
+        return []
+    if extract_order_id(audit["placed"]) != order_id:
+        return []
+    if not cancel_response_contains(audit["cancel"], order_id):
+        return []
+    if not order_state_is_cancelled(audit["post_cancel_order"], order_id):
+        return []
+    if not order_zero_fill_evidence(audit["post_cancel_order"], order_id)["verified"]:
         return []
     return [
         {
@@ -2786,6 +2985,13 @@ def _funded_promotion_evidence(funded_check: Mapping[str, Any]) -> List[Dict[str
             "status": "ok",
             "order_id_present": True,
             "post_cancel_verified": True,
+            "post_only_verified": True,
+            "same_account_read_verified": True,
+            "geoblock_verified": True,
+            "balance_allowance_verified": True,
+            "zero_fill_verified": True,
+            "recovery_journal_resolved": True,
+            "source_revision_verified": True,
             "audit_sections": list(required_sections),
         }
     ]
@@ -3088,7 +3294,6 @@ def _review_coverage_tier_mapping(summary: Mapping[str, Any], promotion: Mapping
                 "required_evidence": [
                     "ok clob_l2_orders authenticated read",
                     "ok relayer_recent_transactions authenticated read",
-                    "or ok user_websocket_connect authenticated stream",
                 ],
             },
             "funded_live_verified": {
@@ -3097,6 +3302,7 @@ def _review_coverage_tier_mapping(summary: Mapping[str, Any], promotion: Mapping
                 "review_effect": "candidate_evidence_only" if funded_can_promote else "blocked",
                 "can_promote_from_report": funded_can_promote,
                 "required_evidence": [
+                    "same-report accepted non-mutating authenticated read",
                     "funded_live_order_check.status == ok",
                     "funded_live_order_check.live_action == true",
                     "audit order id",

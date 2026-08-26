@@ -16,7 +16,13 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
+from core.models import (
+    AppConfig,
+    CopyTradeSettings,
+    PaperTradeRecord,
+    PriceAlert,
+    WalletWatch,
+)
 from core.storage import ConfigConflictError, ConfigLoadError, load_config, save_config
 from market_adapters.base import MarketAdapter
 from market_adapters.types import (
@@ -369,6 +375,20 @@ class WebApiTests(unittest.TestCase):
     ) -> tuple[int, dict]:
         data = raw
         request_headers = dict(headers or {})
+        route_parts = path.strip("/").split("/")
+        durable_mutation = method == "POST" and (
+            path in {"/api/alerts", "/api/wallets", "/api/paper/orders"}
+            or (
+                len(route_parts) == 5
+                and route_parts[:2] == ["api", "markets"]
+                and route_parts[3] == "orders"
+            )
+        )
+        if durable_mutation:
+            request_headers.setdefault(
+                "Idempotency-Key",
+                f"test-{threading.get_ident()}-{time.time_ns()}",
+            )
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             request_headers.setdefault("Content-Type", "application/json")
@@ -1007,6 +1027,290 @@ class WebApiTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 server_thread.join(timeout=5)
+
+    def test_durable_create_routes_require_header_and_wallet_replays_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            try:
+                for route in ("/api/alerts", "/api/wallets", "/api/paper/orders"):
+                    with self.subTest(route=route):
+                        status, response = self._request_json(
+                            base_url,
+                            route,
+                            method="POST",
+                            payload={},
+                            headers={"Idempotency-Key": ""},
+                        )
+                        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+                        self.assertIn("Idempotency-Key header is required", response["error"]["message"])
+
+                key = "wallet-create-replay-1"
+                request = {"wallet": WALLET, "display_name": "Primary"}
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload=request,
+                    headers={"Idempotency-Key": key},
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload={"display_name": "Primary", "wallet": WALLET},
+                    headers={"Idempotency-Key": key},
+                )
+                conflict_status, conflict = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload={"wallet": WALLET_2, "display_name": "Different"},
+                    headers={"Idempotency-Key": key},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            stored = load_config(config_path)
+            raw_config = config_path.read_text(encoding="utf-8")
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertEqual(first, replay)
+        self.assertEqual(conflict_status, HTTPStatus.CONFLICT)
+        self.assertEqual(conflict["error"]["code"], "idempotency_conflict")
+        self.assertEqual(len(stored.wallets), 1)
+        self.assertEqual(len(stored.mutation_journal), 1)
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+        self.assertNotIn(key, raw_config)
+
+    def test_paper_order_replay_records_only_one_trade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.selected_market_id = "kalshi"
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            request = {
+                "market_id": "kalshi",
+                "contract_id": "KX-IDEMPOTENT:YES",
+                "side": "BUY",
+                "size": 2,
+                "limit_price": 0.4,
+            }
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/paper/orders",
+                    method="POST",
+                    payload=request,
+                    headers={"Idempotency-Key": "paper-order-replay-1"},
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/paper/orders",
+                    method="POST",
+                    payload=request,
+                    headers={"Idempotency-Key": "paper-order-replay-1"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertEqual(first, replay)
+        self.assertEqual(len(stored.paper_trades), 1)
+        self.assertEqual(len(stored.mutation_journal), 1)
+
+    def test_live_order_management_replays_success_and_conflicts_on_body_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+            calls: list[tuple[str, dict]] = []
+
+            def manage_orders(operation, **kwargs):
+                calls.append((operation, kwargs))
+                return {"status": "cancelled", "order_id": kwargs.get("order_id")}
+
+            adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload={"order_id": "order-1"},
+                    headers={"Idempotency-Key": "live-cancel-1"},
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload={"order_id": "order-1"},
+                    headers={"Idempotency-Key": "live-cancel-1"},
+                )
+                conflict_status, conflict = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload={"order_id": "order-2"},
+                    headers={"Idempotency-Key": "live-cancel-1"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertEqual(first, replay)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(conflict_status, HTTPStatus.CONFLICT)
+        self.assertEqual(conflict["error"]["code"], "idempotency_conflict")
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+
+    def test_ambiguous_live_order_requires_reconciliation_before_one_authorized_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order", "decrease_order")  # type: ignore[attr-defined]
+            calls = 0
+
+            def ambiguous_manage(_operation, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise TimeoutError("response lost after transmission")
+
+            adapter.manage_orders = ambiguous_manage  # type: ignore[method-assign]
+            request = {"order_id": "order-ambiguous"}
+            headers = {"Idempotency-Key": "live-ambiguous-1"}
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                mutation_id = first["error"]["details"]["mutation_id"]
+                reconcile_status, reconciled = self._request_json(
+                    base_url,
+                    "/api/mutations/reconcile",
+                    method="POST",
+                    payload={
+                        "mutation_id": mutation_id,
+                        "resolution": "confirmed_not_dispatched",
+                        "confirm_reconciliation": "I_VERIFIED_VENUE_ORDER_HISTORY",
+                    },
+                )
+
+                def successful_manage(operation, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    return {"status": "cancelled", "operation": operation, "order_id": kwargs.get("order_id")}
+
+                adapter.manage_orders = successful_manage  # type: ignore[method-assign]
+                retry_status, retry = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+
+                reduce_status, reduce_response = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/decrease_order",
+                    method="POST",
+                    payload={"order_id": "order-2", "reduce_by": 1},
+                    headers={"Idempotency-Key": "kalshi-reduce-by-rejected"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(first["error"]["code"], "live_mutation_outcome_ambiguous")
+        self.assertEqual(replay_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(replay["error"]["code"], "live_mutation_reconciliation_required")
+        self.assertEqual(calls, 2)
+        self.assertEqual(reconcile_status, HTTPStatus.OK)
+        self.assertEqual(reconciled["reconciled"]["state"], "retryable")
+        self.assertEqual(retry_status, HTTPStatus.OK)
+        self.assertEqual(retry["data"]["status"], "cancelled")
+        self.assertEqual(reduce_status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("reduce_by is disabled", reduce_response["error"]["message"])
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+        self.assertEqual(len(stored.mutation_journal), 1)
+
+    def test_server_drain_rejects_new_mutations_without_disabling_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            try:
+                self.assertTrue(server.begin_drain())
+                self.assertFalse(server.begin_drain())
+                status, response = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload={"wallet": WALLET},
+                    headers={"Idempotency-Key": "drain-wallet-1"},
+                )
+                health_status, health = self._request_json(base_url, "/api/health")
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(response["error"]["code"], "server_draining")
+        self.assertEqual(health_status, HTTPStatus.OK)
+        self.assertTrue(health["readiness"]["admission"]["draining"])
+        self.assertFalse(health["ready"])
 
     def test_custom_frontend_directory_is_confined_to_deployment_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5298,11 +5602,38 @@ class WebApiTests(unittest.TestCase):
 
     def test_polymarket_coverage_route_includes_guarded_report_promotion_inventory(self) -> None:
         report = {
+            "ok": True,
             "generated_at": 123.0,
             "market_id": "polymarket",
             "mode": "strict_cli",
+            "source_provenance": {
+                "schema_version": 1,
+                "repository": "market-sentinel",
+                "repository_origin": "github.com/yunushan/market-sentinel",
+                "source_revision": "a" * 40,
+                "initial_revision": "a" * 40,
+                "final_revision": "a" * 40,
+                "initial_clean": True,
+                "final_clean": True,
+                "stable": True,
+            },
+            "public_checks": {
+                "clob_time": {"status": "ok", "semantic_check": "current_unix_time"},
+                "gamma_markets": {"status": "ok", "semantic_check": "market_identity"},
+                "data_leaderboard": {"status": "ok", "semantic_check": "leaderboard_identity"},
+                "bridge_supported_assets": {
+                    "status": "ok",
+                    "semantic_check": "supported_asset_identity",
+                },
+            },
             "authenticated_read_checks": {
-                "user_websocket_connect": {"status": "ok", "detail": "connected", "sample_type": "dict"}
+                "clob_l2_orders": {
+                    "status": "ok",
+                    "detail": "read",
+                    "sample_type": "list",
+                    "semantic_check": "authenticated_order_collection",
+                    "records_observed": 0,
+                }
             },
             "funded_live_order_check": {"status": "dry_run", "live_action": False},
             "stage_gates": {
@@ -5332,7 +5663,7 @@ class WebApiTests(unittest.TestCase):
                     self.assertEqual(status, 200)
                     promotion = coverage["stored_live_validation_report_promotion"]
                     self.assertFalse(promotion["static_coverage_mutated"])
-                    self.assertEqual(promotion["credential_live_verified"], "yes")
+                    self.assertEqual(promotion["credential_live_verified"], "candidate_only")
                     self.assertEqual(promotion["funded_live_verified"], "blocked")
                     self.assertEqual(promotion["counts"]["credential_candidates"], 1)
                     authenticated_category = [

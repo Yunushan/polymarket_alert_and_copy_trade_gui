@@ -12,8 +12,9 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 from stat import S_IFREG
-from unittest.mock import patch
+from unittest.mock import call, patch
 from urllib.error import HTTPError
+from urllib.request import Request
 
 from core.deployment_identity import frontend_tree_sha256
 from scripts.backup_state import create_backup
@@ -32,6 +33,8 @@ from scripts.verify_production_deployment import (
     check_source_revision,
     check_systemd,
     _fsync_parent_directory,
+    _RejectRedirects,
+    _validated_public_origin,
     build_evidence,
     source_identity,
     main,
@@ -680,6 +683,73 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertEqual(evidence["status"], "failed")
         self.assertEqual(evidence["checks"][-1]["name"], "evidence_output")
 
+    def test_evidence_pre_write_provenance_stays_bound_to_deployment_root(self) -> None:
+        stdout = io.StringIO()
+        deployment_root = Path("deployed-root")
+        clean = {
+            "project_version": "1.0.11",
+            "git_revision": TEST_SOURCE_REVISION,
+            "git_revision_status": "ok",
+            "git_worktree_status": "clean",
+        }
+        wrong_checkout = {
+            "project_version": "1.0.11",
+            "git_revision": "c" * 40,
+            "git_revision_status": "ok",
+            "git_worktree_status": "clean",
+        }
+
+        def identify(root: Path = deployment.PROJECT_ROOT) -> dict[str, str]:
+            return clean if root == deployment_root else wrong_checkout
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "verify_production_deployment.py",
+                    "--skip-systemd",
+                    "--expected-version",
+                    "1.0.11",
+                    "--expected-source-revision",
+                    TEST_SOURCE_REVISION,
+                    "--expected-frontend-sha256",
+                    TEST_FRONTEND_SHA256,
+                    "--deployment-root",
+                    str(deployment_root),
+                    "--output",
+                    "deployment.json",
+                ],
+            ),
+            patch(
+                "scripts.verify_production_deployment.source_identity",
+                side_effect=identify,
+            ) as identity,
+            patch(
+                "scripts.verify_production_deployment.check_loopback",
+                return_value={"name": "loopback_health", "status": "pass"},
+            ),
+            patch(
+                "scripts.verify_production_deployment.check_loopback_metrics",
+                return_value={"name": "loopback_metrics", "status": "pass"},
+            ),
+            patch(
+                "scripts.verify_production_deployment.check_evidence_output_directory",
+                return_value={"name": "evidence_output_directory", "status": "pass"},
+            ),
+            patch("scripts.verify_production_deployment.write_evidence") as write,
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(main(), 0)
+
+        self.assertEqual(identity.call_args_list, [call(deployment_root)] * 3)
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence["status"], "ok")
+        self.assertEqual(evidence["source"], clean)
+        pre_write = next(check for check in evidence["checks"] if check["name"] == "source_revision_pre_write")
+        self.assertEqual(pre_write["status"], "pass")
+        write.assert_called_once()
+
     def test_verifier_requires_an_expected_release_version(self) -> None:
         stdout = io.StringIO()
         with (
@@ -752,6 +822,12 @@ class ProductionDeploymentTests(unittest.TestCase):
                     TEST_FRONTEND_SHA256,
                     "--backup-directory",
                     str(backup_directory),
+                    "--evidence-run-id",
+                    "7",
+                    "--evidence-run-attempt",
+                    "1",
+                    "--evidence-nonce",
+                    f"{TEST_SOURCE_REVISION}:7:1",
                 ],
             ),
             patch("scripts.verify_production_deployment.source_identity", return_value=source),
@@ -1163,6 +1239,27 @@ class ProductionDeploymentTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "loopback API request was accepted"):
                 check_loopback_token_auth("http://127.0.0.1:8765/api/health", 1.0)
+
+
+    def test_authenticated_public_redirect_is_rejected_before_credentials_can_move(self) -> None:
+        request = Request(
+            "https://markets.example.net/api/health",
+            headers={"Authorization": "Basic secret"},
+        )
+        with self.assertRaisesRegex(RuntimeError, "redirects are forbidden"):
+            _RejectRedirects().redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://attacker.example/api/health",
+            )
+
+    def test_private_loopback_and_link_local_public_origins_are_rejected(self) -> None:
+        for origin in ("https://127.0.0.1", "https://10.0.0.4", "https://169.254.1.2", "https://[::1]"):
+            with self.subTest(origin=origin), self.assertRaises(ValueError):
+                _validated_public_origin(origin)
 
 
 if __name__ == "__main__":

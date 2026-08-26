@@ -718,7 +718,7 @@ class AppLogicTests(unittest.TestCase):
     def test_dependency_version_marks_importable_versionless_module_installed(self) -> None:
         with patch("app.importlib_metadata.version", side_effect=importlib_metadata.PackageNotFoundError):
             with patch("app.importlib.import_module", return_value=object()):
-                installed = App._get_installed_version(object(), "py-clob-client")
+                installed = App._get_installed_version(object(), "py-clob-client-v2")
 
         self.assertEqual(installed, "installed")
 
@@ -2042,75 +2042,12 @@ class AppLogicTests(unittest.TestCase):
         self.assertIn("size=9.6154", message)
         self.assertIn("price<= 0.5200", message)
 
-    def test_copy_trade_live_runs_adapter_preflight_before_trader(self) -> None:
+    def test_copy_trade_live_fails_closed_for_clob_v2_before_any_side_effect(self) -> None:
         harness = CopyHarness()
         harness.cfg.copytrading.live = True
-        harness._geoblock_cache = {"blocked": False}
-        harness.polymarket_adapter.preflight_error = MarketConfigurationError("central gate blocked")
-        harness._get_trader = lambda: self.fail("trader should not be created when preflight blocks")
-        item = {
-            "proxyWallet": WALLET,
-            "side": "BUY",
-            "asset": "token-1234567890",
-            "timestamp": int(time.time()),
-            "size": "100",
-            "price": "0.45",
-        }
-
-        App._copy_trade_from_activity(harness, item)
-
-        self.assertEqual(len(harness.polymarket_adapter.preflight_calls), 1)
-        order, feature_name = harness.polymarket_adapter.preflight_calls[0]
-        self.assertEqual(feature_name, "live copy trading")
-        self.assertEqual(order.contract_id, "token-1234567890")
-        kind, message = harness.ui_queue.get_nowait()
-        self.assertEqual(kind, "log")
-        self.assertIn("preflight blocked", message)
-
-    def test_copy_trade_live_geoblock_failure_and_unknown_status_fail_before_dispatch(self) -> None:
-        for result, error, expected_code in (
-            (None, OSError("network detail must not matter"), "geoblock_check_failure"),
-            ({}, None, "geoblock_status_unknown"),
-            ({"blocked": "false"}, None, "geoblock_status_unknown"),
-            ({"blocked": 0}, None, "geoblock_status_unknown"),
-            ({"blocked": 1}, None, "geoblock_status_unknown"),
-        ):
-            with self.subTest(expected_code=expected_code):
-                harness = CopyHarness()
-                harness.cfg.copytrading.live = True
-                harness.polymarket_adapter.geoblock_result = result
-                harness.polymarket_adapter.geoblock_error = error
-                harness._get_trader = lambda: self.fail("trader must not be created")
-                persisted_dispatches = []
-
-                outcome = App._copy_trade_from_activity(
-                    harness,
-                    {
-                        "proxyWallet": WALLET,
-                        "side": "BUY",
-                        "asset": "token-1234567890",
-                        "timestamp": int(time.time()),
-                        "size": "1",
-                        "price": "0.45",
-                    },
-                    market_id="polymarket",
-                    before_live_dispatch=persisted_dispatches.append,
-                )
-
-                self.assertEqual(outcome.state, "retryable")
-                self.assertEqual(outcome.code, expected_code)
-                self.assertEqual(persisted_dispatches, [])
-
-    def test_copy_trade_live_aborts_when_dispatch_intent_cannot_be_persisted(self) -> None:
-        harness = CopyHarness()
-        harness.cfg.copytrading.live = True
-        trader_calls = []
-
-        class Trader:
-            def place_limit_order(self, **kwargs):
-                trader_calls.append(kwargs)
-
-        harness._get_trader = Trader
+        harness.polymarket_adapter.geoblock_error = AssertionError("geoblock must not run")
+        harness._get_trader = lambda: self.fail("legacy trader must not be created")
+        persisted_dispatches = []
 
         outcome = App._copy_trade_from_activity(
             harness,
@@ -2123,43 +2060,14 @@ class AppLogicTests(unittest.TestCase):
                 "price": "0.45",
             },
             market_id="polymarket",
-            before_live_dispatch=lambda _dispatch: (_ for _ in ()).throw(OSError("disk full")),
+            before_live_dispatch=persisted_dispatches.append,
         )
 
-        self.assertEqual(outcome.state, "retryable")
-        self.assertEqual(outcome.code, "dispatch_intent_persistence_failure")
-        self.assertEqual(trader_calls, [])
-
-    def test_copy_trade_live_marks_intent_before_ambiguous_venue_failure(self) -> None:
-        harness = CopyHarness()
-        harness.cfg.copytrading.live = True
-        events = []
-
-        class Trader:
-            def place_limit_order(self, **kwargs):
-                events.append(("venue", kwargs))
-                raise TimeoutError("response lost")
-
-        harness._get_trader = Trader
-
-        outcome = App._copy_trade_from_activity(
-            harness,
-            {
-                "proxyWallet": WALLET,
-                "side": "BUY",
-                "asset": "token-1234567890",
-                "timestamp": int(time.time()),
-                "size": "1",
-                "price": "0.45",
-            },
-            market_id="polymarket",
-            before_live_dispatch=lambda dispatch: events.append(("persist", dispatch)),
-        )
-
-        self.assertEqual([event[0] for event in events], ["persist", "venue"])
-        self.assertEqual(outcome.state, "ambiguous")
-        self.assertEqual(outcome.code, "live_dispatch_ambiguous")
-        self.assertEqual(outcome.dispatch["contract_id"], "token-1234567890")
+        self.assertEqual(outcome.state, "rejected")
+        self.assertEqual(outcome.code, "polymarket_clob_v2_migration_required")
+        self.assertIn("CLOB V2", outcome.message)
+        self.assertEqual(persisted_dispatches, [])
+        self.assertEqual(harness.polymarket_adapter.preflight_calls, [])
 
     def test_source_market_change_is_retryable_and_never_uses_selected_adapter(self) -> None:
         harness = CopyHarness()
@@ -2311,10 +2219,10 @@ class AppLogicTests(unittest.TestCase):
 
         self.assertEqual(entry.state, "retryable")
         self.assertGreater(entry.replay_authorized_at, old_timestamp)
-        self.assertEqual(outcome.state, "completed")
-        self.assertEqual(outcome.code, "live_dispatch_completed")
-        self.assertEqual(len(persisted_dispatches), 1)
-        self.assertEqual(len(trader_calls), 1)
+        self.assertEqual(outcome.state, "rejected")
+        self.assertEqual(outcome.code, "polymarket_clob_v2_migration_required")
+        self.assertEqual(persisted_dispatches, [])
+        self.assertEqual(trader_calls, [])
 
     def test_live_copy_requires_fresh_executable_side_orderbook_quote(self) -> None:
         harness = CopyHarness()

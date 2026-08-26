@@ -6,6 +6,20 @@ and deterministic browser-smoke fixtures. It validates shape and mode before a r
 stored. It does not promote a report to production verification by itself; promotion is
 still handled by the live report promotion guard.
 
+Local candidate eligibility is cumulative and fail-closed. Credential candidate review requires
+`report.ok=true`, the exact four successful semantic public checks, a stable
+clean source revision bound to the canonical `github.com/yunushan/market-sentinel`
+origin, and an accepted credentialed read. Funded promotion is unconditionally
+blocked while the repository exposes no reviewed CLOB V2 mutation client. After
+that migration, funded candidate review would additionally require a source
+revision recheck immediately before execution, a same-trading-client
+authenticated order read, geoblock clearance, sufficient balance and allowance,
+post-only maker guards, exact order identity, zero fills, explicit canceled
+state, and a resolved durable recovery journal. Local reports
+remain evidence candidates only and do not award production-readiness points
+without a trusted workflow and exact-byte attestation. Local summary and inventory
+labels use `candidate_only`, never `yes` or `verified`.
+
 ## Accepted Modes
 
 | Mode | Intended producer | Storage behavior |
@@ -25,6 +39,7 @@ They must be JSON objects with:
 | --- | --- |
 | `mode` | Required non-empty string and one of the accepted modes. |
 | `generated_at` | Optional numeric timestamp; missing values are accepted with a warning. |
+| `source_provenance.repository_origin` | Canonical local origin binding. A stable strict report requires exactly `github.com/yunushan/market-sentinel`; this is not a network or protected-main attestation. |
 | `stage_gates` | Required object. |
 | `stage_gates.credentialed_read_ok` | Optional boolean. Non-boolean values are errors. |
 | `stage_gates.safe_to_attempt_funded_order` | Optional boolean. Non-boolean values are errors. |
@@ -82,8 +97,8 @@ Deterministic schema fixtures live in `tests/fixtures/polymarket/live_reports/`:
 
 | Fixture | Expected result |
 | --- | --- |
-| `valid_credentialed_read.json` | Accepted `strict_cli`; can support credential promotion because it contains accepted authenticated-read evidence. |
-| `valid_funded_audit.json` | Accepted `strict_cli`; can support funded promotion because it contains a real order/cancel audit shape. |
+| `valid_credentialed_read.json` | Accepted `strict_cli`; becomes a local `candidate_only` credential evidence report because it contains accepted authenticated-read evidence. |
+| `valid_funded_audit.json` | Accepted `strict_cli` as a historical/schema fixture; funded promotion remains blocked because the current implementation does not support CLOB V2 mutations. |
 | `valid_dry_run.json` | Accepted `strict_cli`; funded promotion remains blocked. |
 | `valid_runbook.json` | Accepted runbook mode; all promotion remains blocked. |
 | `valid_browser_smoke.json` | Accepted browser-smoke seed; all promotion remains blocked. |

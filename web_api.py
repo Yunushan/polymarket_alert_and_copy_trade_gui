@@ -13,6 +13,7 @@ import os
 import posixpath
 import re
 import secrets
+import signal
 import sys
 import tempfile
 import threading
@@ -29,7 +30,16 @@ try:
 except ModuleNotFoundError:  # Python 3.10 compatibility.
     import tomli as tomllib
 
-from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
+from core.models import (
+    AppConfig,
+    CopyTradeSettings,
+    MutationJournalEntry,
+    PaperTradeRecord,
+    PriceAlert,
+    UIDesign,
+    WalletWatch,
+    bounded_mutation_result,
+)
 from core.config_security import assert_no_persisted_secrets, is_sensitive_display_key
 from core.deployment_identity import capture_runtime_identity
 from core.storage import ConfigConflictError, DEFAULT_CONFIG_PATH, load_config, save_config
@@ -147,6 +157,7 @@ HTTP_RESERVED_READ_WORKERS = 4
 HTTP_CONNECTION_TIMEOUT_SECONDS = 15.0
 HTTP_OVERLOAD_RETRY_AFTER_SECONDS = 1
 HTTP_MUTATION_LOCK_TIMEOUT_SECONDS = 5.0
+HTTP_MUTATION_DRAIN_TIMEOUT_SECONDS = 10.0
 HTTP_RESPONSE_CHUNK_BYTES = 32 * 1024
 LOCAL_READINESS_CACHE_SECONDS = 5.0
 MAX_READINESS_JSON_STORE_BYTES = 64 * 1024 * 1024
@@ -166,6 +177,14 @@ IDEMPOTENT_MUTATION_ROUTES = frozenset(
         "/api/polymarket/live-validation/promotion-proposal/snapshots",
     }
 )
+LOCAL_DURABLE_CREATE_ROUTES = frozenset(
+    {
+        "/api/alerts",
+        "/api/wallets",
+        "/api/paper/orders",
+    }
+)
+LIVE_MUTATION_RECONCILIATION_CONFIRMATION = "I_VERIFIED_VENUE_ORDER_HISTORY"
 
 
 class HttpRequestMetrics:
@@ -415,6 +434,7 @@ API_ROUTES = {
         "/api/health",
         "/api/state",
         "/api/config",
+        "/api/mutations",
         "/api/markets",
         "/api/markets/support-matrix",
         "/api/markets/{market_id}/support",
@@ -488,6 +508,7 @@ API_ROUTES = {
         "/api/paper/marks/refresh-selected",
         "/api/paper/marks/clear",
         "/api/paper/marks/clear-selected",
+        "/api/mutations/reconcile",
         "/api/polymarket/users/mdd/cache/purge",
         "/api/polymarket/live-validation/reports",
         "/api/polymarket/live-validation/decisions",
@@ -640,6 +661,143 @@ def _validated_idempotency_key(headers: Mapping[str, Any], payload: Mapping[str,
     if not key:
         return ""
     return key
+
+
+def _is_live_order_management_route(method: str, path: str) -> bool:
+    parts = str(path or "").strip("/").split("/")
+    return (
+        str(method or "").strip().upper() == "POST"
+        and len(parts) == 5
+        and parts[:2] == ["api", "markets"]
+        and parts[3] == "orders"
+        and bool(parts[2])
+        and bool(parts[4])
+    )
+
+
+def _is_general_durable_mutation(method: str, path: str) -> bool:
+    return (
+        str(method or "").strip().upper() == "POST"
+        and (path in LOCAL_DURABLE_CREATE_ROUTES or _is_live_order_management_route(method, path))
+    )
+
+
+def _mutation_key_hash(idempotency_key: str) -> str:
+    return hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
+
+
+def _mutation_request_hash(payload: Mapping[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            dict(payload),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Mutation request must contain canonical JSON values.") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _mutation_journal_entry(
+    cfg: AppConfig,
+    idempotency_key: str,
+) -> Optional[MutationJournalEntry]:
+    key_hash = _mutation_key_hash(idempotency_key)
+    return next((entry for entry in cfg.mutation_journal if entry.key_hash == key_hash), None)
+
+
+def _new_mutation_journal_entry(
+    idempotency_key: str,
+    method: str,
+    path: str,
+    payload: Mapping[str, Any],
+    *,
+    live: bool,
+) -> MutationJournalEntry:
+    return MutationJournalEntry(
+        key_hash=_mutation_key_hash(idempotency_key),
+        method=str(method or "").strip().upper(),
+        path=str(path or "").strip(),
+        request_hash=_mutation_request_hash(payload),
+        live=bool(live),
+    )
+
+
+def _assert_mutation_request_matches(
+    entry: MutationJournalEntry,
+    method: str,
+    path: str,
+    payload: Mapping[str, Any],
+) -> None:
+    request_hash = _mutation_request_hash(payload)
+    if not (
+        hmac.compare_digest(entry.method, str(method or "").strip().upper())
+        and hmac.compare_digest(entry.path, str(path or "").strip())
+        and hmac.compare_digest(entry.request_hash, request_hash)
+    ):
+        raise IdempotencyConflictError(
+            "The Idempotency-Key was already used for a different route or request body."
+        )
+
+
+def _stored_mutation_result(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    sanitized = sanitize_audit_value(dict(payload))
+    stored = bounded_mutation_result(sanitized)
+    try:
+        assert_no_persisted_secrets(stored)
+    except ValueError:
+        encoded = json.dumps(
+            stored,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return {
+            "ok": True,
+            "mutation_result": {
+                "stored": "receipt_only",
+                "reason": "sensitive_fields_were_redacted",
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            },
+        }
+    return stored
+
+
+def mutation_journal_payload(cfg: AppConfig) -> Dict[str, Any]:
+    entries = sorted(
+        cfg.mutation_journal,
+        key=lambda item: (item.updated_at, item.created_at, item.id),
+        reverse=True,
+    )
+    return {
+        "entries": [
+            {
+                "id": entry.id,
+                "method": entry.method,
+                "path": entry.path,
+                "live": entry.live,
+                "state": entry.state,
+                "response_status": entry.response_status or None,
+                "outcome_code": entry.outcome_code,
+                "outcome_message": entry.outcome_message,
+                "created_at": entry.created_at,
+                "updated_at": entry.updated_at,
+                "replay_authorized_at": entry.replay_authorized_at or None,
+            }
+            for entry in entries
+        ],
+        "counts": {
+            "total": len(entries),
+            "unresolved": sum(1 for entry in entries if entry.state in {"pending", "ambiguous"}),
+        },
+    }
+
+
+class IdempotencyConflictError(RuntimeError):
+    """Raised when one client key is reused for a different mutation."""
 
 
 def api_error_payload(
@@ -1539,6 +1697,7 @@ def runtime_readiness_payload(
             "mutation_saturated": mutations_in_flight >= mutation_capacity,
             "ready": (
                 reserved >= 1
+                and not bool(admission.get("draining", False))
                 and requests_in_flight < max_workers
                 and mutations_in_flight < mutation_capacity
                 and int(admission.get("mutations_active") or 0) <= 1
@@ -4851,6 +5010,14 @@ def market_order_management_payload(
         )
     if not isinstance(payload, Mapping):
         raise ValueError("Order-management payload must be a JSON object.")
+    if (
+        normalized_market_id == "kalshi"
+        and normalized_operation == "decrease_order"
+        and payload.get("reduce_by") not in (None, "")
+    ):
+        raise ValueError(
+            "Kalshi reduce_by is disabled through the web API because stale quantities can over-reduce a live order; use an explicit reduce_to value."
+        )
     kwargs: Dict[str, Any] = {
         "market_id": str(payload.get("market_id") or payload.get("exchange_market_id") or "").strip(),
         "instructions": payload.get("instructions"),
@@ -5272,21 +5439,57 @@ class ReactGuiServer(ThreadingHTTPServer):
         self._worker_slots = threading.BoundedSemaphore(worker_limit)
         self._mutation_slots = threading.BoundedSemaphore(mutation_limit)
         self.mutation_lock = threading.RLock()
+        self._draining = threading.Event()
+        self._drain_condition = threading.Condition()
+        self._admitted_mutations = 0
         self._readiness_cache_lock = threading.Lock()
         self._readiness_cache_at = 0.0
         self._readiness_cache: Dict[str, Any] = {}
 
     def try_admit_mutation(self) -> bool:
         """Bound mutation body readers and lock waiters below the HTTP worker pool."""
+        if self._draining.is_set():
+            return False
         if not self._mutation_slots.acquire(blocking=False):
             self.http_metrics.record_mutation_admission_rejection()
             return False
+        with self._drain_condition:
+            if self._draining.is_set():
+                self._mutation_slots.release()
+                return False
+            self._admitted_mutations += 1
         self.http_metrics.mutation_admitted()
         return True
 
     def finish_mutation_admission(self) -> None:
         self.http_metrics.mutation_finished()
+        with self._drain_condition:
+            self._admitted_mutations = max(0, self._admitted_mutations - 1)
+            if self._admitted_mutations == 0:
+                self._drain_condition.notify_all()
         self._mutation_slots.release()
+
+    @property
+    def is_draining(self) -> bool:
+        return self._draining.is_set()
+
+    def begin_drain(self) -> bool:
+        """Stop admitting mutations and report whether this call began the drain."""
+
+        with self._drain_condition:
+            already_draining = self._draining.is_set()
+            self._draining.set()
+            return not already_draining
+
+    def wait_for_mutation_drain(self, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        with self._drain_condition:
+            while self._admitted_mutations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._drain_condition.wait(timeout=remaining)
+            return True
 
     def readiness_snapshot(self) -> Dict[str, Any]:
         """Return cached local probes combined with current admission counters."""
@@ -5305,6 +5508,7 @@ class ReactGuiServer(ThreadingHTTPServer):
                 "max_mutation_workers": self.max_mutation_workers,
                 "reserved_read_workers": self.reserved_read_workers,
                 "mutation_lock_timeout_seconds": self.mutation_lock_timeout_seconds,
+                "draining": self.is_draining,
             },
             self.wallet_polling,
         )
@@ -5552,6 +5756,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/config":
                 self._send_json(HTTPStatus.OK, config_payload(cfg))
+                return
+            if path == "/api/mutations":
+                self._send_json(HTTPStatus.OK, mutation_journal_payload(cfg))
                 return
             if path == "/api/markets":
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
@@ -5901,10 +6108,15 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         """Bound body parsing and lock wait without weakening mutation serialization."""
         if not self.app_server.try_admit_mutation():
             _discard_available_request_body(self)
+            draining = self.app_server.is_draining
             self._send_error(
                 HTTPStatus.SERVICE_UNAVAILABLE,
-                "mutation_admission_saturated",
-                "The mutation admission limit is saturated; read and health capacity remains reserved.",
+                "server_draining" if draining else "mutation_admission_saturated",
+                (
+                    "The server is draining and is not accepting new mutations."
+                    if draining
+                    else "The mutation admission limit is saturated; read and health capacity remains reserved."
+                ),
                 {"retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS},
                 retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
             )
@@ -5918,10 +6130,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             try:
                 payload = _read_json_body(self)
                 idempotency_key = _validated_idempotency_key(self.headers, payload)
-                durable_create = method == "POST" and path in IDEMPOTENT_MUTATION_ROUTES
-                if durable_create and not idempotency_key:
+                specialized_idempotency = method == "POST" and path in IDEMPOTENT_MUTATION_ROUTES
+                durable_mutation = _is_general_durable_mutation(method, path)
+                if specialized_idempotency and not idempotency_key:
                     raise ValueError("Idempotency-Key is required for this durable create route.")
-                if idempotency_key and not durable_create:
+                if durable_mutation and not str(self.headers.get("Idempotency-Key") or ""):
+                    raise ValueError("Idempotency-Key header is required for this durable mutation route.")
+                if idempotency_key and not (specialized_idempotency or durable_mutation):
                     raise ValueError("Idempotency-Key is not supported for this mutation route.")
             except json.JSONDecodeError:
                 self._send_error(HTTPStatus.BAD_REQUEST, "invalid_json", "Invalid JSON request body.")
@@ -5952,6 +6167,192 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         finally:
             self.app_server.finish_mutation_admission()
 
+    def _prepare_general_idempotent_mutation(
+        self,
+        cfg: AppConfig,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> tuple[Optional[MutationJournalEntry], bool]:
+        """Resolve replay/conflict state and persist the live dispatch barrier."""
+
+        live = _is_live_order_management_route(method, path)
+        route_parts = str(path or "").strip("/").split("/")
+        if (
+            live
+            and len(route_parts) == 5
+            and unquote(route_parts[2]).strip().lower() == "kalshi"
+            and unquote(route_parts[4]).strip().lower() == "decrease_order"
+            and payload.get("reduce_by") not in (None, "")
+        ):
+            raise ValueError(
+                "Kalshi reduce_by is disabled through the web API because stale quantities can over-reduce a live order; use an explicit reduce_to value."
+            )
+        if live and len(route_parts) == 5:
+            market_id = unquote(route_parts[2]).strip().lower()
+            operation = unquote(route_parts[4]).strip().lower()
+            require_market_enabled(cfg, market_id, "order management")
+            adapter = adapter_for_market(cfg, market_id, self.app_server.adapter_registry)
+            supported = tuple(
+                str(value).strip().lower()
+                for value in getattr(adapter, "order_management_operations", ())
+            )
+            if operation not in supported:
+                raise UnsupportedFeatureError(
+                    market_id,
+                    "order_management",
+                    f"{market_id} does not support order-management operation "
+                    f"{operation or '<empty>'}. Supported operations: {', '.join(supported) or 'none'}.",
+                )
+        entry = _mutation_journal_entry(cfg, idempotency_key)
+        if entry is not None:
+            _assert_mutation_request_matches(entry, method, path, payload)
+            if entry.state == "completed":
+                self._send_json(entry.response_status or HTTPStatus.OK, dict(entry.response))
+                return None, True
+            if entry.state == "rejected":
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    "mutation_rejected_after_reconciliation",
+                    "The reconciled mutation was discarded and cannot be retried with this Idempotency-Key.",
+                    {"mutation_id": entry.id, "state": entry.state},
+                )
+                return None, True
+            if live and entry.state == "retryable" and entry.replay_authorized_at:
+                entry.state = "pending"
+                entry.updated_at = int(time.time())
+                entry.replay_authorized_at = 0
+                entry.outcome_code = "manual_retry_started"
+                entry.outcome_message = "The operator-authorized retry is in progress."
+                self._save_config(cfg)
+                return entry, False
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_reconciliation_required" if entry.live else "mutation_reconciliation_required",
+                (
+                    "The previous live dispatch outcome is unresolved; inspect venue history and reconcile it before retrying."
+                    if entry.live
+                    else "The previous durable mutation outcome is unresolved and cannot be run again automatically."
+                ),
+                {
+                    "mutation_id": entry.id,
+                    "state": entry.state,
+                    "reconciliation_route": "/api/mutations/reconcile" if entry.live else None,
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return None, True
+
+        entry = _new_mutation_journal_entry(
+            idempotency_key,
+            method,
+            path,
+            payload,
+            live=live,
+        )
+        if live:
+            cfg.append_mutation_journal(entry)
+            self._save_config(cfg)
+        return entry, False
+
+    def _commit_local_idempotent_mutation(
+        self,
+        cfg: AppConfig,
+        entry: MutationJournalEntry,
+        response: Mapping[str, Any],
+        *,
+        status: int = HTTPStatus.OK,
+    ) -> None:
+        stored = _stored_mutation_result(response)
+        entry.state = "completed"
+        entry.response_status = int(status)
+        entry.response = stored
+        entry.outcome_code = "committed"
+        entry.outcome_message = "The local mutation and replay result were committed atomically."
+        entry.updated_at = int(time.time())
+        cfg.append_mutation_journal(entry)
+        self._save_config(cfg)
+        self._send_json(status, stored)
+
+    def _execute_live_order_management(
+        self,
+        cfg: AppConfig,
+        entry: MutationJournalEntry,
+        market_id: str,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Execute once behind a durable pending barrier; never auto-retry ambiguity."""
+
+        try:
+            result = market_order_management_payload(
+                cfg,
+                self.app_server.adapter_registry,
+                market_id,
+                operation,
+                payload,
+            )
+        except Exception as exc:
+            entry.state = "ambiguous"
+            entry.response_status = HTTPStatus.SERVICE_UNAVAILABLE
+            entry.response = {}
+            entry.outcome_code = "live_dispatch_outcome_unknown"
+            entry.outcome_message = (
+                "The live adapter returned without a provable non-dispatch outcome; venue reconciliation is required."
+            )
+            entry.updated_at = int(time.time())
+            try:
+                self._save_config(cfg)
+            except Exception as durability_exc:
+                print(
+                    "[web-gui] live mutation ambiguity could not be durably updated: "
+                    f"{type(durability_exc).__name__}"
+                )
+            print(
+                "[web-gui] live order-management outcome requires reconciliation: "
+                f"{type(exc).__name__}"
+            )
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_outcome_ambiguous",
+                "The live mutation may have reached the venue. It will not be retried automatically; reconcile venue history first.",
+                {
+                    "mutation_id": entry.id,
+                    "state": "ambiguous",
+                    "reconciliation_route": "/api/mutations/reconcile",
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+
+        stored = _stored_mutation_result(result)
+        entry.state = "completed"
+        entry.response_status = HTTPStatus.OK
+        entry.response = stored
+        entry.outcome_code = "live_dispatch_completed"
+        entry.outcome_message = "The live mutation result was durably recorded."
+        entry.updated_at = int(time.time())
+        try:
+            self._save_config(cfg)
+        except Exception as exc:
+            # The on-disk pending barrier remains fail-closed.  Do not expose
+            # success when its replay disposition was not durably committed.
+            print(f"[web-gui] live mutation result durability is uncertain: {type(exc).__name__}")
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_durability_uncertain",
+                "The venue returned a result, but its replay record was not durably committed. Reconcile before retrying.",
+                {
+                    "mutation_id": entry.id,
+                    "state": "pending",
+                    "reconciliation_route": "/api/mutations/reconcile",
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+        self._send_json(HTTPStatus.OK, stored)
+
     def _handle_mutation(
         self,
         method: str,
@@ -5965,6 +6366,19 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         try:
             cfg = self._load_config()
+            journal_entry: Optional[MutationJournalEntry] = None
+            if _is_general_durable_mutation(method, path):
+                journal_entry, handled = self._prepare_general_idempotent_mutation(
+                    cfg,
+                    method,
+                    path,
+                    payload,
+                    idempotency_key,
+                )
+                if handled:
+                    return
+                if journal_entry is None:
+                    raise RuntimeError("Durable mutation journal preparation failed.")
             if method == "POST":
                 order_route = path.strip("/").split("/")
                 if len(order_route) == 4 and order_route[:2] == ["api", "markets"] and order_route[3] == "positions":
@@ -5979,15 +6393,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     )
                     return
                 if len(order_route) == 5 and order_route[:2] == ["api", "markets"] and order_route[3] == "orders":
-                    self._send_json(
-                        HTTPStatus.OK,
-                        market_order_management_payload(
-                            cfg,
-                            self.app_server.adapter_registry,
-                            unquote(order_route[2]),
-                            unquote(order_route[4]),
-                            payload,
-                        ),
+                    self._execute_live_order_management(
+                        cfg,
+                        journal_entry,
+                        unquote(order_route[2]),
+                        unquote(order_route[4]),
+                        payload,
                     )
                     return
             if method == "PATCH" and path == "/api/config":
@@ -6000,6 +6411,34 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 apply_market_patch(cfg, market_id, payload)
                 self._save_config(cfg)
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
+                return
+            if method == "POST" and path == "/api/mutations/reconcile":
+                if str(payload.get("confirm_reconciliation") or "").strip() != LIVE_MUTATION_RECONCILIATION_CONFIRMATION:
+                    raise ValueError(
+                        "Live mutation reconciliation requires exact confirmation text "
+                        f"{LIVE_MUTATION_RECONCILIATION_CONFIRMATION}."
+                    )
+                raw_response = payload.get("response")
+                if raw_response is not None and not isinstance(raw_response, dict):
+                    raise ValueError("response must be a JSON object when supplied.")
+                entry = cfg.reconcile_ambiguous_mutation(
+                    str(payload.get("mutation_id") or ""),
+                    str(payload.get("resolution") or ""),
+                    _stored_mutation_result(raw_response) if isinstance(raw_response, dict) else None,
+                )
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "reconciled": {
+                            "id": entry.id,
+                            "state": entry.state,
+                            "outcome_code": entry.outcome_code,
+                            "updated_at": entry.updated_at,
+                        },
+                        **mutation_journal_payload(cfg),
+                    },
+                )
                 return
             if method == "POST" and path == "/api/polymarket/users/mdd/cache/purge":
                 self._send_json(HTTPStatus.OK, polymarket_mdd_cache_purge_payload(payload))
@@ -6050,11 +6489,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/api/alerts":
                 alert = alert_from_payload(cfg, self.app_server.adapter_registry, payload)
                 cfg.alerts.append(alert)
-                self._save_config(cfg)
-                self._send_json(
-                    HTTPStatus.OK,
-                    alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                response = alerts_payload(
+                    cfg,
+                    self.app_server.adapter_registry,
+                    self.app_server.alert_price_state,
                 )
+                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
                 return
             if method == "POST" and path == "/api/alerts/refresh":
                 result = refresh_all_alert_prices(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state)
@@ -6115,11 +6555,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/wallets":
                 add_wallet_watch(cfg, payload)
-                self._save_config(cfg)
-                self._send_json(
-                    HTTPStatus.OK,
-                    wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                response = wallets_payload(
+                    cfg,
+                    self.app_server.wallet_polling,
+                    self.app_server.wallet_recent_activity,
                 )
+                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
                 return
             if method == "PATCH" and path == "/api/wallets/polling":
                 interval = optional_positive_float(payload.get("poll_interval_seconds"), "Poll interval")
@@ -6199,18 +6640,15 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/paper/orders":
                 result = submit_paper_order(cfg, self.app_server.adapter_registry, payload)
-                self._save_config(cfg)
                 self.app_server.paper_position_marks = _paper_marks_for_rows(
                     self.app_server.paper_position_marks,
                     paper_position_rows(cfg.paper_trades),
                 )
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        **result,
-                        "paper": paper_payload(cfg, self.app_server.paper_position_marks),
-                    },
-                )
+                response = {
+                    **result,
+                    "paper": paper_payload(cfg, self.app_server.paper_position_marks),
+                }
+                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
                 return
             if method == "POST" and path == "/api/paper/history/use":
                 self._send_json(HTTPStatus.OK, history_refill_payload(cfg, str(payload.get("record_id") or "")))
@@ -6308,6 +6746,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 HTTPStatus.CONFLICT,
                 "config_conflict",
                 "Configuration changed in another process. Reload state and retry the mutation.",
+            )
+            return
+        except IdempotencyConflictError as exc:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "idempotency_conflict",
+                str(exc),
             )
             return
         except LiveValidationStoreDurabilityError:
@@ -6645,12 +7090,33 @@ def run_server(
         print("React build not found in the configured frontend directory")
         print(f"Build it with `{REACT_BUILD_COMMAND}`, or run `{REACT_DEV_COMMAND}` for Vite.")
     print(f"Tkinter GUI is unchanged: run `{PYTHON_GUI_SCRIPT}` or `{PYTHON_GUI_COMMAND}`.")
+    previous_signal_handlers: Dict[int, Any] = {}
+
+    def begin_signal_drain(signum: int, _frame: Any) -> None:
+        if server.begin_drain():
+            print(f"\nSignal {signum} received; draining mutations before shutdown.")
+            threading.Thread(target=server.shutdown, name="market-sentinel-shutdown", daemon=True).start()
+
+    if threading.current_thread() is threading.main_thread():
+        for signal_name in ("SIGTERM", "SIGINT"):
+            signal_number = getattr(signal, signal_name, None)
+            if signal_number is None:
+                continue
+            previous_signal_handlers[int(signal_number)] = signal.getsignal(signal_number)
+            signal.signal(signal_number, begin_signal_drain)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping React GUI API.")
     finally:
+        server.begin_drain()
+        if not server.wait_for_mutation_drain(HTTP_MUTATION_DRAIN_TIMEOUT_SECONDS):
+            print(
+                "[web-gui] mutation drain deadline expired; unresolved live requests remain protected by durable pending journal entries."
+            )
         server.server_close()
+        for signal_number, previous_handler in previous_signal_handlers.items():
+            signal.signal(signal_number, previous_handler)
 
 
 def main() -> None:

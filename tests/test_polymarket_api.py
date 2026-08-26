@@ -44,8 +44,11 @@ from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
 from polymarket.live_verification import (
     CONFIRM_LIVE_ORDER_CANCEL,
     LiveOrderCancelRequest,
+    accepted_credential_read_checks,
+    _same_account_authenticated_read_preflight,
     build_live_validation_stage_gates,
     build_live_order_cancel_plan,
+    extract_order_id,
     run_live_order_cancel_verification,
 )
 from polymarket.live_reports import (
@@ -91,6 +94,7 @@ from polymarket.live_report_schema import (
     parse_live_validation_report_json,
     validate_live_validation_report,
 )
+from polymarket.trader import TraderConfig
 from polymarket.ws_market import build_market_subscription
 from polymarket.ws_sports import sports_ws_url
 from polymarket.ws_user import build_user_subscription, probe_user_websocket, user_ws_url
@@ -99,6 +103,91 @@ from polymarket.ws_user import build_user_subscription, probe_user_websocket, us
 HTTP_REQUEST = "polymarket.http_client.requests.request"
 ROOT = Path(__file__).resolve().parent.parent
 LIVE_REPORT_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+
+
+def clean_source_provenance(revision: str = "a" * 40) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "repository": "market-sentinel",
+        "repository_origin": "github.com/yunushan/market-sentinel",
+        "source_revision": revision,
+        "initial_revision": revision,
+        "final_revision": revision,
+        "initial_clean": True,
+        "final_clean": True,
+        "stable": True,
+    }
+
+
+def successful_live_public_checks() -> dict[str, dict[str, object]]:
+    return {
+        "clob_time": {"status": "ok", "semantic_check": "current_unix_time"},
+        "gamma_markets": {"status": "ok", "semantic_check": "market_identity"},
+        "data_leaderboard": {"status": "ok", "semantic_check": "leaderboard_identity"},
+        "bridge_supported_assets": {"status": "ok", "semantic_check": "supported_asset_identity"},
+    }
+
+
+def accepted_live_authenticated_reads() -> dict[str, dict[str, object]]:
+    return {
+        "clob_l2_orders": {
+            "status": "ok",
+            "detail": "Authenticated CLOB order list responded.",
+            "sample_type": "list",
+            "semantic_check": "authenticated_order_collection",
+            "records_observed": 0,
+        }
+    }
+
+
+def funded_live_safety_evidence(revision: str = "a" * 40) -> dict[str, object]:
+    return {
+        "account_authenticated_read_preflight": {
+            "status": "pass",
+            "same_trading_client": True,
+            "account_identity_present": True,
+            "sample_type": "list",
+            "records_observed": 0,
+        },
+        "account_preflight": {
+            "status": "pass",
+            "sufficient_balance": True,
+            "sufficient_allowance": True,
+        },
+        "execution_guards": {
+            "status": "pass",
+            "post_only": True,
+            "time_in_force": "GTC",
+            "maker_price_verified": True,
+        },
+        "geoblock_preflight": {"status": "pass", "blocked": False},
+        "source_revision_gate": {
+            "status": "pass",
+            "clean": True,
+            "matches_initial_revision": True,
+            "source_revision": revision,
+            "repository_origin": "github.com/yunushan/market-sentinel",
+        },
+    }
+
+
+class LiveHarnessTraderSupport:
+    def get_trading_account_address(self) -> str:
+        return "0x" + "1" * 40
+
+    def get_orders(self):
+        return []
+
+    def get_trading_balance_allowance(self, **_kwargs):
+        return {"balance": "1000000", "allowances": {"exchange": "1000000"}}
+
+
+def allowed_geoblock() -> dict[str, object]:
+    return {"blocked": False, "country": "US", "region": "NY"}
+
+
+CLOB_ORDER_ID = "0x" + "1" * 64
+OTHER_CLOB_ORDER_ID = "0x" + "2" * 64
 
 
 class FakeResponse:
@@ -835,6 +924,42 @@ store_live_validation_report(
             ),
             (0.48, 0.52),
         )
+        self.assertEqual(
+            clob_rest.best_bid_ask_from_book(
+                {
+                    "bids": [{"price": "0.10"}, {"price": "0.47"}, {"price": "nan"}],
+                    "asks": [{"price": "0.90"}, {"price": "0.53"}, {"price": "inf"}],
+                }
+            ),
+            (0.47, 0.53),
+        )
+
+    def test_live_order_ids_require_supported_documented_hash_shapes(self) -> None:
+        uppercase_hash = "0x" + "A" * 64
+        self.assertEqual(extract_order_id({"orderID": uppercase_hash}), "0x" + "a" * 64)
+        self.assertEqual(extract_order_id({"orderID": "0x" + "b" * 40}), "0x" + "b" * 40)
+        for invalid in ("order-1", "1" * 64, "0x" + "g" * 64, "0x" + "1" * 63):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(extract_order_id({"orderID": invalid}), "")
+
+    def test_same_client_order_read_requires_a_success_list_schema(self) -> None:
+        class Reader:
+            def get_trading_account_address(self):
+                return "0x" + "1" * 40
+
+            def get_orders(self):
+                return {"error": "unauthorized"}
+
+        with self.assertRaisesRegex(ValueError, "documented list shape"):
+            _same_account_authenticated_read_preflight(Reader())
+
+        Reader.get_orders = lambda self: [{"orderID": "bad-id"}]
+        with self.assertRaisesRegex(ValueError, "invalid order record"):
+            _same_account_authenticated_read_preflight(Reader())
+
+        Reader.get_orders = lambda self: [{"orderID": CLOB_ORDER_ID}]
+        preflight, _ = _same_account_authenticated_read_preflight(Reader())
+        self.assertEqual(preflight["records_observed"], 1)
 
     def test_get_midpoint_accepts_dict_payload(self) -> None:
         with patch(HTTP_REQUEST, return_value=FakeResponse({"midpoint": "0.42"})) as mock_get:
@@ -1080,17 +1205,16 @@ store_live_validation_report(
         self.assertIn("/withdraw", request_url(mock_post))
 
     def test_relayer_and_clob_auth_wrappers_require_explicit_credentials(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(RuntimeError, "CLOB V2"):
             relayer.submit_transaction({"from": "0xabc"}, {})
 
         relayer_headers = {"RELAYER_API_KEY": "key", "RELAYER_API_KEY_ADDRESS": "0xabc"}
-        with patch(HTTP_REQUEST, return_value=FakeResponse({"transactionID": "tx"})) as mock_post:
-            result = relayer.submit_transaction({"from": "0xabc"}, relayer_headers)
-        self.assertEqual(result, {"transactionID": "tx"})
-        self.assertIn("/submit", request_url(mock_post))
-        self.assertEqual(mock_post.call_args.kwargs["headers"]["RELAYER_API_KEY"], "key")
-        self.assertEqual(mock_post.call_args.kwargs["headers"]["RELAYER_API_KEY_ADDRESS"], "0xabc")
-        self.assertEqual(mock_post.call_args.kwargs["headers"]["Content-Type"], "application/json")
+        with (
+            patch(HTTP_REQUEST) as mock_post,
+            self.assertRaisesRegex(RuntimeError, "CLOB V2"),
+        ):
+            relayer.submit_transaction({"from": "0xabc"}, relayer_headers)
+        mock_post.assert_not_called()
 
         with self.assertRaises(ValueError):
             clob_auth.get_orders({})
@@ -1118,10 +1242,10 @@ store_live_validation_report(
         with self.assertRaises(PolymarketValidationError):
             clob_rest.get_batch_price_history([str(i) for i in range(21)])
 
-        with self.assertRaises(PolymarketValidationError):
+        with self.assertRaisesRegex(RuntimeError, "CLOB V2"):
             clob_auth.post_orders(({"order": i} for i in range(16)), L2_HEADERS)
 
-        with self.assertRaises(PolymarketValidationError):
+        with self.assertRaisesRegex(RuntimeError, "CLOB V2"):
             clob_auth.cancel_orders((str(i) for i in range(3001)), L2_HEADERS)
 
     def test_shared_client_retries_transient_public_reads_and_raises_rate_limit(self) -> None:
@@ -1252,6 +1376,9 @@ store_live_validation_report(
                 size="1",
                 allow_token_ids=["token-1"],
                 private_key="0x" + "1" * 64,
+                api_key="explicit-api-key",
+                api_secret="explicit-api-secret",
+                api_passphrase="explicit-api-passphrase",
                 cancel_immediately=True,
             )
         )
@@ -1259,8 +1386,37 @@ store_live_validation_report(
         self.assertEqual(plan["status"], "dry_run")
         self.assertFalse(plan["live_action"])
         self.assertEqual(plan["redacted_credentials"]["private_key"], "***")
+        self.assertEqual(plan["redacted_credentials"]["explicit_api_credentials"], "***")
         self.assertNotIn("1" * 64, str(plan))
-        self.assertIn("Place one GTC limit order", " ".join(plan["transcript"]))
+        self.assertNotIn("explicit-api-key", str(plan))
+        self.assertNotIn("explicit-api-secret", str(plan))
+        self.assertNotIn("explicit-api-passphrase", str(plan))
+        self.assertFalse(plan["execution_supported"])
+        self.assertIn("CLOB V2", " ".join(plan["transcript"]))
+
+    def test_live_order_cancel_harness_fails_closed_before_any_transport_for_v2_migration(self) -> None:
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=lambda _cfg: self.fail("legacy trader must never be created"),
+            orderbook_getter=lambda _token: self.fail("orderbook preflight must not imply executable support"),
+            geoblock_checker=lambda: self.fail("geoblock must not be reached"),
+            recovery_writer=lambda _payload: self.fail("journal must not be touched"),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["live_action"])
+        self.assertFalse(result["execution_supported"])
+        self.assertIn("CLOB V2", " ".join(result["blockers"]))
 
     def test_live_order_cancel_harness_blocks_missing_allow_list_confirmation_and_caps(self) -> None:
         plan = build_live_order_cancel_plan(
@@ -1281,22 +1437,107 @@ store_live_validation_report(
         self.assertIn("Missing token allow-list", blockers)
         self.assertIn("confirm-live-order-cancel", blockers)
 
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
     def test_live_order_cancel_harness_executes_place_cancel_and_post_cancel_verification(self) -> None:
-        class FakeTrader:
-            def __init__(self, _cfg):
+        placed_calls: list[dict[str, object]] = []
+        journal_entries: list[dict[str, object]] = []
+        trader_configs: list[TraderConfig] = []
+
+        class FakeTrader(LiveHarnessTraderSupport):
+            def __init__(self, cfg):
                 self.calls = []
+                trader_configs.append(cfg)
 
             def place_limit_order(self, **kwargs):
                 self.calls.append(("place", kwargs))
-                return {"orderID": "order-1", "status": "live", "api_key": "secret"}
+                placed_calls.append(dict(kwargs))
+                return {
+                    "orderID": CLOB_ORDER_ID,
+                    "status": "live",
+                    "api_key": "placed-api-secret",
+                    "message": "placed-generic-secret",
+                }
 
             def cancel_order(self, order_id):
                 self.calls.append(("cancel", order_id))
-                return {"canceled": [order_id], "not_canceled": {}}
+                return {
+                    "canceled": [order_id],
+                    "not_canceled": {},
+                    "detail": "cancel-generic-secret",
+                }
 
             def get_order(self, order_id):
                 self.calls.append(("get", order_id))
-                return {"id": order_id, "status": "ORDER_STATUS_CANCELED"}
+                return {
+                    "id": order_id,
+                    "status": "ORDER_STATUS_CANCELED",
+                    "size_matched": "0",
+                    "associate_trades": [],
+                    "message": "post-cancel-generic-secret",
+                }
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                api_key="explicit-api-key",
+                api_secret="explicit-api-secret",
+                api_passphrase="explicit-api-passphrase",
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=FakeTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda payload: journal_entries.append(dict(payload)),
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["live_action"])
+        self.assertTrue(result["audit"]["post_cancel_verified"])
+        self.assertFalse(result["manual_reconciliation_required"])
+        self.assertEqual(
+            set(result["audit"]["placed"]),
+            {"orderID", "order_id_present", "response_received"},
+        )
+        self.assertNotIn("api_key", result["audit"]["placed"])
+        self.assertNotIn("placed-api-secret", str(result))
+        self.assertNotIn("placed-generic-secret", str(result))
+        self.assertNotIn("cancel-generic-secret", str(result))
+        self.assertNotIn("post-cancel-generic-secret", str(result))
+        self.assertTrue(placed_calls[0]["post_only"])
+        self.assertEqual(placed_calls[0]["tif"], "GTC")
+        self.assertEqual(trader_configs[0].api_key, "explicit-api-key")
+        self.assertEqual(trader_configs[0].api_secret, "explicit-api-secret")
+        self.assertEqual(trader_configs[0].api_passphrase, "explicit-api-passphrase")
+        self.assertNotIn("explicit-api-secret", str(result))
+        self.assertTrue(result["account_preflight"]["sufficient_allowance"])
+        self.assertEqual(
+            [entry["stage"] for entry in journal_entries],
+            ["placement_pending", "order_placed_reconcile_required", "cancel_verified"],
+        )
+        self.assertTrue(result["audit"]["recovery_journal"]["resolved"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_does_not_capture_unsafe_order_identifiers(self) -> None:
+        class UnsafeIdentifierTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {
+                    "orderID": "unsafe order id with secret material",
+                    "message": "generic-upstream-secret",
+                    "nested": [{"detail": "nested-upstream-secret"}],
+                }
+
+            def cancel_order(self, _order_id):
+                raise AssertionError("an unsafe order identifier must never be sent back to the venue")
 
         result = run_live_order_cancel_verification(
             LiveOrderCancelRequest(
@@ -1310,15 +1551,152 @@ store_live_validation_report(
                 cancel_immediately=True,
                 confirmation=CONFIRM_LIVE_ORDER_CANCEL,
             ),
-            trader_factory=FakeTrader,
+            trader_factory=UnsafeIdentifierTrader,
             orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
         )
 
-        self.assertEqual(result["status"], "ok")
-        self.assertTrue(result["live_action"])
-        self.assertTrue(result["audit"]["post_cancel_verified"])
-        self.assertEqual(result["audit"]["placed"]["api_key"], "***")
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertEqual(result["audit"]["order_id"], "")
+        self.assertEqual(
+            result["audit"]["placed"],
+            {"orderID": "", "order_id_present": False, "response_received": True},
+        )
+        self.assertNotIn("generic-upstream-secret", str(result))
+        self.assertNotIn("nested-upstream-secret", str(result))
+        self.assertNotIn("unsafe order id", str(result))
 
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_preserves_order_identity_when_cancel_fails(self) -> None:
+        class CancelFailureTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live", "api_key": "secret"}
+
+            def cancel_order(self, _order_id):
+                raise RuntimeError("secret-bearing upstream error")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=CancelFailureTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertEqual(result["audit"]["order_id"], CLOB_ORDER_ID)
+        self.assertEqual(result["audit"]["cancel_error"], {"type": "RuntimeError"})
+        self.assertNotIn("api_key", result["audit"]["placed"])
+        self.assertNotIn("secret-bearing", str(result))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_preserves_cancel_ack_when_post_read_fails(self) -> None:
+        class PostReadFailureTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, order_id):
+                return {"canceled": [order_id]}
+
+            def get_order(self, _order_id):
+                raise TimeoutError("upstream token must not be copied")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=PostReadFailureTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertEqual(result["audit"]["order_id"], CLOB_ORDER_ID)
+        self.assertEqual(result["audit"]["cancel"]["canceled"], [CLOB_ORDER_ID])
+        self.assertTrue(result["audit"]["cancel"]["order_acknowledged"])
+        self.assertEqual(result["audit"]["post_cancel_error"], {"type": "TimeoutError"})
+        self.assertNotIn("upstream token", str(result))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_rejects_ambiguous_terminal_states_and_generic_ack(self) -> None:
+        class AmbiguousTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg, cancel_payload, post_cancel_payload):
+                self.cancel_payload = cancel_payload
+                self.post_cancel_payload = post_cancel_payload
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, _order_id):
+                return self.cancel_payload
+
+            def get_order(self, _order_id):
+                return self.post_cancel_payload
+
+        cases = (
+            ({"success": True}, {"id": CLOB_ORDER_ID, "status": "ORDER_STATUS_CANCELED"}),
+            ({"canceled": [CLOB_ORDER_ID]}, {"id": CLOB_ORDER_ID, "status": "DONE", "open": False}),
+            ({"canceled": [CLOB_ORDER_ID]}, {"id": OTHER_CLOB_ORDER_ID, "status": "ORDER_STATUS_CANCELED"}),
+        )
+        for cancel_response, post_cancel_response in cases:
+            with self.subTest(cancel=cancel_response, post_cancel=post_cancel_response):
+                result = run_live_order_cancel_verification(
+                    LiveOrderCancelRequest(
+                        token_id="token-1",
+                        side="BUY",
+                        price="0.01",
+                        size="1",
+                        allow_token_ids=["token-1"],
+                        private_key="0x" + "1" * 64,
+                        execute=True,
+                        cancel_immediately=True,
+                        confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+                    ),
+                    trader_factory=lambda cfg, cancel=cancel_response, post=post_cancel_response: AmbiguousTrader(
+                        cfg, cancel, post
+                    ),
+                    orderbook_getter=lambda _token_id: {
+                        "bids": [{"price": "0.02"}],
+                        "asks": [{"price": "0.04"}],
+                    },
+                    geoblock_checker=allowed_geoblock,
+                    recovery_writer=lambda _payload: None,
+                )
+
+                self.assertEqual(result["status"], "failed")
+                self.assertFalse(result["audit"]["post_cancel_verified"])
+                self.assertTrue(result["manual_reconciliation_required"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
     def test_live_order_cancel_harness_blocks_market_taking_price_before_execution(self) -> None:
         class UnexpectedTrader:
             def __init__(self, _cfg):
@@ -1338,10 +1716,198 @@ store_live_validation_report(
             ),
             trader_factory=UnexpectedTrader,
             orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
         )
 
         self.assertEqual(result["status"], "blocked")
         self.assertIn("best ask", " ".join(result["blockers"]))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_blocks_one_base_unit_below_required_allowance(self) -> None:
+        class InsufficientAllowanceTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def get_trading_balance_allowance(self, **_kwargs):
+                return {"balance": "10000", "allowances": {"exchange": "9999"}}
+
+            def place_limit_order(self, **_kwargs):
+                raise AssertionError("placement must not run with insufficient allowance")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=InsufficientAllowanceTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["account_preflight"]["required_base_units"], 10000)
+        self.assertTrue(result["account_preflight"]["sufficient_balance"])
+        self.assertFalse(result["account_preflight"]["sufficient_allowance"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_blocks_funded_execution_without_recovery_writer(self) -> None:
+        class UnexpectedTrader:
+            def __init__(self, _cfg):
+                raise AssertionError("trader must not be created without a recovery writer")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=UnexpectedTrader,
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["live_action"])
+        self.assertIn("recovery journal writer", " ".join(result["blockers"]))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_blocks_geographically_ineligible_execution(self) -> None:
+        class UnexpectedTrader:
+            def __init__(self, _cfg):
+                raise AssertionError("trader must not be created when geoblocked")
+
+        journal_entries: list[dict[str, object]] = []
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=UnexpectedTrader,
+            geoblock_checker=lambda: {"blocked": True, "country": "XX"},
+            recovery_writer=lambda payload: journal_entries.append(dict(payload)),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["live_action"])
+        self.assertEqual(journal_entries, [])
+        self.assertIn("blocked=false", " ".join(result["blockers"]))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_rejects_partial_fill_after_cancel(self) -> None:
+        class PartiallyFilledTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, order_id):
+                return {"canceled": [order_id], "not_canceled": {}}
+
+            def get_order(self, order_id):
+                return {
+                    "id": order_id,
+                    "status": "ORDER_STATUS_CANCELED",
+                    "size_matched": "0.5",
+                    "associate_trades": ["trade-1"],
+                }
+
+        journal_entries: list[dict[str, object]] = []
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=PartiallyFilledTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda payload: journal_entries.append(dict(payload)),
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertFalse(result["audit"]["zero_fill_evidence"]["verified"])
+        self.assertEqual(journal_entries[-1]["stage"], "cancel_incomplete")
+        self.assertFalse(journal_entries[-1]["resolved"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_fails_when_final_recovery_resolution_write_fails(self) -> None:
+        class SuccessfulTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, order_id):
+                return {"canceled": [order_id], "not_canceled": {}}
+
+            def get_order(self, order_id):
+                return {
+                    "id": order_id,
+                    "status": "ORDER_STATUS_CANCELED",
+                    "size_matched": "0",
+                    "associate_trades": [],
+                }
+
+        journal_entries: list[dict[str, object]] = []
+
+        def write_recovery(payload):
+            journal_entries.append(dict(payload))
+            if payload["stage"] == "cancel_verified":
+                raise OSError("durability failure")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=SuccessfulTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=write_recovery,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertTrue(result["audit"]["post_cancel_verified"])
+        self.assertEqual(result["audit"]["recovery_journal_error"], {"type": "OSError"})
+        self.assertEqual(result["audit"]["recovery_journal"]["status"], "unresolved")
+        self.assertFalse(result["audit"]["recovery_journal"]["resolved"])
 
     def test_live_validation_stage_gates_require_authenticated_read_before_funded(self) -> None:
         report = {
@@ -1359,11 +1925,26 @@ store_live_validation_report(
         self.assertFalse(gates["safe_to_attempt_funded_order"])
         self.assertIn("authenticated read", gates["next_step"])
 
-        report["authenticated_read_checks"]["clob_l2_orders"] = {"status": "ok"}
+        report["authenticated_read_checks"] = {
+            "py_clob_client_credentials": {"status": "ok", "detail": "credentials derived"}
+        }
+        gates = build_live_validation_stage_gates(report)
+
+        self.assertFalse(gates["credentialed_read_ok"])
+        self.assertEqual(gates["accepted_credential_read_checks"], [])
+        self.assertEqual(accepted_credential_read_checks(report["authenticated_read_checks"]), [])
+
+        report["authenticated_read_checks"]["clob_l2_orders"] = {
+            "status": "ok",
+            "semantic_check": "authenticated_order_collection",
+            "records_observed": 0,
+        }
         gates = build_live_validation_stage_gates(report)
 
         self.assertTrue(gates["credentialed_read_ok"])
-        self.assertTrue(gates["safe_to_attempt_funded_order"])
+        self.assertFalse(gates["safe_to_attempt_funded_order"])
+        self.assertIn("CLOB V2", gates["next_step"])
+        self.assertEqual(gates["accepted_credential_read_checks"], ["clob_l2_orders"])
 
     def test_live_report_promotion_requires_concrete_authenticated_read_evidence(self) -> None:
         claimed_report = {
@@ -1385,25 +1966,52 @@ store_live_validation_report(
         self.assertIn("no accepted authenticated-read evidence", " ".join(promotion["blocked_reasons"]))
 
         verified_report = {
+            "ok": True,
             "mode": "strict_cli",
-            "authenticated_read_checks": {
-                "clob_l2_orders": {
-                    "status": "ok",
-                    "detail": "Authenticated CLOB order list responded.",
-                    "sample_type": "dict",
-                }
-            },
+            "source_provenance": clean_source_provenance(),
+            "public_checks": successful_live_public_checks(),
+            "authenticated_read_checks": accepted_live_authenticated_reads(),
             "funded_live_order_check": {"status": "blocked"},
         }
         verified = live_validation_report_summary(verified_report)
 
-        self.assertEqual(verified["credential_live_verified"], "yes")
+        self.assertEqual(verified["credential_live_verified"], "candidate_only")
+        self.assertFalse(verified["verification_promotion"]["attested_workflow_verified"])
         self.assertTrue(verified["can_promote_credential_live_verified"])
         self.assertEqual(
             verified["verification_promotion"]["credential_evidence"][0]["check"],
             "clob_l2_orders",
         )
 
+        dirty_report = json.loads(json.dumps(verified_report))
+        dirty_report["source_provenance"].update(
+            {"source_revision": "", "initial_clean": False, "final_clean": False, "stable": False}
+        )
+        dirty = live_validation_report_promotion(dirty_report)
+
+        self.assertEqual(dirty["credential_live_verified"], "blocked")
+        self.assertFalse(dirty["source_provenance_verified"])
+        self.assertIn("clean initial/final source revisions", " ".join(dirty["blocked_reasons"]))
+
+        invalid_public = json.loads(json.dumps(verified_report))
+        invalid_public["public_checks"]["clob_time"]["semantic_check"] = "mere_http_200"
+        self.assertFalse(
+            live_validation_report_promotion(invalid_public)["can_promote_credential_live_verified"]
+        )
+
+        for field, bad_value in (
+            ("semantic_check", "generic_collection"),
+            ("records_observed", -1),
+            ("records_observed", True),
+        ):
+            with self.subTest(credential_field=field, bad_value=bad_value):
+                invalid_read = json.loads(json.dumps(verified_report))
+                invalid_read["authenticated_read_checks"]["clob_l2_orders"][field] = bad_value
+                self.assertFalse(
+                    live_validation_report_promotion(invalid_read)["can_promote_credential_live_verified"]
+                )
+
+    @patch("polymarket.live_reports.POLYMARKET_LIVE_MUTATIONS_SUPPORTED", True)
     def test_live_report_promotion_requires_funded_order_cancel_audit_evidence(self) -> None:
         dry_run_report = {
             "mode": "strict_cli",
@@ -1420,24 +2028,108 @@ store_live_validation_report(
         self.assertFalse(dry_run["can_promote_funded_live_verified"])
 
         funded_report = {
+            "ok": True,
             "mode": "strict_cli",
+            "source_provenance": clean_source_provenance(),
+            "public_checks": successful_live_public_checks(),
+            "authenticated_read_checks": accepted_live_authenticated_reads(),
             "funded_live_order_check": {
                 "status": "ok",
                 "live_action": True,
+                "manual_reconciliation_required": False,
+                **funded_live_safety_evidence(),
                 "audit": {
-                    "order_id": "order-1",
-                    "placed": {"status": "live"},
-                    "cancel": {"canceled": ["order-1"]},
-                    "post_cancel_order": {"status": "ORDER_STATUS_CANCELED"},
+                    "order_id": CLOB_ORDER_ID,
+                    "placed": {"orderID": CLOB_ORDER_ID, "status": "live"},
+                    "cancel": {"canceled": [CLOB_ORDER_ID]},
+                    "post_cancel_order": {
+                        "id": CLOB_ORDER_ID,
+                        "status": "ORDER_STATUS_CANCELED",
+                        "size_matched": "0",
+                        "associate_trades": [],
+                    },
+                    "zero_fill_evidence": {
+                        "verified": True,
+                        "order_identity_matches": True,
+                        "size_matched_zero": True,
+                        "associated_trades_empty": True,
+                    },
+                    "recovery_journal": {
+                        "status": "resolved",
+                        "stage": "cancel_verified",
+                        "resolved": True,
+                    },
                     "post_cancel_verified": True,
                 },
             },
         }
         funded = live_validation_report_summary(funded_report)
 
-        self.assertEqual(funded["funded_live_verified"], "yes")
+        self.assertEqual(funded["funded_live_verified"], "candidate_only")
+        self.assertEqual(funded["verification_promotion"]["evidence_trust"], "local_unattested_candidate")
         self.assertTrue(funded["can_promote_funded_live_verified"])
-        self.assertEqual(funded["verification_promotion"]["funded_evidence"][0]["check"], "funded_order_cancel")
+        self.assertTrue(funded["verification_promotion"]["funded_evidence"])
+
+        no_same_run_read = json.loads(json.dumps(funded_report))
+        no_same_run_read.pop("authenticated_read_checks")
+        rejected_missing_read = live_validation_report_promotion(no_same_run_read)
+        self.assertEqual(rejected_missing_read["funded_live_verified"], "blocked")
+        self.assertFalse(rejected_missing_read["can_promote_funded_live_verified"])
+        self.assertIn("authenticated-read evidence", " ".join(rejected_missing_read["blocked_reasons"]))
+
+        for cancel_payload, post_cancel_payload in (
+            ({"success": True}, {"id": CLOB_ORDER_ID, "status": "ORDER_STATUS_CANCELED"}),
+            ({"canceled": [CLOB_ORDER_ID]}, {"id": CLOB_ORDER_ID, "status": "DONE", "open": False}),
+        ):
+            with self.subTest(cancel=cancel_payload, post_cancel=post_cancel_payload):
+                ambiguous = json.loads(json.dumps(funded_report))
+                ambiguous["funded_live_order_check"]["audit"]["cancel"] = cancel_payload
+                ambiguous["funded_live_order_check"]["audit"]["post_cancel_order"] = post_cancel_payload
+                rejected = live_validation_report_promotion(ambiguous)
+                self.assertEqual(rejected["funded_live_verified"], "blocked")
+                self.assertFalse(rejected["can_promote_funded_live_verified"])
+
+        safety_mutations = (
+            (("account_authenticated_read_preflight", "same_trading_client"), False),
+            (("account_authenticated_read_preflight", "account_identity_present"), False),
+            (("account_preflight", "sufficient_balance"), False),
+            (("account_preflight", "sufficient_allowance"), False),
+            (("execution_guards", "post_only"), False),
+            (("execution_guards", "time_in_force"), "FOK"),
+            (("execution_guards", "maker_price_verified"), False),
+            (("geoblock_preflight", "blocked"), True),
+            (("source_revision_gate", "clean"), False),
+            (("source_revision_gate", "matches_initial_revision"), False),
+            (("source_revision_gate", "source_revision"), "b" * 40),
+            (("source_revision_gate", "repository_origin"), "github.com/example/fork"),
+            (("audit", "recovery_journal", "resolved"), False),
+            (("audit", "recovery_journal", "stage"), "cancel_incomplete"),
+            (("audit", "post_cancel_order", "size_matched"), "0.1"),
+            (("audit", "post_cancel_order", "associate_trades"), ["trade-1"]),
+            (("audit", "placed", "orderID"), OTHER_CLOB_ORDER_ID),
+        )
+        for path, bad_value in safety_mutations:
+            with self.subTest(funded_field=".".join(path), bad_value=bad_value):
+                invalid = json.loads(json.dumps(funded_report))
+                target = invalid["funded_live_order_check"]
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = bad_value
+                rejected = live_validation_report_promotion(invalid)
+                self.assertEqual(rejected["funded_live_verified"], "blocked")
+                self.assertFalse(rejected["can_promote_funded_live_verified"])
+
+    def test_live_report_promotion_blocks_funded_candidate_until_v2_is_supported(self) -> None:
+        report = json.loads(
+            (LIVE_REPORT_FIXTURE_ROOT / "valid_funded_audit.json").read_text(encoding="utf-8")
+        )
+
+        promotion = live_validation_report_promotion(report)
+
+        self.assertEqual(promotion["funded_live_verified"], "blocked")
+        self.assertFalse(promotion["can_promote_funded_live_verified"])
+        self.assertEqual(promotion["funded_evidence"], [])
+        self.assertIn("CLOB V2", " ".join(promotion["blocked_reasons"]))
 
     def test_live_report_promotion_blocks_local_runbook_and_browser_smoke_reports(self) -> None:
         for mode in ("local_readiness_only", "credential_runbook_no_funded_actions", "browser_smoke", "browser_smoke_seed"):
@@ -1468,8 +2160,11 @@ store_live_validation_report(
             path = Path(tmp) / "reports.json"
             store_live_validation_report(
                 {
+                    "ok": True,
                     "mode": "strict_cli",
-                    "authenticated_read_checks": {"user_websocket_connect": {"status": "ok", "detail": "connected"}},
+                    "source_provenance": clean_source_provenance(),
+                    "public_checks": successful_live_public_checks(),
+                    "authenticated_read_checks": accepted_live_authenticated_reads(),
                     "funded_live_order_check": {"status": "dry_run", "live_action": False},
                     "stage_gates": {
                         "credentialed_read_ok": True,
@@ -1514,7 +2209,8 @@ store_live_validation_report(
             inventory = live_validation_report_promotion_inventory(path=path)
 
         self.assertFalse(inventory["static_coverage_mutated"])
-        self.assertEqual(inventory["credential_live_verified"], "yes")
+        self.assertEqual(inventory["credential_live_verified"], "candidate_only")
+        self.assertFalse(inventory["attested_workflow_verified"])
         self.assertEqual(inventory["funded_live_verified"], "blocked")
         self.assertEqual(inventory["counts"]["credential_candidates"], 1)
         self.assertEqual(inventory["counts"]["funded_candidates"], 0)
@@ -1552,8 +2248,8 @@ store_live_validation_report(
             json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_browser_smoke.json").read_text(encoding="utf-8"))
         )
 
-        self.assertEqual(credentialed["credential_live_verified"], "yes")
-        self.assertEqual(funded["funded_live_verified"], "yes")
+        self.assertEqual(credentialed["credential_live_verified"], "candidate_only")
+        self.assertEqual(funded["funded_live_verified"], "blocked")
         self.assertEqual(dry_run["funded_live_verified"], "blocked")
         self.assertEqual(runbook["credential_live_verified"], "blocked")
         self.assertEqual(browser["credential_live_verified"], "blocked")
@@ -2107,8 +2803,8 @@ store_live_validation_report(
         credentialed = result["entries"][0]
         funded = result["entries"][1]
         invalid = result["entries"][2]
-        self.assertEqual(credentialed["summary"]["credential_live_verified"], "yes")
-        self.assertEqual(funded["summary"]["funded_live_verified"], "yes")
+        self.assertEqual(credentialed["summary"]["credential_live_verified"], "candidate_only")
+        self.assertEqual(funded["summary"]["funded_live_verified"], "blocked")
         self.assertFalse(invalid["schema_validation"]["ok"])
         self.assertIn("non-empty string mode", " ".join(invalid["schema_validation"]["errors"]))
         for entry in result["entries"]:

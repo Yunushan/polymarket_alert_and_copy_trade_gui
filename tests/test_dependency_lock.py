@@ -76,13 +76,13 @@ class DependencyLockTests(unittest.TestCase):
             [],
             lock_issues(
                 lock,
-                ["requests>=2.31.0", "py-clob-client>=0.34.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.16.4"],
+                ["requests>=2.31.0", "py-clob-client-v2>=1.1.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.16.4"],
             ),
         )
 
     def test_live_lock_covers_authenticated_clob_sdk_dependencies(self) -> None:
         lock = (ROOT / "requirements-live.lock").read_text(encoding="utf-8")
-        self.assertEqual([], lock_issues(lock, ["requests>=2.31.0", "py-clob-client>=0.34.0"]))
+        self.assertEqual([], lock_issues(lock, ["requests>=2.31.0", "py-clob-client-v2>=1.1.0"]))
 
     def test_security_audit_lock_is_hash_protected(self) -> None:
         source = (ROOT / "requirements-security.txt").read_text(encoding="utf-8")

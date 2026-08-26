@@ -374,6 +374,45 @@ loopback-only staging host, omit `--public-url`; the script will still validate
 the local service and timer, but retain all three expected identity arguments for the
 deployed release.
 
+Review the raw collector output directly; do not translate its results into a
+hand-written readiness manifest. The reviewer recomputes the raw file digest,
+requires a fresh production-mode collection with the exact systemd and public
+proxy inventory, rechecks the clean source/runtime/frontend identities, and
+rejects missing, duplicate, failed, or unknown checks:
+
+```bash
+/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/review_deployment_evidence.py \
+  /var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json \
+  --expected-version "${RELEASE_VERSION}" \
+  --expected-revision "${EXPECTED_SOURCE_REVISION}" \
+  --json
+```
+
+The review is deliberately ineligible when the collector used
+`--skip-systemd`, omitted `--public-url`, was re-reviewed after its freshness
+window, or reported a backup that is no longer recent. Preserve the original
+raw bytes for later attestation; changing whitespace also changes the bound
+SHA-256 digest.
+
+For score-eligible evidence, manually run the protected-main **Production
+deployment evidence** workflow with the exact stable release tag and production
+HTTPS origin. Its production-labeled self-hosted collector verifies the live
+host; a separate GitHub-hosted job reviews the raw bytes, binds the exact
+release SHA and frontend ZIP digest, and attests canonical
+`deployment-evidence.json`. Download that final artifact and pass it with the
+identical `--deployment-origin`. Raw reports, handwritten wrappers, and reviewer
+summaries remain diagnostic-only. Do not use staging, generic self-hosted
+runners, or placeholder origins for this workflow.
+Configure `MARKET_SENTINEL_PRODUCTION_ORIGIN` as a protected `production`
+environment variable. The workflow rejects an input that is not byte-for-byte
+equal to that canonical public origin, rejects private or non-global resolution,
+and completes this check before the collector job can access credentials. The
+collector executes the verifier from the protected-main checkout with system
+Python and passes `/opt/market-sentinel` only as the inspected deployment root;
+it never executes a mutable verifier from the deployed checkout. Authenticated
+public probes do not follow redirects. Raw evidence is nonce-bound to the exact
+workflow SHA, run ID, and run attempt.
+
 For a non-Linux or isolated local loopback smoke test only, add
 `--skip-systemd`. This intentionally skips Linux systemd and filesystem
 ownership checks while retaining versioned health and metrics validation; it is
@@ -475,7 +514,11 @@ publish from an unmerged feature branch. Confirm the release tag matches
 deployment before public proxy cutover. Install `requirements-live.lock` only
 where authenticated CLOB signing is explicitly approved.
 
-Funded production acceptance additionally requires a current credentialed-read
+### Funded production acceptance
+
+Polymarket funded production acceptance is currently unavailable because live
+mutations are blocked pending the reviewed CLOB V2 client/signing migration.
+After that migration, acceptance would still require a current credentialed-read
 report and a deliberately approved, capped order/cancel report with
-post-cancel verification. Dry-run, browser-smoke, and readiness-only reports
-are not substitutes.
+post-cancel verification. Dry-run, browser-smoke, readiness-only, and legacy
+V1 reports are not substitutes.

@@ -28,6 +28,137 @@ def repository_revision() -> str:
     return revision
 
 
+def raw_production_deployment_report(
+    revision: str,
+    version: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Build semantically valid but deliberately unattested collector output."""
+
+    from scripts.review_deployment_evidence import required_check_names
+    from scripts.verify_production_deployment import DURABLE_STATE_PATHS, PUBLIC_PROXY_AUTH_PROBES
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    collected_at = current - timedelta(minutes=2)
+    backup_created_at = collected_at - timedelta(minutes=30)
+    restore_completed_at = collected_at - timedelta(minutes=1)
+    rollback_completed_at = collected_at - timedelta(seconds=30)
+    frontend_sha256 = "b" * 64
+    backup_sha256 = "c" * 64
+    host_identity_sha256 = "d" * 64
+    rollback_revision = "e" * 40
+    backup_archive = "market-sentinel-state-test.tar.gz"
+    checks: list[dict[str, object]] = [
+        {"name": name, "status": "pass", "detail": "self-asserted test fixture"}
+        for name in sorted(required_check_names())
+    ]
+    indexed = {str(check["name"]): check for check in checks}
+    indexed["loopback_health"].update(
+        {
+            "api_version": version,
+            "runtime_source_revision": revision,
+            "runtime_frontend_sha256": frontend_sha256,
+            "disk_frontend_sha256": frontend_sha256,
+        }
+    )
+    indexed["public_https_proxy"].update(
+        {
+            "api_version": version,
+            "unauthenticated_probes": len(PUBLIC_PROXY_AUTH_PROBES),
+            "runtime_source_revision": revision,
+            "runtime_frontend_sha256": frontend_sha256,
+        }
+    )
+    indexed["deployment_host_identity"].update(
+        {
+            "deployment_provider": "test-provider",
+            "host_identity_sha256": host_identity_sha256,
+        }
+    )
+    indexed["durable_state_wiring"].update(
+        {
+            "durable_store_count": len(DURABLE_STATE_PATHS),
+            "state_directory": "/var/lib/market-sentinel",
+            "backup_source": "/var/lib/market-sentinel",
+        }
+    )
+    indexed["verified_recent_state_backup"].update(
+        {
+            "created_at": backup_created_at.isoformat().replace("+00:00", "Z"),
+            "backup_age_seconds": 30 * 60,
+            "archive": backup_archive,
+            "sha256": backup_sha256,
+            "file_count": 1,
+            "verified_bytes": 128,
+            "verified_pairs": 1,
+            "invalid_pairs": 0,
+            "orphan_archives": 0,
+            "orphan_manifests": 0,
+        }
+    )
+    indexed["verified_restore_drill"].update(
+        {
+            "mode": "isolated_full_restore",
+            "archive": backup_archive,
+            "backup_created_at": backup_created_at.isoformat().replace("+00:00", "Z"),
+            "backup_sha256": backup_sha256,
+            "restored_file_count": 1,
+            "restored_bytes": 128,
+            "completed_at": restore_completed_at.isoformat().replace("+00:00", "Z"),
+        }
+    )
+    indexed["verified_production_rollback_drill"].update(
+        {
+            "drill_id": "00000000-0000-4000-8000-000000000001",
+            "report_sha256": "f" * 64,
+            "completed_at": rollback_completed_at.isoformat().replace("+00:00", "Z"),
+            "rollback_revision": rollback_revision,
+            "final_revision": revision,
+            "step_count": 5,
+        }
+    )
+    return {
+        "schema_version": 1,
+        "collected_at": collected_at.isoformat().replace("+00:00", "Z"),
+        "source": {
+            "project_version": version,
+            "git_revision": revision,
+            "git_revision_status": "ok",
+            "git_worktree_status": "clean",
+        },
+        "status": "ok",
+        "checks": checks,
+        "collection": {
+            "mode": "production",
+            "systemd_requested": True,
+            "public_proxy_requested": True,
+            "public_origin": "https://markets.example.net",
+            "expected_version": version,
+            "expected_source_revision": revision,
+            "expected_frontend_sha256": frontend_sha256,
+            "deployment_provider": "test-provider",
+            "host_identity_sha256": host_identity_sha256,
+            "restore_drill_requested": True,
+            "rollback_drill_requested": True,
+            "run_id": 0,
+            "run_attempt": 0,
+            "nonce": "",
+        },
+    }
+
+
+def score_deployment_evidence(path: Path, revision: str) -> dict[str, Any]:
+    from scripts.check_product_readiness import _parser, build_report
+
+    args = _parser().parse_args(["--no-run-local", "--deployment-evidence", str(path)])
+    with (
+        patch("scripts.check_product_readiness._repository_is_clean", return_value=True),
+        patch("scripts.check_product_readiness._repository_revision", return_value=revision),
+    ):
+        return build_report(args)
+
+
 def attested_public_live_payload(revision: str, *, now: datetime | None = None) -> dict[str, object]:
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     started = current - timedelta(minutes=4)
@@ -551,7 +682,7 @@ class ProductReadinessTests(unittest.TestCase):
                     self.assertEqual(result["status"], "fail")
                     self.assertIn("attestation", result["detail"].casefold())
 
-    def test_direct_and_attested_public_live_evidence_does_not_stack_points(self) -> None:
+    def test_direct_public_probe_is_diagnostic_when_attested_evidence_passes(self) -> None:
         from scripts.check_product_readiness import _parser, build_report
 
         revision = repository_revision()
@@ -571,7 +702,8 @@ class ProductReadinessTests(unittest.TestCase):
 
         live = next(item for item in report["categories"] if item["name"] == "live_acceptance")
         self.assertEqual(live["earned"], 3)
-        self.assertEqual(report["checks"]["public_live"]["award_source"], "direct_and_attested")
+        self.assertEqual(report["checks"]["public_live"]["award_source"], "attested")
+        self.assertEqual(report["checks"]["public_live"]["diagnostic_status"], "pass")
 
     def test_attested_public_live_points_are_revoked_when_repository_changes(self) -> None:
         from scripts.check_product_readiness import _parser, build_report
@@ -596,13 +728,13 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual(live["earned"], 0)
         self.assertTrue(any("public Polymarket" in item and "revoked" in item for item in live["missing"]))
 
-    def test_direct_public_live_points_are_revoked_when_repository_changes(self) -> None:
+    def test_direct_public_live_probe_never_earns_points(self) -> None:
         from scripts.check_product_readiness import _parser, build_report
 
         revision = "a" * 40
         args = _parser().parse_args(["--no-run-local", "--run-public-live"])
         with (
-            patch("scripts.check_product_readiness._repository_is_clean", side_effect=(True, False)),
+            patch("scripts.check_product_readiness._repository_is_clean", side_effect=(True, True)),
             patch("scripts.check_product_readiness._repository_revision", return_value=revision),
             patch("scripts.check_product_readiness._run_public_live", return_value={"status": "pass"}),
         ):
@@ -610,7 +742,8 @@ class ProductReadinessTests(unittest.TestCase):
 
         live = next(item for item in report["categories"] if item["name"] == "live_acceptance")
         self.assertEqual(live["earned"], 0)
-        self.assertTrue(any("public Polymarket" in item and "revoked" in item for item in live["missing"]))
+        self.assertEqual(report["checks"]["public_live"]["award_source"], "none")
+        self.assertEqual(report["checks"]["public_live"]["diagnostic_status"], "pass")
 
     def test_readiness_scorer_reports_conservative_static_score(self) -> None:
         result = subprocess.run(
@@ -648,41 +781,80 @@ class ProductReadinessTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
 
-    def test_unreviewed_external_evidence_does_not_award_points(self) -> None:
+    def test_complete_legacy_deployment_wrapper_cannot_award_points(self) -> None:
+        from scripts.check_product_readiness import REQUIRED_DEPLOYMENT_CHECKS, _project_version
+
+        revision = "a" * 40
+        wrapper = {
+            "verified": True,
+            "schema_version": 1,
+            "evidence_type": "deployment",
+            "reviewed_by": "self-asserted-reviewer",
+            "reviewed_at": reviewed_at_now(),
+            "source": "self-asserted test wrapper",
+            "scope": "production-host",
+            "environment": "production",
+            "expected_version": _project_version(),
+            "source_revision": revision,
+            "checks": [
+                {"name": name, "status": "pass"} for name in REQUIRED_DEPLOYMENT_CHECKS
+            ],
+        }
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "deployment.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "verified": True,
-                        "schema_version": 1,
-                        "evidence_type": "deployment",
-                        "source": "test",
-                        "checks": [{"name": "health", "status": "pass"}],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/check_product_readiness.py",
-                    "--no-run-local",
-                    "--deployment-evidence",
-                    str(path),
-                    "--json",
-                ],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            path.write_text(json.dumps(wrapper), encoding="utf-8")
+            report = score_deployment_evidence(path, revision)
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        report = json.loads(result.stdout)
         operations = next(item for item in report["categories"] if item["name"] == "operations_recovery")
         self.assertEqual(operations["earned"], 12)
-        self.assertTrue(any("reviewed_by" in item for item in operations["missing"]))
+        self.assertTrue(any("strict semantic review" in item for item in operations["missing"]))
+
+    def test_handwritten_valid_raw_deployment_report_remains_diagnostic_only(self) -> None:
+        from scripts.check_product_readiness import _project_version
+        from scripts.review_deployment_evidence import review_deployment_report
+
+        revision = "a" * 40
+        version = _project_version()
+        raw = raw_production_deployment_report(revision, version)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "raw-deployment.json"
+            path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+            semantic_review = review_deployment_report(
+                path,
+                expected_version=version,
+                expected_revision=revision,
+            )
+            report = score_deployment_evidence(path, revision)
+
+        self.assertEqual(semantic_review["status"], "ok")
+        operations = next(item for item in report["categories"] if item["name"] == "operations_recovery")
+        self.assertEqual(operations["earned"], 12)
+        self.assertTrue(any("passed semantic review" in item for item in operations["missing"]))
+        self.assertTrue(any("not score-eligible" in item for item in operations["missing"]))
+
+    def test_deployment_reviewer_summary_cannot_award_points(self) -> None:
+        from scripts.check_product_readiness import _project_version
+        from scripts.review_deployment_evidence import review_deployment_report
+
+        revision = "a" * 40
+        version = _project_version()
+        raw = raw_production_deployment_report(revision, version)
+        with tempfile.TemporaryDirectory() as temporary:
+            raw_path = Path(temporary) / "raw-deployment.json"
+            summary_path = Path(temporary) / "review-summary.json"
+            raw_path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+            summary = review_deployment_report(
+                raw_path,
+                expected_version=version,
+                expected_revision=revision,
+            )
+            summary_path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
+            report = score_deployment_evidence(summary_path, revision)
+
+        self.assertEqual(summary["status"], "ok")
+        operations = next(item for item in report["categories"] if item["name"] == "operations_recovery")
+        self.assertEqual(operations["earned"], 12)
+        self.assertTrue(any("strict semantic review" in item for item in operations["missing"]))
 
     def test_reviewed_partial_external_evidence_awards_only_its_scoped_points(self) -> None:
         from scripts.check_product_readiness import (
@@ -746,8 +918,10 @@ class ProductReadinessTests(unittest.TestCase):
 
         platform = next(item for item in report["categories"] if item["name"] == "platform_evidence")
         ci_cd = next(item for item in report["categories"] if item["name"] == "ci_cd_release")
-        self.assertEqual(platform["earned"], 8)
-        self.assertEqual(ci_cd["earned"], 15)
+        self.assertEqual(platform["earned"], 5)
+        self.assertEqual(ci_cd["earned"], 14)
+        self.assertTrue(any("diagnostic-only" in item for item in platform["missing"]))
+        self.assertTrue(any("diagnostic-only" in item for item in ci_cd["missing"]))
 
     def test_release_environment_evidence_requires_exact_security_checks(self) -> None:
         from scripts.check_product_readiness import REQUIRED_RELEASE_ENVIRONMENT_CHECKS, _reviewed_evidence
@@ -948,7 +1122,7 @@ class ProductReadinessTests(unittest.TestCase):
                     )
                     self.assertFalse(accepted, detail)
 
-    def test_current_repository_settings_manifest_remains_accepted(self) -> None:
+    def test_legacy_repository_settings_manifest_is_rejected_after_policy_hardening(self) -> None:
         from scripts.check_product_readiness import _reviewed_evidence
 
         accepted, detail = _reviewed_evidence(
@@ -958,7 +1132,8 @@ class ProductReadinessTests(unittest.TestCase):
             now=datetime(2026, 8, 26, tzinfo=timezone.utc),
         )
 
-        self.assertTrue(accepted, detail)
+        self.assertFalse(accepted, detail)
+        self.assertIn("missing required checks", detail)
 
     def test_checked_in_platform_ci_manifest_is_rejected_for_an_old_revision(self) -> None:
         from scripts.check_product_readiness import _reviewed_evidence
@@ -1099,7 +1274,8 @@ class ProductReadinessTests(unittest.TestCase):
                 report = build_report(args)
 
         platform = next(item for item in report["categories"] if item["name"] == "platform_evidence")
-        self.assertEqual(platform["earned"], 10)
+        self.assertEqual(platform["earned"], 5)
+        self.assertTrue(any("diagnostic-only" in item for item in platform["missing"]))
 
     def test_core_local_profile_cannot_award_the_final_readiness_point(self) -> None:
         from scripts.check_product_readiness import _parser, build_report
@@ -1154,7 +1330,7 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual(report["checks"]["repository"]["status"], "fail")
         self.assertEqual(report["checks"]["repository"]["initial_revision"], initial_revision)
         self.assertEqual(report["checks"]["repository"]["final_revision"], final_revision)
-        self.assertTrue(any("was revoked" in item for item in platform["missing"]))
+        self.assertTrue(any("diagnostic-only" in item for item in platform["missing"]))
 
     def test_dirty_worktree_cannot_receive_revision_bound_evidence_points(self) -> None:
         from scripts.check_product_readiness import _parser, build_report
@@ -1184,7 +1360,7 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual(report["checks"]["repository"]["status"], "fail")
         self.assertTrue(any("revision is unavailable" in item for item in platform["missing"]))
 
-    def test_release_history_must_match_current_version_and_revision(self) -> None:
+    def test_manual_release_history_manifest_cannot_award_attested_points(self) -> None:
         revision = repository_revision()
         manifest = {
             "verified": True,
@@ -1220,7 +1396,7 @@ class ProductReadinessTests(unittest.TestCase):
         report = json.loads(result.stdout)
         ci_cd = next(item for item in report["categories"] if item["name"] == "ci_cd_release")
         self.assertEqual(ci_cd["earned"], 14)
-        self.assertTrue(any("field tag" in item for item in ci_cd["missing"]))
+        self.assertTrue(any("Attested release evidence" in item for item in ci_cd["missing"]))
 
     def test_mislabeled_evidence_cannot_award_a_different_tier(self) -> None:
         manifest = {
@@ -1255,6 +1431,40 @@ class ProductReadinessTests(unittest.TestCase):
         platform = next(item for item in report["categories"] if item["name"] == "platform_evidence")
         self.assertEqual(platform["earned"], 5)
         self.assertTrue(any("evidence_type=\'platform-ci\'" in item for item in platform["missing"]))
+
+
+    def test_repository_git_probe_scrubs_overrides_and_disables_execution_hooks(self) -> None:
+        from scripts.check_product_readiness import ROOT as SCORER_ROOT, _repository_revision
+
+        completed = (
+            subprocess.CompletedProcess([], 0, stdout=str(SCORER_ROOT.resolve()) + "\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n", stderr=""),
+        )
+        with (
+            patch.dict(
+                "os.environ",
+                {"GIT_DIR": "attacker", "GIT_WORK_TREE": "attacker", "GIT_ASKPASS": "attacker"},
+                clear=False,
+            ),
+            patch("scripts.check_product_readiness.subprocess.run", side_effect=completed) as run,
+        ):
+            self.assertEqual(_repository_revision(), "a" * 40)
+
+        for call in run.call_args_list:
+            environment = call.kwargs["env"]
+            self.assertNotIn("GIT_DIR", environment)
+            self.assertNotIn("GIT_WORK_TREE", environment)
+            self.assertNotIn("GIT_ASKPASS", environment)
+            command = call.args[0]
+            self.assertIn("core.fsmonitor=false", command)
+            self.assertIn("core.hooksPath=", command)
+
+    def test_repository_git_probe_rejects_a_different_top_level(self) -> None:
+        from scripts.check_product_readiness import _repository_revision
+
+        forged = subprocess.CompletedProcess([], 0, stdout=str(ROOT.parent) + "\n", stderr="")
+        with patch("scripts.check_product_readiness.subprocess.run", return_value=forged):
+            self.assertEqual(_repository_revision(), "")
 
 
 if __name__ == "__main__":

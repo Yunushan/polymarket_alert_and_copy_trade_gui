@@ -235,23 +235,36 @@ class PolymarketAdapterTests(unittest.TestCase):
         self.assertEqual(result.filled_size, 0.0)
         self.assertIn("DRY RUN", result.message)
 
-    def test_live_order_is_disabled_by_adapter_config_by_default(self) -> None:
-        adapter = PolymarketAdapter()
+    def test_live_order_is_fail_closed_during_clob_v2_migration(self) -> None:
+        adapter = PolymarketAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "private_key": "not-used",
+            }
+        )
 
-        with self.assertRaises(MarketConfigurationError) as ctx:
-            adapter.place_live_order(
-                PaperOrderRequest(
-                    market_id="polymarket",
-                    contract_id="token-yes",
-                    side="BUY",
-                    size=1.0,
-                    limit_price=0.5,
+        with patch.object(adapter, "check_geoblock") as check_geoblock, patch(
+            "polymarket.trader.PolymarketTrader"
+        ) as legacy_trader:
+            with self.assertRaises(MarketConfigurationError) as ctx:
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        market_id="polymarket",
+                        contract_id="token-yes",
+                        side="BUY",
+                        size=1.0,
+                        limit_price=0.5,
+                    )
                 )
-            )
 
-        self.assertIn("disabled", str(ctx.exception).lower())
+        message = str(ctx.exception).lower()
+        self.assertIn("clob v2", message)
+        self.assertIn("legacy py-clob-client/v1", message)
+        check_geoblock.assert_not_called()
+        legacy_trader.assert_not_called()
 
-    def test_live_order_requires_limit_before_geoblock_or_credentials(self) -> None:
+    def test_live_order_blocker_precedes_request_validation_and_geoblock(self) -> None:
         adapter = PolymarketAdapter(
             {"live_trading_enabled": True, "live_trading_confirmed": True, "private_key": "not-used"}
         )
@@ -268,10 +281,10 @@ class PolymarketAdapterTests(unittest.TestCase):
                     )
                 )
 
-        self.assertIn("requires a limit price", str(ctx.exception))
+        self.assertIn("CLOB V2", str(ctx.exception))
         check_geoblock.assert_not_called()
 
-    def test_live_order_rejects_bad_signature_type_with_clear_error(self) -> None:
+    def test_live_order_blocker_precedes_signature_validation_and_geoblock(self) -> None:
         adapter = PolymarketAdapter(
             {
                 "live_trading_enabled": True,
@@ -293,7 +306,7 @@ class PolymarketAdapterTests(unittest.TestCase):
                     )
                 )
 
-        self.assertIn("SIGNATURE_TYPE must be an integer", str(ctx.exception))
+        self.assertIn("CLOB V2", str(ctx.exception))
 
     def test_health_check_exposes_runtime_without_secret_values(self) -> None:
         adapter = PolymarketAdapter(
@@ -307,7 +320,10 @@ class PolymarketAdapterTests(unittest.TestCase):
 
         health = adapter.health_check()
 
-        self.assertTrue(health["live_trading_enabled"])
+        self.assertTrue(health["live_trading_requested"])
+        self.assertFalse(health["live_trading_enabled"])
+        self.assertFalse(health["capabilities"]["live_trading"])
+        self.assertFalse(health["live_mutations_supported"])
         self.assertEqual(health["runtime"]["timeout_seconds"], 4.0)
         self.assertEqual(health["credential_sources"], [{"name": "PRIVATE_KEY", "source": "config:private_key"}])
         self.assertNotIn("super-secret", str(health))
@@ -327,12 +343,14 @@ class PolymarketAdapterTests(unittest.TestCase):
 
         self.assertTrue(readiness["ok"])
         self.assertTrue(readiness["sdk_trading_ready"])
+        self.assertFalse(health["live_mutations_supported"])
+        self.assertIn("CLOB V2", health["live_mutation_blocker"])
         self.assertEqual(readiness["signature_type"]["name"], "POLY_1271")
         self.assertEqual(readiness["private_key"]["redacted"], "***")
         self.assertIn("0x2222", readiness["funder_address"]["redacted"])
         self.assertNotIn(private_key, str(health))
 
-    def test_live_order_readiness_blocks_poly_1271_without_funder_before_client_init(self) -> None:
+    def test_clob_v2_blocker_precedes_poly_1271_readiness_and_client_init(self) -> None:
         adapter = PolymarketAdapter(
             {
                 "live_trading_enabled": True,
@@ -342,9 +360,9 @@ class PolymarketAdapterTests(unittest.TestCase):
             }
         )
 
-        with patch.object(adapter, "check_geoblock", return_value={"blocked": False}), patch(
-            "market_adapters.polymarket.PolymarketTrader"
-        ) as trader:
+        with patch.object(adapter, "check_geoblock") as check_geoblock, patch(
+            "polymarket.trader.PolymarketTrader"
+        ) as legacy_trader:
             with self.assertRaises(MarketConfigurationError) as ctx:
                 adapter.place_live_order(
                     PaperOrderRequest(
@@ -356,8 +374,9 @@ class PolymarketAdapterTests(unittest.TestCase):
                     )
                 )
 
-        self.assertIn("requires an explicit funder", str(ctx.exception))
-        trader.assert_not_called()
+        self.assertIn("CLOB V2", str(ctx.exception))
+        check_geoblock.assert_not_called()
+        legacy_trader.assert_not_called()
 
     def test_order_validation_rejects_bad_price(self) -> None:
         adapter = PolymarketAdapter()
@@ -374,14 +393,13 @@ class PolymarketAdapterTests(unittest.TestCase):
             )
 
     def test_health_check_exposes_authenticated_account_and_order_operations(self) -> None:
-        health = PolymarketAdapter().health_check()
+        health = PolymarketAdapter({"polymarket_order_management_enabled": True}).health_check()
 
         self.assertEqual(health["account_recovery_operations"], ["active_orders", "order_detail", "fills"])
-        self.assertEqual(
-            health["order_management_operations"],
-            ["cancel_order", "cancel_orders", "cancel_all_orders", "cancel_market_orders"],
-        )
+        self.assertEqual(health["order_management_operations"], [])
+        self.assertEqual(health["order_management_endpoints"], [])
         self.assertFalse(health["order_management_enabled"])
+        self.assertFalse(health["live_mutations_supported"])
 
     def test_authenticated_account_recovery_routes_documented_clob_reads(self) -> None:
         adapter = PolymarketAdapter(
@@ -420,7 +438,7 @@ class PolymarketAdapterTests(unittest.TestCase):
         self.assertEqual(get_trades.call_args.kwargs["after"], 1760000000)
         self.assertEqual(get_trades.call_args.kwargs["limit"], 25)
 
-    def test_polymarket_order_management_requires_opt_in_and_exact_confirmation(self) -> None:
+    def test_polymarket_order_management_config_cannot_bypass_clob_v2_blocker(self) -> None:
         adapter = PolymarketAdapter(
             {
                 "live_trading_enabled": True,
@@ -434,29 +452,18 @@ class PolymarketAdapterTests(unittest.TestCase):
                 },
             }
         )
-        with self.assertRaises(MarketConfigurationError) as disabled:
-            adapter.manage_orders("cancel_all_orders", confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
-        self.assertIn("disabled", str(disabled.exception).lower())
+        adapter.config["polymarket_order_management_enabled"] = True
+        with patch.object(adapter, "_l2_read_headers") as read_headers:
+            with self.assertRaises(MarketConfigurationError) as blocked:
+                adapter.manage_orders(
+                    "cancel_all_orders",
+                    confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                )
 
-        adapter = PolymarketAdapter(
-            {
-                "live_trading_enabled": True,
-                "live_trading_confirmed": True,
-                "polymarket_order_management_enabled": True,
-                "polymarket_l2_headers": {
-                    "POLY_ADDRESS": "0x" + "a" * 40,
-                    "POLY_API_KEY": "api-key",
-                    "POLY_PASSPHRASE": "passphrase",
-                    "POLY_SIGNATURE": "signature",
-                    "POLY_TIMESTAMP": "1760000000",
-                },
-            }
-        )
-        with self.assertRaises(MarketConfigurationError) as confirmation:
-            adapter.manage_orders("cancel_all_orders", confirm_order_management="no")
-        self.assertIn("exact confirmation", str(confirmation.exception).lower())
+        self.assertIn("CLOB V2", str(blocked.exception))
+        read_headers.assert_not_called()
 
-    def test_polymarket_order_management_routes_fixed_cancel_endpoints(self) -> None:
+    def test_polymarket_order_management_never_routes_legacy_cancel_endpoints(self) -> None:
         adapter = PolymarketAdapter(
             {
                 "live_trading_enabled": True,
@@ -474,28 +481,29 @@ class PolymarketAdapterTests(unittest.TestCase):
         order_id = "0x" + "a" * 64
         second_id = "0x" + "c" * 64
         confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
-        with patch("market_adapters.polymarket.clob_auth.cancel_order", return_value=load_fixture("cancel_order_response.json")) as cancel_order, patch(
-            "market_adapters.polymarket.clob_auth.cancel_orders", return_value=load_fixture("cancel_orders_response.json")
-        ) as cancel_orders, patch(
-            "market_adapters.polymarket.clob_auth.cancel_all_orders", return_value=load_fixture("cancel_all_response.json")
-        ) as cancel_all, patch(
-            "market_adapters.polymarket.clob_auth.cancel_market_orders", return_value=load_fixture("cancel_market_response.json")
+        operations = (
+            ("cancel_order", {"order_id": order_id}),
+            ("cancel_orders", {"orders": [order_id, second_id]}),
+            ("cancel_all_orders", {}),
+            ("cancel_market_orders", {"market_id": "0x" + "b" * 64, "asset_id": "1234567890"}),
+        )
+        with patch("market_adapters.polymarket.clob_auth.cancel_order") as cancel_order, patch(
+            "market_adapters.polymarket.clob_auth.cancel_orders"
+        ) as cancel_orders, patch("market_adapters.polymarket.clob_auth.cancel_all_orders") as cancel_all, patch(
+            "market_adapters.polymarket.clob_auth.cancel_market_orders"
         ) as cancel_market:
-            single = adapter.manage_orders("cancel_order", order_id=order_id, confirm_order_management=confirmation)
-            batch = adapter.manage_orders("cancel_orders", orders=[order_id, second_id, order_id], confirm_order_management=confirmation)
-            global_cancel = adapter.manage_orders("cancel_all_orders", confirm_order_management=confirmation)
-            market_cancel = adapter.manage_orders(
-                "cancel_market_orders",
-                market_id="0x" + "b" * 64,
-                asset_id="1234567890",
-                confirm_order_management=confirmation,
-            )
+            for operation, kwargs in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaises(MarketConfigurationError) as blocked:
+                        adapter.manage_orders(
+                            operation,
+                            confirm_order_management=confirmation,
+                            **kwargs,
+                        )
+                    self.assertIn("CLOB V2", str(blocked.exception))
 
-        self.assertTrue(all(result["live"] for result in (single, batch, global_cancel, market_cancel)))
-        cancel_order.assert_called_once_with(order_id, cancel_order.call_args.args[1])
-        self.assertEqual(cancel_orders.call_args.args[0], [order_id, second_id])
-        cancel_all.assert_called_once()
-        self.assertEqual(cancel_market.call_args.args[:2], ("0x" + "b" * 64, "1234567890"))
+        for transport in (cancel_order, cancel_orders, cancel_all, cancel_market):
+            transport.assert_not_called()
 
 
 if __name__ == "__main__":

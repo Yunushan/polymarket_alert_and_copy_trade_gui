@@ -49,6 +49,7 @@ from market_adapters.types import (
 
 from polymarket.util import is_wallet_address, normalize_wallet
 from polymarket import data_api
+from polymarket.constants import POLYMARKET_LIVE_MUTATION_BLOCKER
 from polymarket.ws_market import MarketWSClient
 from polymarket.trader import PolymarketTrader, TraderConfig
 
@@ -64,7 +65,7 @@ APP_USER_AGENT = f"{APP_ID}/1.0"
 DEPENDENCY_IMPORT_FALLBACKS = {
     "websocket-client": ("websocket",),
     "python-dotenv": ("dotenv",),
-    "py-clob-client": ("py_clob_client",),
+    "py-clob-client-v2": ("py_clob_client_v2",),
     "eth-account": ("eth_account",),
     "eth-abi": ("eth_abi",),
 }
@@ -5008,118 +5009,15 @@ class App(tk.Tk):
                 "Live copy trading is not supported for the selected market.",
             )
 
-        # LIVE mode safety: never rely on a cached or UI-initiated result. A
-        # fresh, explicit ``blocked is False`` response is required for every
-        # dispatch attempt; errors and malformed responses fail closed before
-        # the non-replayable dispatch boundary.
-        try:
-            geoblock = adapter.check_geoblock()
-        except Exception as exc:
-            self.ui_queue.put(("log", f"[copy LIVE] fresh geoblock check failed ({type(exc).__name__})."))
-            return CopyActivityOutcome(
-                "retryable",
-                "geoblock_check_failure",
-                "Fresh geoblock verification failed before dispatch and may be retried.",
-            )
-        if not isinstance(geoblock, dict) or not isinstance(geoblock.get("blocked"), bool):
-            self.ui_queue.put(("log", "[copy LIVE] geoblock status is unknown; refusing order."))
-            return CopyActivityOutcome(
-                "retryable",
-                "geoblock_status_unknown",
-                "Fresh geoblock verification returned no conclusive status.",
-            )
-        self._geoblock_cache = {**geoblock, "checked_at": int(time.time())}
-        if geoblock.get("blocked") is True:
-            self.ui_queue.put(("log", "[copy] BLOCKED by geoblock. Refusing to place order."))
-            return CopyActivityOutcome(
-                "rejected",
-                "geoblock",
-                "Live copy order was rejected by the geoblock safety gate.",
-            )
-
-        order = PaperOrderRequest(
-            market_id=market_id,
-            contract_id=token_id,
-            side=side,
-            size=size,
-            limit_price=limit_price,
-            metadata={"source": "copy_trading", "tif": "FOK"},
-        )
-        try:
-            preflight = adapter.preflight_live_order(order, feature_name="live copy trading")
-        except Exception as e:
-            self.ui_queue.put(("log", f"[copy LIVE] preflight blocked order ({type(e).__name__})."))
-            if isinstance(e, (MarketConfigurationError, UnsupportedFeatureError, ValueError)):
-                return CopyActivityOutcome(
-                    "rejected",
-                    "live_preflight_rejected",
-                    "Live-order preflight conclusively rejected this copy order.",
-                )
-            return CopyActivityOutcome(
-                "retryable",
-                "live_preflight_failure",
-                "Live-order preflight failed before dispatch and may be retried.",
-            )
-
-        try:
-            trader = self._get_trader()
-        except Exception as exc:
-            self.ui_queue.put(("log", f"[copy LIVE] trader setup failed ({type(exc).__name__})."))
-            return CopyActivityOutcome(
-                "retryable",
-                "trader_setup_failure",
-                "Trader setup failed before dispatch and may be retried.",
-            )
-        dispatch = {
-            "market_id": market_id,
-            "contract_id": token_id,
-            "side": side,
-            "size": size,
-            "limit_price": limit_price,
-            "tif": "FOK",
-            "approx_notional": float(preflight["approx_notional"]),
-        }
-        if before_live_dispatch is None:
-            self.ui_queue.put(("log", "[copy LIVE] durable dispatch outbox is unavailable; refusing order."))
-            return CopyActivityOutcome(
-                "retryable",
-                "dispatch_persistence_unavailable",
-                "Live dispatch was refused because its durable outbox was unavailable.",
-            )
-        try:
-            before_live_dispatch(dispatch)
-        except Exception as exc:
-            self.ui_queue.put(("log", f"[copy LIVE] dispatch intent persistence failed ({type(exc).__name__})."))
-            return CopyActivityOutcome(
-                "retryable",
-                "dispatch_intent_persistence_failure",
-                "Dispatch intent could not be persisted; no live order was sent.",
-            )
-        App._commit_copy_conflict(self, item)
-        self.ui_queue.put(
-            (
-                "log",
-                "[copy LIVE] Placing "
-                f"{side} order token={token_id} size={size:.4f} price={limit_price:.4f} "
-                f"notional~{preflight['approx_notional']:.4f} FOK",
-            )
-        )
-        try:
-            resp = trader.place_limit_order(token_id=token_id, side=side, price=limit_price, size=size, tif="FOK")
-            self.ui_queue.put(("log", f"[copy LIVE] response: {resp}"))
-        except Exception as e:
-            self.ui_queue.put(("log", f"[copy LIVE] dispatch outcome is ambiguous ({type(e).__name__})."))
-            return CopyActivityOutcome(
-                "ambiguous",
-                "live_dispatch_ambiguous",
-                "The venue call did not return a conclusive result; manual reconciliation is required.",
-                dispatch,
-            )
+        # The reviewed V2 SDK wrapper is present, but live copy execution stays
+        # disabled until exact-revision credentialed and funded order/cancel
+        # evidence is promoted. Reject before geoblock, preflight, outbox
+        # persistence, client construction, or any ambiguous transport boundary.
+        self.ui_queue.put(("log", f"[copy LIVE] {POLYMARKET_LIVE_MUTATION_BLOCKER}"))
         return CopyActivityOutcome(
-            "completed",
-            "live_dispatch_completed",
-            "The venue returned a conclusive live-order response.",
-            dispatch,
+            "rejected",
+            "polymarket_clob_v2_migration_required",
+            POLYMARKET_LIVE_MUTATION_BLOCKER,
         )
 
     # ------------------ Market WS event handling ------------------

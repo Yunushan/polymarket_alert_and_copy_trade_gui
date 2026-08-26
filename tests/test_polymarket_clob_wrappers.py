@@ -27,48 +27,45 @@ class ClobAuthWrapperTests(unittest.TestCase):
             with self.subTest(header=header), self.assertRaisesRegex(ValueError, header):
                 clob_auth._l2_headers(incomplete)
 
-    def test_authenticated_post_and_get_wrappers_preserve_contracts(self) -> None:
+    def test_authenticated_reads_remain_available_and_mutations_fail_closed(self) -> None:
         with patch("polymarket.clob_auth._request_json", return_value={"orderID": "order-1"}) as request:
-            self.assertEqual(clob_auth.post_order({"price": "0.5"}, L2_HEADERS), {"orderID": "order-1"})
-            self.assertEqual(clob_auth.post_orders(({"id": value} for value in (1, 2)), L2_HEADERS), {"orderID": "order-1"})
-            self.assertEqual(clob_auth.cancel_order("order-1", L2_HEADERS), {"orderID": "order-1"})
             self.assertEqual(
                 clob_auth.get_orders(L2_HEADERS, order_id="order-1", market="market-1", asset_id="asset-1", next_cursor="next"),
                 {"orderID": "order-1"},
             )
-            self.assertEqual(clob_auth.cancel_orders((value for value in ("one", "two")), L2_HEADERS), {"orderID": "order-1"})
-            self.assertEqual(clob_auth.cancel_all_orders(L2_HEADERS), {"orderID": "order-1"})
-            self.assertEqual(clob_auth.cancel_market_orders("market-1", "asset-1", L2_HEADERS), {"orderID": "order-1"})
             self.assertEqual(clob_auth.get_trades(L2_HEADERS, market="market-1"), {"orderID": "order-1"})
             self.assertEqual(clob_auth.get_order_scoring_status("order-1", L2_HEADERS), {"orderID": "order-1"})
-            self.assertEqual(clob_auth.send_heartbeat(L2_HEADERS), {"orderID": "order-1"})
             self.assertEqual(clob_auth.get_user_rewards(L2_HEADERS, market="market-1"), {"orderID": "order-1"})
             self.assertEqual(clob_auth.get_user_reward_total(L2_HEADERS, market="market-1"), {"orderID": "order-1"})
             self.assertEqual(clob_auth.get_user_reward_percentages(L2_HEADERS, market="market-1"), {"orderID": "order-1"})
             self.assertEqual(clob_auth.get_user_reward_markets(L2_HEADERS, market="market-1"), {"orderID": "order-1"})
 
+            for mutation in (
+                lambda: clob_auth.post_order({"price": "0.5"}, L2_HEADERS),
+                lambda: clob_auth.post_orders([{"id": 1}], L2_HEADERS),
+                lambda: clob_auth.cancel_order("order-1", L2_HEADERS),
+                lambda: clob_auth.cancel_orders(["one"], L2_HEADERS),
+                lambda: clob_auth.cancel_all_orders(L2_HEADERS),
+                lambda: clob_auth.cancel_market_orders("market-1", "asset-1", L2_HEADERS),
+                lambda: clob_auth.send_heartbeat(L2_HEADERS),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "CLOB V2"):
+                    mutation()
+
         names = [call.args[0] for call in request.call_args_list]
         self.assertEqual(
             names,
             [
-                "post_order",
-                "post_orders",
-                "cancel_order",
                 "get_orders",
-                "cancel_orders",
-                "cancel_all",
-                "cancel_market_orders",
                 "trades",
                 "order_scoring",
-                "heartbeats",
                 "user_rewards",
                 "user_reward_total",
                 "user_reward_percentages",
                 "user_reward_markets",
             ],
         )
-        self.assertEqual(request.call_args_list[3].kwargs["params"], {"id": "order-1", "market": "market-1", "asset_id": "asset-1", "next_cursor": "next"})
-        self.assertEqual(request.call_args_list[6].kwargs["payload"], {"market": "market-1", "asset_id": "asset-1"})
+        self.assertEqual(request.call_args_list[0].kwargs["params"], {"id": "order-1", "market": "market-1", "asset_id": "asset-1", "next_cursor": "next"})
 
     def test_get_order_uses_order_path_and_non_object_responses_are_empty(self) -> None:
         with patch("polymarket.clob_auth.request_json", return_value=["unexpected"]) as request:

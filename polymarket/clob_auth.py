@@ -3,10 +3,15 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 from .endpoints import CLOB_ENDPOINTS
-from .http_client import build_batch, request_json
+from .http_client import request_json
+from .constants import POLYMARKET_LIVE_MUTATION_BLOCKER
 
 
 REQUIRED_L2_HEADERS = ("POLY_ADDRESS", "POLY_API_KEY", "POLY_PASSPHRASE", "POLY_SIGNATURE", "POLY_TIMESTAMP")
+
+
+def _live_mutation_unsupported() -> None:
+    raise RuntimeError(POLYMARKET_LIVE_MUTATION_BLOCKER)
 
 
 def _l2_headers(headers: Mapping[str, str]) -> Dict[str, str]:
@@ -36,18 +41,15 @@ def _request_json(
 
 
 def post_order(order_payload: Mapping[str, Any], headers: Mapping[str, str], *, timeout: float = 15.0) -> Dict[str, Any]:
-    data = _request_json("post_order", payload=dict(order_payload), headers=headers, timeout=timeout)
-    return data if isinstance(data, dict) else {}
+    _live_mutation_unsupported()
 
 
 def post_orders(order_payloads: Iterable[Mapping[str, Any]], headers: Mapping[str, str], *, timeout: float = 15.0) -> Any:
-    payload = [dict(item) for item in build_batch(order_payloads, max_items=CLOB_ENDPOINTS["post_orders"].max_items, name="clob.post-orders")]
-    return _request_json("post_orders", payload=payload, headers=headers, timeout=timeout)
+    _live_mutation_unsupported()
 
 
 def cancel_order(order_id: str, headers: Mapping[str, str], *, timeout: float = 15.0) -> Dict[str, Any]:
-    data = _request_json("cancel_order", payload={"orderID": order_id}, headers=headers, timeout=timeout)
-    return data if isinstance(data, dict) else {}
+    _live_mutation_unsupported()
 
 
 def get_order(order_id: str, headers: Mapping[str, str], *, timeout: float = 15.0) -> Dict[str, Any]:
@@ -79,14 +81,11 @@ def get_orders(
 
 
 def cancel_orders(order_ids: Iterable[str], headers: Mapping[str, str], *, timeout: float = 15.0) -> Dict[str, Any]:
-    payload = [str(order_id) for order_id in build_batch(order_ids, max_items=CLOB_ENDPOINTS["cancel_orders"].max_items, name="clob.cancel-orders")]
-    data = _request_json("cancel_orders", payload=payload, headers=headers, timeout=timeout)
-    return data if isinstance(data, dict) else {}
+    _live_mutation_unsupported()
 
 
 def cancel_all_orders(headers: Mapping[str, str], *, timeout: float = 15.0) -> Dict[str, Any]:
-    data = _request_json("cancel_all", headers=headers, timeout=timeout)
-    return data if isinstance(data, dict) else {}
+    _live_mutation_unsupported()
 
 
 def cancel_market_orders(
@@ -96,13 +95,7 @@ def cancel_market_orders(
     *,
     timeout: float = 15.0,
 ) -> Dict[str, Any]:
-    data = _request_json(
-        "cancel_market_orders",
-        payload={"market": market, "asset_id": asset_id},
-        headers=headers,
-        timeout=timeout,
-    )
-    return data if isinstance(data, dict) else {}
+    _live_mutation_unsupported()
 
 
 def get_trades(headers: Mapping[str, str], *, timeout: float = 15.0, **filters: Any) -> Dict[str, Any]:
@@ -116,8 +109,7 @@ def get_order_scoring_status(order_id: str, headers: Mapping[str, str], *, timeo
 
 
 def send_heartbeat(headers: Mapping[str, str], *, timeout: float = 15.0) -> Dict[str, Any]:
-    data = _request_json("heartbeats", headers=headers, timeout=timeout)
-    return data if isinstance(data, dict) else {}
+    _live_mutation_unsupported()
 
 
 def get_user_rewards(headers: Mapping[str, str], *, timeout: float = 15.0, **params: Any) -> Dict[str, Any]:

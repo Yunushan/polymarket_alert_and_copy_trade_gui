@@ -33,14 +33,92 @@ def _source_args() -> list[str]:
     ]
 
 
-def _successful_public_checks() -> dict[str, dict[str, str]]:
+def _successful_public_checks() -> dict[str, dict[str, object]]:
+    semantics = {
+        "clob_time": "current_unix_time",
+        "gamma_markets": "market_identity",
+        "data_leaderboard": "leaderboard_identity",
+        "bridge_supported_assets": "supported_asset_identity",
+    }
     return {
-        name: {"status": "ok", "detail": f"{name} responded.", "sample_type": "dict"}
+        name: {
+            "status": "ok",
+            "detail": f"{name} responded.",
+            "sample_type": "dict",
+            "semantic_check": semantics[name],
+        }
         for name in live_probe.PUBLIC_CHECK_NAMES
     }
 
 
+def _successful_authenticated_reads() -> dict[str, dict[str, object]]:
+    return {
+        "clob_l2_orders": {
+            "status": "ok",
+            "detail": "orders read",
+            "sample_type": "list",
+            "semantic_check": "authenticated_order_collection",
+            "records_observed": 0,
+        },
+        "py_clob_client_credentials": {"status": "ok", "detail": "credentials derived"},
+    }
+
+
+def _clean_source_state(revision: str = SOURCE_REVISION) -> dict[str, object]:
+    return {
+        "revision": revision,
+        "clean": True,
+        "git_available": True,
+        "repository_origin": "github.com/yunushan/market-sentinel",
+    }
+
+
 class PublicOnlyPolymarketProbeTests(unittest.TestCase):
+    def test_authenticated_reads_stay_available_without_legacy_sdk_derivation(self) -> None:
+        credentials = {
+            "POLY_API_KEY": "api-key",
+            "POLY_API_SECRET": "api-secret",
+            "POLY_PASSPHRASE": "passphrase",
+            "POLYMARKET_PRIVATE_KEY": "0x" + "1" * 64,
+        }
+        with (
+            patch.dict(os.environ, credentials, clear=True),
+            patch.object(live_probe, "PolymarketTrader") as trader_cls,
+        ):
+            trader_cls.return_value.get_orders.return_value = []
+            checks = live_probe._authenticated_read_checks(2.0)
+
+        self.assertEqual(checks["clob_l2_orders"]["status"], "ok")
+        self.assertEqual(checks["clob_l2_orders"]["semantic_check"], "authenticated_order_collection")
+        self.assertEqual(checks["py_clob_client_credentials"]["status"], "ok")
+        trader_cls.return_value.get_orders.assert_called_once_with(only_first_page=True)
+        config = trader_cls.call_args.args[0]
+        self.assertTrue(config.authenticated_sdk_reads)
+        self.assertFalse(config.allow_api_key_derivation)
+        self.assertFalse(config.allow_api_key_creation)
+        self.assertEqual(config.api_secret, "api-secret")
+
+    def test_strict_source_provenance_requires_the_canonical_origin(self) -> None:
+        self.assertEqual(
+            live_probe._canonical_repository_origin("https://github.com/Yunushan/market-sentinel.git"),
+            "github.com/yunushan/market-sentinel",
+        )
+        self.assertEqual(
+            live_probe._canonical_repository_origin("git@github.com:Yunushan/market-sentinel.git"),
+            "github.com/yunushan/market-sentinel",
+        )
+        self.assertEqual(live_probe._canonical_repository_origin("https://github.com/example/fork.git"), "")
+
+        wrong_origin = _clean_source_state()
+        wrong_origin["repository_origin"] = ""
+        provenance = live_probe._strict_source_provenance(wrong_origin, wrong_origin)
+        gate = live_probe._funded_source_revision_gate(wrong_origin, wrong_origin)
+
+        self.assertFalse(provenance["stable"])
+        self.assertEqual(provenance["repository_origin"], "")
+        self.assertEqual(gate["status"], "fail")
+        self.assertEqual(gate["repository_origin"], "")
+
     def test_public_checks_require_semantically_usable_payloads(self) -> None:
         valid_payloads = {
             "clob_time": {"time": int(time.time())},
@@ -202,6 +280,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
             ("--max-verify-size", "1"),
             ("--max-verify-notional", "1"),
             ("--maker-price-buffer", "0.01"),
+            ("--recovery-journal", str((Path.cwd() / "recovery.json").resolve())),
         )
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "public.json"
@@ -287,6 +366,431 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
                     ),
                     1,
                 )
+
+    def test_funded_cli_blocks_before_mutation_transport_while_v2_is_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "blocked-funded.json"
+            with (
+                patch.object(
+                    live_probe,
+                    "_repository_source_state",
+                    side_effect=[_clean_source_state(), _clean_source_state(), _clean_source_state()],
+                ),
+                patch.object(
+                    live_probe,
+                    "_enforce_windows_recovery_journal_privacy",
+                    side_effect=AssertionError("unsupported mutations must not prepare a recovery journal"),
+                ) as journal_acl,
+                patch.object(live_probe, "_load_env"),
+                patch.object(live_probe, "_public_checks", return_value=_successful_public_checks()),
+                patch.object(
+                    live_probe,
+                    "_authenticated_read_checks",
+                    return_value=_successful_authenticated_reads(),
+                ),
+                patch.object(
+                    live_probe,
+                    "_bridge_address_checks",
+                    return_value={"deposit_address_creation": {"status": "blocked"}},
+                ),
+                patch.object(live_probe, "build_clob_auth_readiness", return_value={"ok": True}),
+                patch.object(live_probe, "build_polymarket_credential_runbook", return_value={}),
+                patch.object(
+                    live_probe,
+                    "run_live_order_cancel_verification",
+                    side_effect=AssertionError("unsupported mutations must not reach the execution harness"),
+                ) as verifier,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = live_probe.main(
+                    ["--allow-funded-order", "--report-file", str(report_path)]
+                )
+
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(report["funded_live_order_check"]["status"], "blocked")
+            self.assertFalse(report["funded_live_order_check"]["live_action"])
+            self.assertFalse(report["funded_live_order_check"]["execution_supported"])
+            self.assertIn("CLOB V2", report["funded_live_order_check"]["detail"])
+            journal_acl.assert_not_called()
+            verifier.assert_not_called()
+
+    @patch.object(live_probe, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_funded_cli_requires_a_distinct_absolute_recovery_journal(self) -> None:
+        invalid_argv = (
+            ["--allow-funded-order"],
+            ["--allow-funded-order", "--recovery-journal", "relative-recovery.json"],
+            ["--recovery-journal", str((Path.cwd() / "recovery.json").resolve())],
+        )
+        for argv in invalid_argv:
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    live_probe.main(argv)
+            self.assertEqual(raised.exception.code, 2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = (Path(tmp) / "same.json").resolve()
+            with (
+                patch.object(live_probe, "_enforce_windows_recovery_journal_privacy"),
+                redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    live_probe.main(
+                        [
+                            "--allow-funded-order",
+                            "--recovery-journal",
+                            str(report_path),
+                            "--report-file",
+                            str(report_path),
+                        ]
+                    )
+            self.assertEqual(raised.exception.code, 2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific funded-journal ACL gate")
+    @patch.object(live_probe, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_windows_funded_cli_fails_closed_without_owner_only_acl_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery_path = (Path(tmp) / "recovery.json").resolve()
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    live_probe.main(
+                        [
+                            "--allow-funded-order",
+                            "--recovery-journal",
+                            str(recovery_path),
+                        ]
+                    )
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("cannot verify an owner-only directory ACL", stderr.getvalue())
+
+    def test_credential_only_cli_does_not_require_a_funded_journal_acl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "credential.json"
+            with (
+                patch.object(
+                    live_probe,
+                    "_repository_source_state",
+                    side_effect=[_clean_source_state(), _clean_source_state()],
+                ),
+                patch.object(
+                    live_probe,
+                    "_enforce_windows_recovery_journal_privacy",
+                    side_effect=AssertionError("credential-only mode must not inspect funded-journal ACLs"),
+                ),
+                patch.object(live_probe, "_load_env"),
+                patch.object(live_probe, "_public_checks", return_value=_successful_public_checks()),
+                patch.object(
+                    live_probe,
+                    "_authenticated_read_checks",
+                    return_value=_successful_authenticated_reads(),
+                ),
+                patch.object(
+                    live_probe,
+                    "_bridge_address_checks",
+                    return_value={"deposit_address_creation": {"status": "blocked"}},
+                ),
+                patch.object(live_probe, "build_clob_auth_readiness", return_value={"ok": True}),
+                patch.object(live_probe, "build_polymarket_credential_runbook", return_value={}),
+                patch.object(
+                    live_probe,
+                    "_funded_order_check",
+                    return_value={"status": "blocked", "live_action": False},
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = live_probe.main(
+                    [
+                        "--require-authenticated-read-ok",
+                        "--report-file",
+                        str(report_path),
+                    ]
+                )
+
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(report["ok"])
+            self.assertTrue(report["stage_gates"]["credentialed_read_ok"])
+            self.assertTrue(report["source_provenance"]["stable"])
+
+    @patch.object(live_probe, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_strict_cli_blocks_funded_harness_when_only_credential_derivation_succeeds(self) -> None:
+        authenticated_checks = {
+            "py_clob_client_credentials": {"status": "ok", "detail": "credentials derived"},
+            "clob_l2_orders": {"status": "blocked"},
+            "relayer_recent_transactions": {"status": "blocked"},
+            "user_websocket_connect": {"status": "skipped"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "strict.json"
+            recovery_path = Path(tmp) / "recovery.json"
+            with (
+                patch.object(
+                    live_probe,
+                    "_repository_source_state",
+                    side_effect=[_clean_source_state(), _clean_source_state(), _clean_source_state()],
+                ),
+                patch.object(live_probe, "_enforce_windows_recovery_journal_privacy"),
+                patch.object(live_probe, "_load_env"),
+                patch.object(live_probe, "_public_checks", return_value=_successful_public_checks()),
+                patch.object(live_probe, "_authenticated_read_checks", return_value=authenticated_checks),
+                patch.object(
+                    live_probe,
+                    "_bridge_address_checks",
+                    return_value={"deposit_address_creation": {"status": "blocked"}},
+                ),
+                patch.object(live_probe, "build_clob_auth_readiness", return_value={"ok": True}),
+                patch.object(live_probe, "build_polymarket_credential_runbook", return_value={}),
+                patch.object(
+                    live_probe,
+                    "_funded_order_check",
+                    side_effect=AssertionError("funded harness must not run without an accepted read"),
+                ) as funded,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = live_probe.main(
+                    [
+                        "--allow-funded-order",
+                        "--require-authenticated-read-ok",
+                        "--token-id",
+                        "token-1",
+                        "--side",
+                        "BUY",
+                        "--price",
+                        "0.01",
+                        "--size",
+                        "1",
+                        "--cancel-immediately",
+                        "--allow-token-id",
+                        "token-1",
+                        "--confirm-live-order-cancel",
+                        live_probe.CONFIRM_LIVE_ORDER_CANCEL,
+                        "--recovery-journal",
+                        str(recovery_path.resolve()),
+                        "--report-file",
+                        str(report_path),
+                    ]
+                )
+
+            funded.assert_not_called()
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(report["stage_gates"]["credentialed_read_ok"])
+            self.assertEqual(report["stage_gates"]["accepted_credential_read_checks"], [])
+            self.assertEqual(report["funded_live_order_check"]["status"], "blocked")
+            self.assertFalse(report["funded_live_order_check"]["live_action"])
+            self.assertTrue(report["source_provenance"]["stable"])
+            self.assertEqual(report["source_provenance"]["source_revision"], SOURCE_REVISION)
+
+    @patch.object(live_probe, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_strict_cli_allows_mocked_funded_harness_only_after_accepted_read_and_clean_source(self) -> None:
+        authenticated_checks = _successful_authenticated_reads()
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "strict.json"
+            recovery_path = Path(tmp) / "recovery.json"
+            with (
+                patch.object(
+                    live_probe,
+                    "_repository_source_state",
+                    side_effect=[_clean_source_state(), _clean_source_state(), _clean_source_state()],
+                ),
+                patch.object(live_probe, "_enforce_windows_recovery_journal_privacy"),
+                patch.object(live_probe, "_load_env"),
+                patch.object(live_probe, "_public_checks", return_value=_successful_public_checks()),
+                patch.object(live_probe, "_authenticated_read_checks", return_value=authenticated_checks),
+                patch.object(
+                    live_probe,
+                    "_bridge_address_checks",
+                    return_value={"deposit_address_creation": {"status": "blocked"}},
+                ),
+                patch.object(live_probe, "build_clob_auth_readiness", return_value={"ok": True}),
+                patch.object(live_probe, "build_polymarket_credential_runbook", return_value={}),
+                patch.object(
+                    live_probe,
+                    "_funded_order_check",
+                    return_value={
+                        "status": "ok",
+                        "live_action": True,
+                        "manual_reconciliation_required": False,
+                    },
+                ) as funded,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = live_probe.main(
+                    [
+                        "--allow-funded-order",
+                        "--token-id",
+                        "token-1",
+                        "--side",
+                        "BUY",
+                        "--price",
+                        "0.01",
+                        "--size",
+                        "1",
+                        "--cancel-immediately",
+                        "--allow-token-id",
+                        "token-1",
+                        "--confirm-live-order-cancel",
+                        live_probe.CONFIRM_LIVE_ORDER_CANCEL,
+                        "--recovery-journal",
+                        str(recovery_path.resolve()),
+                        "--report-file",
+                        str(report_path),
+                    ]
+                )
+
+            funded.assert_called_once()
+            self.assertEqual(funded.call_args.kwargs, {"source_revision": SOURCE_REVISION})
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(report["stage_gates"]["accepted_credential_read_checks"], ["clob_l2_orders"])
+            self.assertTrue(report["stage_gates"]["credentialed_read_ok"])
+            self.assertTrue(report["source_provenance"]["stable"])
+
+    @patch.object(live_probe, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_strict_cli_fails_when_source_changes_after_funded_execution(self) -> None:
+        final_state = {
+            "revision": "b" * 40,
+            "clean": True,
+            "git_available": True,
+            "repository_origin": "github.com/yunushan/market-sentinel",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "strict.json"
+            recovery_path = Path(tmp) / "recovery.json"
+            with (
+                patch.object(
+                    live_probe,
+                    "_repository_source_state",
+                    side_effect=[_clean_source_state(), _clean_source_state(), final_state],
+                ),
+                patch.object(live_probe, "_enforce_windows_recovery_journal_privacy"),
+                patch.object(live_probe, "_load_env"),
+                patch.object(live_probe, "_public_checks", return_value=_successful_public_checks()),
+                patch.object(
+                    live_probe,
+                    "_authenticated_read_checks",
+                    return_value=_successful_authenticated_reads(),
+                ),
+                patch.object(
+                    live_probe,
+                    "_bridge_address_checks",
+                    return_value={"deposit_address_creation": {"status": "blocked"}},
+                ),
+                patch.object(live_probe, "build_clob_auth_readiness", return_value={"ok": True}),
+                patch.object(live_probe, "build_polymarket_credential_runbook", return_value={}),
+                patch.object(
+                    live_probe,
+                    "_funded_order_check",
+                    return_value={
+                        "status": "ok",
+                        "live_action": True,
+                        "manual_reconciliation_required": False,
+                    },
+                ) as funded,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = live_probe.main(
+                    [
+                        "--allow-funded-order",
+                        "--token-id",
+                        "token-1",
+                        "--side",
+                        "BUY",
+                        "--price",
+                        "0.01",
+                        "--size",
+                        "1",
+                        "--cancel-immediately",
+                        "--allow-token-id",
+                        "token-1",
+                        "--confirm-live-order-cancel",
+                        live_probe.CONFIRM_LIVE_ORDER_CANCEL,
+                        "--recovery-journal",
+                        str(recovery_path.resolve()),
+                        "--report-file",
+                        str(report_path),
+                    ]
+                )
+
+            funded.assert_called_once()
+            self.assertEqual(funded.call_args.kwargs, {"source_revision": SOURCE_REVISION})
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(report["ok"])
+            self.assertEqual(report["funded_live_order_check"]["status"], "ok")
+            self.assertEqual(report["funded_live_order_check"]["source_revision_gate"]["status"], "pass")
+            self.assertFalse(report["source_provenance"]["stable"])
+            self.assertEqual(report["stage_gates"]["exact_source_revision"], "failed")
+
+    @patch.object(live_probe, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_strict_cli_blocks_funded_harness_from_dirty_source(self) -> None:
+        dirty_state = {
+            "revision": SOURCE_REVISION,
+            "clean": False,
+            "git_available": True,
+            "repository_origin": "github.com/yunushan/market-sentinel",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "strict.json"
+            recovery_path = Path(tmp) / "recovery.json"
+            with (
+                patch.object(
+                    live_probe,
+                    "_repository_source_state",
+                    side_effect=[dirty_state, dirty_state, dirty_state],
+                ),
+                patch.object(live_probe, "_enforce_windows_recovery_journal_privacy"),
+                patch.object(live_probe, "_load_env"),
+                patch.object(live_probe, "_public_checks", return_value=_successful_public_checks()),
+                patch.object(
+                    live_probe,
+                    "_authenticated_read_checks",
+                    return_value=_successful_authenticated_reads(),
+                ),
+                patch.object(
+                    live_probe,
+                    "_bridge_address_checks",
+                    return_value={"deposit_address_creation": {"status": "blocked"}},
+                ),
+                patch.object(live_probe, "build_clob_auth_readiness", return_value={"ok": True}),
+                patch.object(live_probe, "build_polymarket_credential_runbook", return_value={}),
+                patch.object(
+                    live_probe,
+                    "_funded_order_check",
+                    side_effect=AssertionError("funded harness must not run from dirty source"),
+                ) as funded,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = live_probe.main(
+                    [
+                        "--allow-funded-order",
+                        "--token-id",
+                        "token-1",
+                        "--side",
+                        "BUY",
+                        "--price",
+                        "0.01",
+                        "--size",
+                        "1",
+                        "--cancel-immediately",
+                        "--allow-token-id",
+                        "token-1",
+                        "--confirm-live-order-cancel",
+                        live_probe.CONFIRM_LIVE_ORDER_CANCEL,
+                        "--recovery-journal",
+                        str(recovery_path.resolve()),
+                        "--report-file",
+                        str(report_path),
+                    ]
+                )
+
+            funded.assert_not_called()
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(report["source_provenance"]["stable"])
+            self.assertEqual(report["source_provenance"]["source_revision"], "")
+            self.assertEqual(report["funded_live_order_check"]["status"], "blocked")
 
 
 if __name__ == "__main__":

@@ -132,7 +132,7 @@ SORT_ALIASES = {
 DEPENDENCY_IMPORT_FALLBACKS = {
     "websocket-client": ("websocket",),
     "python-dotenv": ("dotenv",),
-    "py-clob-client": ("py_clob_client",),
+    "py-clob-client-v2": ("py_clob_client_v2",),
     "eth-account": ("eth_account",),
     "eth-abi": ("eth_abi",),
 }
@@ -1986,12 +1986,7 @@ def run_market_position_intent(args: argparse.Namespace) -> int:
 
 BETFAIR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_orders", "update_orders", "replace_orders")
 KALSHI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")
-POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
-    "cancel_order",
-    "cancel_orders",
-    "cancel_all_orders",
-    "cancel_market_orders",
-)
+POLYMARKET_ORDER_MANAGEMENT_OPERATIONS: tuple[str, ...] = ()
 GEMINI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
 MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_offer",

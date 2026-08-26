@@ -36,8 +36,10 @@ Each bundle contains:
 - `funded_execution_exposed` is always `false`.
 - The raw report payload is not included.
 - Secrets already redacted before storage remain redacted in the bundle.
-- A bundle can identify candidate evidence, but it cannot promote `credential_live_verified`
-  or `funded_live_verified` without a separate operator decision and code/docs update.
+- A bundle can identify `candidate_only` evidence, but it never establishes
+  `credential_live_verified` or `funded_live_verified`. A trusted workflow and exact-byte
+  attestation are required before production verification; an operator decision or local
+  code/docs update alone is insufficient.
 
 ## Verification
 
