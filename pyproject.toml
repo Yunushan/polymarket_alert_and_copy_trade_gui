@@ -20,7 +20,7 @@ dependencies = [
     "packaging>=24.0",
     "cryptography>=50.0.0",
     "eth-account>=0.13.0",
-    "eth-abi>=5.0.0,<6.0.0",
+    "eth-abi>=5.0.0,<7.0.0",
     "tomli>=2.4.1; python_version < '3.11'",
 ]
 
