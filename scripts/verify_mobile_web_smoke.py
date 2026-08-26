@@ -26,6 +26,7 @@ from web_api import ReactGuiServer  # noqa: E402
 
 DEFAULT_FRONTEND_DIR = ROOT / "frontend" / "dist"
 DEFAULT_HOST = "127.0.0.1"
+DEFAULT_BROWSER_STARTUP_TIMEOUT_SECONDS = 60
 DEFAULT_RENDER_TIMEOUT_SECONDS = 60
 DEFAULT_CDP_COMMAND_TIMEOUT_SECONDS = 15
 DEFAULT_BROWSER_ATTEMPTS_PER_MODE = 2
@@ -125,6 +126,10 @@ MOBILE_TARGETS: Dict[str, Dict[str, Any]] = {
 }
 
 
+class BrowserRenderTimeoutError(RuntimeError):
+    """Raised when a browser starts but the mobile UI does not render in time."""
+
+
 def _target_names(target_arg: str) -> Iterable[str]:
     if target_arg == "all":
         return MOBILE_TARGETS.keys()
@@ -185,7 +190,8 @@ def _browser_mobile_check_once(
     target: Dict[str, Any],
     *,
     headless_arg: str,
-    timeout_seconds: int,
+    startup_timeout_seconds: int,
+    render_timeout_seconds: int,
 ) -> Dict[str, Any]:
     width = int(target["width"])
     height = int(target["height"])
@@ -215,9 +221,9 @@ def _browser_mobile_check_once(
     browser_port: int | None = None
     browser_ws_path = ""
     try:
-        deadline = time.monotonic() + max(5, int(timeout_seconds))
+        startup_deadline = time.monotonic() + max(5, int(startup_timeout_seconds))
         port_file = profile_dir / "DevToolsActivePort"
-        while time.monotonic() < deadline and not port_file.exists():
+        while time.monotonic() < startup_deadline and not port_file.exists():
             time.sleep(0.1)
         if not port_file.exists():
             exit_code = process.poll()
@@ -230,7 +236,7 @@ def _browser_mobile_check_once(
         browser_port = port
         browser_ws_path = port_lines[1] if len(port_lines) > 1 else ""
         page_ws_url = ""
-        while time.monotonic() < deadline and not page_ws_url:
+        while time.monotonic() < startup_deadline and not page_ws_url:
             try:
                 with urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
                     tabs = json.loads(response.read().decode("utf-8"))
@@ -254,7 +260,12 @@ def _browser_mobile_check_once(
         try:
             command_id = 0
 
-            def cdp(method: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+            def cdp(
+                method: str,
+                params: Dict[str, Any] | None = None,
+                *,
+                deadline: float,
+            ) -> Dict[str, Any]:
                 nonlocal command_id
                 command_id += 1
                 return _cdp_call(
@@ -267,8 +278,8 @@ def _browser_mobile_check_once(
                     headless_arg=headless_arg,
                 )
 
-            cdp("Page.enable")
-            cdp("Runtime.enable")
+            cdp("Page.enable", deadline=startup_deadline)
+            cdp("Runtime.enable", deadline=startup_deadline)
             cdp(
                 "Emulation.setDeviceMetricsOverride",
                 {
@@ -277,9 +288,21 @@ def _browser_mobile_check_once(
                     "deviceScaleFactor": float(target["device_scale_factor"]),
                     "mobile": True,
                 },
+                deadline=startup_deadline,
             )
-            cdp("Emulation.setUserAgentOverride", {"userAgent": target["user_agent"], "platform": target["platform"]})
-            cdp("Page.navigate", {"url": url})
+            cdp(
+                "Emulation.setUserAgentOverride",
+                {"userAgent": target["user_agent"], "platform": target["platform"]},
+                deadline=startup_deadline,
+            )
+
+            # Browser discovery and CDP initialization can be slow on a busy
+            # hosted runner. Navigation gets its own bounded acknowledgement
+            # budget; rendering gets a fresh budget only after Chrome accepts
+            # the navigation command.
+            navigation_deadline = time.monotonic() + DEFAULT_CDP_COMMAND_TIMEOUT_SECONDS
+            cdp("Page.navigate", {"url": url}, deadline=navigation_deadline)
+            render_deadline = time.monotonic() + max(5, int(render_timeout_seconds))
 
             expression = f"""
 (() => {{
@@ -311,8 +334,12 @@ def _browser_mobile_check_once(
             last_value: Dict[str, Any] = {}
             reload_attempts = 0
             next_reload_at = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                response = cdp("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+            while time.monotonic() < render_deadline:
+                response = cdp(
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                    deadline=render_deadline,
+                )
                 value = response.get("result", {}).get("result", {}).get("value")
                 if isinstance(value, dict):
                     last_value = value
@@ -326,10 +353,12 @@ def _browser_mobile_check_once(
                     ):
                         reload_attempts += 1
                         next_reload_at = time.monotonic() + 10
-                        cdp("Page.navigate", {"url": url})
+                        cdp("Page.navigate", {"url": url}, deadline=render_deadline)
                 time.sleep(0.25)
             detail = json.dumps(last_value, sort_keys=True) if last_value else "{}"
-            raise SystemExit(f"{target_name} mobile smoke failed: {detail}")
+            raise BrowserRenderTimeoutError(
+                f"{target_name} {headless_arg} timed out waiting for the mobile UI to render: {detail}"
+            )
         finally:
             try:
                 ws.close()
@@ -356,7 +385,8 @@ def browser_mobile_check(
     target_name: str,
     target: Dict[str, Any],
     *,
-    timeout_seconds: int,
+    startup_timeout_seconds: int = DEFAULT_BROWSER_STARTUP_TIMEOUT_SECONDS,
+    render_timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     errors = []
     for headless_arg, suffix in (("--headless=new", "-new"), ("--headless", "-legacy")):
@@ -374,11 +404,12 @@ def browser_mobile_check(
                     target_name,
                     target,
                     headless_arg=headless_arg,
-                    timeout_seconds=timeout_seconds,
+                    startup_timeout_seconds=startup_timeout_seconds,
+                    render_timeout_seconds=render_timeout_seconds,
                 )
-            except BrowserStartupError as exc:
+            except (BrowserStartupError, BrowserRenderTimeoutError) as exc:
                 errors.append(str(exc))
-    raise SystemExit("Headless browser failed to start for mobile smoke: " + " ".join(errors))
+    raise SystemExit("Mobile browser smoke exhausted all attempts: " + " ".join(errors))
 
 
 def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
@@ -405,7 +436,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                         temp_root / f"{target_name}-profile",
                         target_name,
                         target,
-                        timeout_seconds=args.render_timeout_seconds,
+                        startup_timeout_seconds=args.startup_timeout_seconds,
+                        render_timeout_seconds=args.render_timeout_seconds,
                     ),
                 }
         finally:
@@ -425,6 +457,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
     parser.add_argument("--browser-path", default="")
     parser.add_argument("--target", default="all", help="Target name, comma-separated targets, or all.")
+    parser.add_argument(
+        "--startup-timeout-seconds",
+        type=int,
+        default=DEFAULT_BROWSER_STARTUP_TIMEOUT_SECONDS,
+        help="Maximum seconds allowed for each browser process to expose and initialize CDP.",
+    )
     parser.add_argument("--render-timeout-seconds", type=int, default=DEFAULT_RENDER_TIMEOUT_SECONDS)
     parser.add_argument("--json", action="store_true", help="Print the smoke payload as JSON.")
     return parser.parse_args()

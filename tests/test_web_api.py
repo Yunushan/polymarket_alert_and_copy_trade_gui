@@ -632,6 +632,18 @@ class WebApiTests(unittest.TestCase):
                     self.assertTrue(health["readiness"]["admission"]["mutation_saturated"])
                     self.assertEqual(health["readiness"]["admission"]["reserved_read_workers"], 1)
 
+                    # Receiving the health response does not guarantee that its
+                    # handler thread has already returned its reserved HTTP
+                    # worker. Wait for that teardown before opening the request
+                    # intended to exercise the mutation-admission gate; without
+                    # this synchronization a slow runner can legitimately hit
+                    # the global worker limit first.
+                    deadline = time.monotonic() + 3
+                    while server.http_metrics.snapshot()["requests_in_flight"] != 3:
+                        if time.monotonic() >= deadline:
+                            self.fail("health request did not release its reserved HTTP worker")
+                        time.sleep(0.01)
+
                     rejected_status, rejected = self._request_json(
                         base_url,
                         "/api/config",
