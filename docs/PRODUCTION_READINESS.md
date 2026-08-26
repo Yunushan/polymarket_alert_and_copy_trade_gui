@@ -93,7 +93,7 @@ venue behavior are proven.
 | Area | Independent score | Maximum | Main deduction |
 | --- | ---: | ---: | --- |
 | Architecture and capability honesty | 12 | 18 | Monolithic single-node design; Polymarket CLOB V2 mutations are unavailable |
-| Correctness and testing | 14 | 18 | Strong offline/local coverage, but the current uncommitted tree lacks exact-revision CI proof and frontend behavioral coverage remains thin |
+| Correctness and testing | 14 | 18 | Strong offline/local coverage and a passing hosted matrix, but frontend behavioral coverage and real production-host behavior remain unproven |
 | Security and safety | 11 | 17 | Good fail-closed controls; production secrets/environment, signed-commit enforcement, and independent review are absent |
 | CI/CD and release | 9 | 17 | No published `v1.0.11`; signing/release-approval evidence is incomplete |
 | Operations and recovery | 6 | 15 | Evidence collectors now require independent probing and drills, but no real deployment, restore, off-host backup, or rollback proof exists |
