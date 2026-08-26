@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable
+from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -43,10 +46,232 @@ BUILDER_HEADERS = (
     "POLY_BUILDER_SIGNATURE",
 )
 
+PUBLIC_CHECK_NAMES = (
+    "clob_time",
+    "gamma_markets",
+    "data_leaderboard",
+    "bridge_supported_assets",
+)
+PUBLIC_ONLY_PROFILE = "public-only"
+PUBLIC_ONLY_WORKFLOW = ".github/workflows/ci.yml"
+PUBLIC_ONLY_WORKFLOW_NAME = "CI"
+PUBLIC_ONLY_FORBIDDEN_OPTIONS = frozenset(
+    {
+        "--skip-public-checks",
+        "--skip-authenticated-read-checks",
+        "--require-authenticated-read-ok",
+        "--include-user-websocket-connect",
+        "--user-ws-market",
+        "--include-bridge-address-creation",
+        "--bridge-address",
+        "--to-chain-id",
+        "--to-token-address",
+        "--recipient-addr",
+        "--allow-funded-order",
+        "--cancel-immediately",
+        "--confirm-live-order-cancel",
+        "--allow-token-id",
+        "--allow-token-file",
+        "--token-id",
+        "--side",
+        "--price",
+        "--size",
+        "--tif",
+        "--max-verify-size",
+        "--max-verify-notional",
+        "--maker-price-buffer",
+    }
+)
+PUBLIC_ONLY_SAFETY = {
+    "dotenv_loaded": False,
+    "credentials_present": False,
+    "credential_variables_present": [],
+    "authenticated_reads_attempted": False,
+    "authenticated_user_websocket_attempted": False,
+    "bridge_mutations_attempted": False,
+    "funded_orders_attempted": False,
+    "public_requests_read_only": True,
+}
+PUBLIC_ONLY_EVIDENCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "profile",
+        "repository",
+        "source_revision",
+        "run_id",
+        "run_attempt",
+        "workflow",
+        "workflow_name",
+        "workflow_ref",
+        "event",
+        "runner_environment",
+        "generated_at",
+        "started_at",
+        "completed_at",
+    }
+)
+_GITHUB_REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+
 
 def _load_env() -> None:
     if load_dotenv is not None:
         load_dotenv(ROOT / ".env")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _public_only_credential_variables() -> list[str]:
+    """Return credential-like environment variable names without exposing values."""
+    generic_names = {"PRIVATE_KEY", "FUNDER_ADDRESS", "SIGNATURE_TYPE"}
+    return sorted(
+        name
+        for name, value in os.environ.items()
+        if value
+        and (
+            name in generic_names
+            or name.startswith("POLY_")
+            or name.startswith("POLYMARKET_")
+            or name.startswith("RELAYER_")
+        )
+    )
+
+
+def _present_option_names(argv: Sequence[str]) -> set[str]:
+    return {token.split("=", 1)[0] for token in argv if token.startswith("--")}
+
+
+def _public_only_expected_source(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "repository": args.source_repository,
+        "source_revision": args.source_revision,
+        "run_id": args.source_run_id,
+        "run_attempt": args.source_run_attempt,
+        "workflow_ref": args.source_workflow_ref,
+    }
+
+
+def _validate_public_only_invocation(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    argv: Sequence[str],
+) -> None:
+    if args.public_only and args.validate_public_only_report:
+        parser.error("--public-only and --validate-public-only-report are mutually exclusive")
+
+    forbidden_options = sorted(_present_option_names(argv) & PUBLIC_ONLY_FORBIDDEN_OPTIONS)
+    if forbidden_options:
+        parser.error("public-only mode rejects private or mutating options: " + ", ".join(forbidden_options))
+
+    credential_variables = _public_only_credential_variables()
+    if credential_variables:
+        parser.error(
+            "public-only mode refuses credential-bearing environments: " + ", ".join(credential_variables)
+        )
+
+    if not (0.0 < args.timeout <= 30.0):
+        parser.error("public-only mode requires --timeout greater than 0 and at most 30 seconds")
+    if args.public_only and not args.report_file:
+        parser.error("--public-only requires --report-file for attestable evidence")
+    if args.validate_public_only_report and args.report_file:
+        parser.error("--report-file cannot be combined with --validate-public-only-report")
+    if not _GITHUB_REPOSITORY_RE.fullmatch(args.source_repository or ""):
+        parser.error("public-only mode requires --source-repository in owner/repository form")
+    if not _COMMIT_RE.fullmatch(args.source_revision or ""):
+        parser.error("public-only mode requires a lowercase 40-character --source-revision")
+    if not isinstance(args.source_run_id, int) or args.source_run_id < 1:
+        parser.error("public-only mode requires a positive --source-run-id")
+    if not isinstance(args.source_run_attempt, int) or args.source_run_attempt < 1:
+        parser.error("public-only mode requires a positive --source-run-attempt")
+
+    expected_workflow_ref = f"{args.source_repository}/{PUBLIC_ONLY_WORKFLOW}@refs/heads/main"
+    workflow_ref = args.source_workflow_ref or ""
+    if workflow_ref != expected_workflow_ref:
+        parser.error("--source-workflow-ref must bind the public workflow to refs/heads/main")
+
+
+def _public_only_report_issues(
+    report: Mapping[str, Any],
+    *,
+    expected_source: Mapping[str, Any],
+    require_success: bool,
+) -> list[str]:
+    issues: list[str] = []
+    expected_top_level = {"ok", "mode", "market_id", "evidence", "safety", "public_checks"}
+    if set(report) != expected_top_level:
+        issues.append("report must contain only the public-only top-level fields")
+    if report.get("mode") != "public_only":
+        issues.append("mode must be public_only")
+    if report.get("market_id") != "polymarket":
+        issues.append("market_id must be polymarket")
+
+    safety = report.get("safety")
+    if safety != PUBLIC_ONLY_SAFETY:
+        issues.append("safety declaration does not prove the fail-closed public-only profile")
+
+    public_checks = report.get("public_checks")
+    checks_are_exact = isinstance(public_checks, Mapping) and set(public_checks) == set(PUBLIC_CHECK_NAMES)
+    if not checks_are_exact:
+        issues.append("public_checks must contain the exact reviewed public endpoint set")
+        all_public_ok = False
+    else:
+        statuses = [public_checks[name].get("status") if isinstance(public_checks[name], Mapping) else None for name in PUBLIC_CHECK_NAMES]
+        if any(status not in {"ok", "failed"} for status in statuses):
+            issues.append("public checks may only report ok or failed in public-only mode")
+        all_public_ok = all(status == "ok" for status in statuses)
+    if report.get("ok") is not all_public_ok:
+        issues.append("ok must exactly match the four public endpoint statuses")
+    if require_success and not all_public_ok:
+        issues.append("all public endpoints must pass before evidence can be attested")
+
+    evidence = report.get("evidence")
+    if not isinstance(evidence, Mapping):
+        issues.append("evidence must be an object")
+        return issues
+    if set(evidence) != PUBLIC_ONLY_EVIDENCE_FIELDS:
+        issues.append("evidence fields do not match the public-only schema")
+    if evidence.get("schema_version") != 1:
+        issues.append("evidence schema_version must be 1")
+    if evidence.get("profile") != PUBLIC_ONLY_PROFILE:
+        issues.append(f"evidence profile must be {PUBLIC_ONLY_PROFILE}")
+    if evidence.get("workflow") != PUBLIC_ONLY_WORKFLOW:
+        issues.append(f"evidence workflow must be {PUBLIC_ONLY_WORKFLOW}")
+    if evidence.get("workflow_name") != PUBLIC_ONLY_WORKFLOW_NAME:
+        issues.append(f"evidence workflow_name must be {PUBLIC_ONLY_WORKFLOW_NAME}")
+    if evidence.get("event") != "workflow_dispatch":
+        issues.append("evidence event must be workflow_dispatch")
+    if evidence.get("runner_environment") != "github-hosted":
+        issues.append("evidence runner_environment must be github-hosted")
+    for name, expected in expected_source.items():
+        if evidence.get(name) != expected:
+            issues.append(f"evidence {name} does not match the expected GitHub source")
+
+    generated_at = _parse_utc_timestamp(evidence.get("generated_at"))
+    started_at = _parse_utc_timestamp(evidence.get("started_at"))
+    completed_at = _parse_utc_timestamp(evidence.get("completed_at"))
+    if not all((generated_at, started_at, completed_at)):
+        issues.append("evidence timestamps must be timezone-aware ISO-8601 values")
+    elif not (started_at <= completed_at <= generated_at):
+        issues.append("evidence timestamps must be ordered started_at <= completed_at <= generated_at")
+    return issues
+
+
+def _write_report(path: str | Path, report: Mapping[str, Any]) -> None:
+    atomic_write_text(Path(path), json.dumps(report, indent=2, sort_keys=True) + "\n")
 
 
 def _present(names: Iterable[str]) -> Dict[str, bool]:
@@ -71,25 +296,98 @@ def _skipped(detail: str) -> Dict[str, Any]:
     return _result("skipped", detail)
 
 
-def _probe(fn: Callable[[], Any], success_detail: str) -> Dict[str, Any]:
+def _nonblank(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_server_time(value: Any) -> Dict[str, Any]:
+    candidate = value.get("time", value.get("timestamp")) if isinstance(value, Mapping) else value
+    if isinstance(candidate, bool):
+        raise ValueError("CLOB server time is not a Unix timestamp")
+    try:
+        timestamp = float(candidate)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CLOB server time is not a Unix timestamp") from exc
+    skew = abs(time.time() - timestamp)
+    if not math.isfinite(timestamp) or skew > 24 * 60 * 60:
+        raise ValueError("CLOB server time is not a current Unix timestamp")
+    return {"semantic_check": "current_unix_time", "server_time_skew_seconds": round(skew, 3)}
+
+
+def _validate_gamma_markets(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, list) or not value or not isinstance(value[0], Mapping):
+        raise ValueError("Gamma markets response contains no market record")
+    market = value[0]
+    if not _nonblank(market.get("id")) or not any(
+        _nonblank(market.get(field)) for field in ("question", "conditionId", "slug")
+    ):
+        raise ValueError("Gamma market record lacks its documented identity fields")
+    return {"semantic_check": "market_identity", "records_observed": len(value)}
+
+
+def _validate_leaderboard(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, list) or not value or not isinstance(value[0], Mapping):
+        raise ValueError("Data leaderboard response contains no trader record")
+    row = value[0]
+    wallet = row.get("proxyWallet")
+    if not isinstance(wallet, str) or re.fullmatch(r"0x[0-9A-Fa-f]{40}", wallet) is None:
+        raise ValueError("Data leaderboard record lacks a documented proxy wallet")
+    numeric_values = [row.get("pnl"), row.get("vol")]
+    if not any(
+        not isinstance(item, bool) and isinstance(item, (int, float)) and math.isfinite(float(item))
+        for item in numeric_values
+    ):
+        raise ValueError("Data leaderboard record lacks a finite PnL or volume value")
+    return {"semantic_check": "leaderboard_identity", "records_observed": len(value)}
+
+
+def _validate_supported_assets(value: Any) -> Dict[str, Any]:
+    assets = value.get("supportedAssets") if isinstance(value, Mapping) else None
+    if not isinstance(assets, list) or not assets or not isinstance(assets[0], Mapping):
+        raise ValueError("Bridge response contains no supported asset record")
+    asset = assets[0]
+    token = asset.get("token")
+    if not _nonblank(str(asset.get("chainId", ""))) or not isinstance(token, Mapping) or not (
+        _nonblank(token.get("symbol")) and (_nonblank(token.get("name")) or _nonblank(token.get("address")))
+    ):
+        raise ValueError("Bridge supported asset lacks its documented chain or token identity")
+    return {"semantic_check": "supported_asset_identity", "records_observed": len(assets)}
+
+
+def _probe(
+    fn: Callable[[], Any],
+    success_detail: str,
+    validator: Callable[[Any], Mapping[str, Any]] | None = None,
+) -> Dict[str, Any]:
     try:
         value = fn()
-        return _result("ok", success_detail, sample_type=type(value).__name__)
+        semantic = dict(validator(value)) if validator is not None else {}
+        return _result("ok", success_detail, sample_type=type(value).__name__, **semantic)
     except Exception as exc:
         return _result("failed", f"{type(exc).__name__}: {exc}")
 
 
 def _public_checks(timeout: float) -> Dict[str, Any]:
     return {
-        "clob_time": _probe(lambda: clob_rest.get_server_time(timeout=timeout), "CLOB /time responded."),
-        "gamma_markets": _probe(lambda: gamma.list_markets(limit=1, timeout=timeout), "Gamma /markets responded."),
+        "clob_time": _probe(
+            lambda: clob_rest.get_server_time(timeout=timeout),
+            "CLOB /time returned a current Unix timestamp.",
+            _validate_server_time,
+        ),
+        "gamma_markets": _probe(
+            lambda: gamma.list_markets(limit=1, timeout=timeout),
+            "Gamma /markets returned an identified market.",
+            _validate_gamma_markets,
+        ),
         "data_leaderboard": _probe(
             lambda: data_api.get_leaderboard(limit=1, timeout=timeout),
-            "Data /v1/leaderboard responded.",
+            "Data /v1/leaderboard returned an identified trader row.",
+            _validate_leaderboard,
         ),
         "bridge_supported_assets": _probe(
             lambda: bridge.get_supported_assets(timeout=timeout),
-            "Bridge /supported-assets responded.",
+            "Bridge /supported-assets returned an identified supported asset.",
+            _validate_supported_assets,
         ),
     }
 
@@ -267,9 +565,96 @@ def _funded_order_check(args: argparse.Namespace) -> Dict[str, Any]:
         return _result("failed", f"{type(exc).__name__}: {exc}")
 
 
-def main() -> int:
+def _run_public_only(args: argparse.Namespace) -> int:
+    started_at = _utc_now()
+    public_checks = _public_checks(args.timeout)
+    completed_at = _utc_now()
+    report: Dict[str, Any] = {
+        "ok": all(public_checks[name].get("status") == "ok" for name in PUBLIC_CHECK_NAMES),
+        "mode": "public_only",
+        "market_id": "polymarket",
+        "evidence": {
+            "schema_version": 1,
+            "profile": PUBLIC_ONLY_PROFILE,
+            "repository": args.source_repository,
+            "source_revision": args.source_revision,
+            "run_id": args.source_run_id,
+            "run_attempt": args.source_run_attempt,
+            "workflow": PUBLIC_ONLY_WORKFLOW,
+            "workflow_name": PUBLIC_ONLY_WORKFLOW_NAME,
+            "workflow_ref": args.source_workflow_ref,
+            "event": "workflow_dispatch",
+            "runner_environment": "github-hosted",
+            "generated_at": _utc_now(),
+            "started_at": started_at,
+            "completed_at": completed_at,
+        },
+        "safety": dict(PUBLIC_ONLY_SAFETY),
+        "public_checks": public_checks,
+    }
+    issues = _public_only_report_issues(
+        report,
+        expected_source=_public_only_expected_source(args),
+        require_success=False,
+    )
+    if issues:
+        raise RuntimeError("Invalid internally generated public-only report: " + "; ".join(issues))
+    _write_report(args.report_file, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
+def _validate_public_only_report_file(args: argparse.Namespace) -> int:
+    path = Path(args.validate_public_only_report)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        print(f"Public-only report could not be read: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        print("Public-only report must contain a JSON object.", file=sys.stderr)
+        return 1
+    issues = _public_only_report_issues(
+        payload,
+        expected_source=_public_only_expected_source(args),
+        require_success=True,
+    )
+    if issues:
+        print("Public-only report validation failed:\n- " + "\n- ".join(issues), file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "validated_report": str(path),
+                "source_revision": payload["evidence"]["source_revision"],
+                "run_id": payload["evidence"]["run_id"],
+                "run_attempt": payload["evidence"]["run_attempt"],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description="Verify Polymarket public, credentialed, and optional live flows.")
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--public-only",
+        action="store_true",
+        help="Run only the reviewed unauthenticated read-only endpoint profile without loading .env.",
+    )
+    parser.add_argument(
+        "--validate-public-only-report",
+        help="Revalidate one successful public-only report without making network requests.",
+    )
+    parser.add_argument("--source-repository")
+    parser.add_argument("--source-revision")
+    parser.add_argument("--source-run-id", type=int)
+    parser.add_argument("--source-run-attempt", type=int)
+    parser.add_argument("--source-workflow-ref")
     parser.add_argument("--skip-public-checks", action="store_true")
     parser.add_argument("--skip-authenticated-read-checks", action="store_true")
     parser.add_argument("--require-authenticated-read-ok", action="store_true")
@@ -294,7 +679,23 @@ def main() -> int:
     parser.add_argument("--max-verify-size", type=float, default=ABSOLUTE_MAX_VERIFY_SIZE)
     parser.add_argument("--max-verify-notional", type=float, default=ABSOLUTE_MAX_VERIFY_NOTIONAL)
     parser.add_argument("--maker-price-buffer", type=float, default=0.005)
-    args = parser.parse_args()
+    args = parser.parse_args(raw_argv)
+
+    public_only_mode = bool(args.public_only or args.validate_public_only_report)
+    source_options = {
+        "--source-repository",
+        "--source-revision",
+        "--source-run-id",
+        "--source-run-attempt",
+        "--source-workflow-ref",
+    }
+    if not public_only_mode and _present_option_names(raw_argv) & source_options:
+        parser.error("--source-* metadata options are reserved for public-only evidence")
+    if public_only_mode:
+        _validate_public_only_invocation(parser, args, raw_argv)
+        if args.validate_public_only_report:
+            return _validate_public_only_report_file(args)
+        return _run_public_only(args)
 
     _load_env()
     public_checks = _skipped_public_checks() if args.skip_public_checks else _public_checks(args.timeout)
@@ -347,8 +748,7 @@ def main() -> int:
         report["ok"] = False
         report["stage_gates"]["required_authenticated_read"] = "failed"
     if args.report_file:
-        path = Path(args.report_file)
-        atomic_write_text(path, json.dumps(report, indent=2, sort_keys=True) + "\n")
+        _write_report(args.report_file, report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["ok"] else 1
 

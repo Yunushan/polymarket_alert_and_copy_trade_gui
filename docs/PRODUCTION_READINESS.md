@@ -56,9 +56,9 @@ The latest local audit on 2026-08-26 is **83/100 (not ready)** when no external
 evidence manifests are supplied. Local verification covers the adapter catalog
 (68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
 files, documentation, workflows, secret hygiene, frontend build/browser smoke,
-and packaging checks. The current verifier passed 1,078 tests (7 intentionally
-skipped on Windows), achieved 72% overall and 75% backend branch coverage,
-satisfied the enforced coverage floors, and passed Ruff. Counts are reported
+and packaging checks. The current verifier passed 1,095 tests (7 intentionally
+skipped on Windows), achieved 75% overall branch coverage, satisfied both the
+65% overall and 74% backend branch-coverage floors, and passed Ruff. Counts are reported
 from this run rather than carried forward from an older artifact.
 Metaculus now supports fixture-backed local forecast
 previews and guarded official forecast submission for binary, multiple-choice,
@@ -77,21 +77,20 @@ score therefore reflects repeatable repository proof plus explicitly supplied
 evidence, not a production certification.
 
 The repository also contains historical manifests under `evidence/`; they are
-inputs, not automatically valid current proof. This audit deliberately supplied
-none of them, so the local-only score remains **83/100**. When the current,
-reviewed repository-settings manifest is supplied, it is accepted and the
-evidence-backed score is **84/100**. Stale or
-revision/tag-mismatched manifests are rejected, and all revision-bound evidence
-must be recollected for the exact final commit. Reaching 100 requires fresh
-proof for the current `v1.0.11` commit: repository settings (+1), release
-environment/history/release (+3), deployment (+3), platform CI/targets (+5),
-public probe (+3), credentialed read (+1), and approved funded audit (+1). No
-points are awarded merely because an old manifest file exists.
+inputs, not automatically valid current proof. The local-only score remains
+**83/100**. The most recent clean, exact-revision audit that also supplied
+accepted repository-settings, hosted-CI, security, and platform evidence scored
+**89/100**. Those six external points are revision-bound and must be recollected
+for every final commit; they do not transfer merely because an old manifest or
+workflow run exists. From that evidence-backed baseline, reaching 100 still
+requires a protected release environment, published release lineage and assets
+(+3), real deployment proof (+3), protected-main public probe (+3),
+credentialed read (+1), and an explicitly approved funded order/cancel audit
+(+1).
 
 The local pass is not a claim that every production failure mode has been
-eliminated. The scorer's **84/100** result is the repository's formal
-evidence score; an independent risk-adjusted review of the same tree is
-**80/100 (no-go)** because several base categories award repository design
+eliminated. The last exact-commit evidence score is **89/100**; an independent
+risk-adjusted review remains **80/100 (no-go)** because several base categories award repository design
 points before real deployment behavior is proven. The hardening tree now pins
 durable stores below `/var/lib/market-sentinel`, verifies backup coverage,
 serializes analytics and live-evidence updates with revision checks, isolates
@@ -99,9 +98,9 @@ web admission capacity, exposes readiness separately from liveness, requires
 idempotency keys for durable web mutations, bounds WebSocket payloads, and
 persists copy-activity dispatch intent before a live venue call.
 
-The remaining risks are evidence and deployment boundaries rather than known
-repository P0/P1 defects: this worktree is uncommitted and has not passed CI as
-an exact revision; version `1.0.11` has no published, signed release and the
+The remaining risks are evidence and deployment boundaries. Every candidate
+revision must pass exact-revision CI and security before its external points are
+re-awarded; version `1.0.11` has no published, signed release and the
 previous release attempt failed its Windows-signing policy; no real host has
 proved deployment, restore, backup age, monitoring, or rollback; no current
 platform matrix evidence is bound to this tree; and public, credentialed, and
@@ -120,6 +119,19 @@ The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local
 runbook, browser smoke test, or dry-run transcript.
 
+The three public-live points may come from either a direct
+`--run-public-live` probe or a fresh report downloaded from the manual `CI`
+workflow dispatched on protected `main` and supplied with
+`--public-live-report`. Feature-branch runs are deliberately ineligible. The hosted path is
+fail-closed: the scorer validates the report's exact public-only schema,
+four endpoint results, absence of credentials or mutating actions, GitHub
+Actions run and job outcome, exact `refs/heads/main` source revision, and GitHub artifact
+attestation. The attestation must have been produced by this repository's
+`.github/workflows/ci.yml` on a GitHub-hosted runner and the report must be no
+more than 24 hours old. A passing hosted report proves reachability from that
+GitHub runner at that time; it does not prove production-host egress,
+credentialed access, account eligibility, or funded trading safety.
+
 ## External Evidence Manifests
 
 External points require a JSON manifest supplied with the corresponding
@@ -136,7 +148,7 @@ must also identify the current project tag (`v1.0.11`). The scorer rejects all
 revision-bound evidence while the worktree has tracked or untracked changes,
 because a CI run or release for `HEAD` cannot prove uncommitted files.
 
-| Scorer option | Required `evidence_type` | Required identity fields |
+| Scorer option | Required evidence kind | Required identity fields |
 | --- | --- | --- |
 | `--repository-settings-evidence` | `repository-settings` | `source` |
 | `--deployment-evidence` | `deployment` | `scope`, `environment`, `expected_version=v1.0.11`, `source_revision=current HEAD` |
@@ -145,6 +157,7 @@ because a CI run or release for `HEAD` cannot prove uncommitted files.
 | `--release-environment-evidence` | `release-environment` | `source` |
 | `--release-history-evidence` | `release-history` | `scope`, `tag=v1.0.11`, `target_commit=current HEAD` |
 | `--release-evidence` | `release` | `scope`, `tag=v1.0.11`, `target_commit=current HEAD`, `assets` |
+| `--public-live-report` | Cryptographically attested public-only report | `evidence.repository=Yunushan/market-sentinel`, `source_revision=current HEAD`, successful workflow run/job, exact four public checks, no credentialed or mutating actions |
 | `--credentialed-evidence` | `credentialed-polymarket` | `scope`, `target_tier=credential_live_verified`, `report_hash`, `source_revision=current HEAD` |
 | `--funded-evidence` | `funded-polymarket` | `scope`, `target_tier=funded_live_verified`, `report_hash`, `live_action=true`, `source_revision=current HEAD` |
 
@@ -192,7 +205,7 @@ Example after the evidence has actually been collected and reviewed:
 ```bash
 python scripts/check_product_readiness.py \
   --full-local \
-  --run-public-live \
+  --public-live-report /path/to/public-polymarket-live.json \
   --deployment-evidence evidence/deployment.json \
   --platform-ci-evidence evidence/platform-ci.json \
   --platform-evidence evidence/platform.json \

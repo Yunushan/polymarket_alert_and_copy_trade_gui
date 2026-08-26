@@ -41,6 +41,20 @@ Jobs:
 
 The workflow uses read-only repository permissions by default and cancels stale runs on the same ref.
 
+Manual dispatch of the protected `main` branch also runs
+`Public Polymarket live / GitHub-hosted`; feature-branch dispatches skip this
+trust-sensitive job. It rejects credential-bearing environment variables, exercises only the four
+reviewed public-read endpoints, validates the resulting report offline, checks
+that the checkout stayed clean at the exact requested revision, and creates a
+GitHub build-provenance attestation for the report before uploading it as a
+short-retention artifact. The readiness scorer accepts the downloaded report
+only after independently verifying its bytes, attestation identity, workflow
+run, hosted Ubuntu job, successful required steps, source revision, and
+freshness, and requires both workflow and source ref to be `refs/heads/main`.
+This evidence establishes public endpoint reachability from that
+runner at that time; it is not deployment, credentialed-account, or funded-order
+evidence.
+
 ### Security
 
 Workflow: `.github/workflows/security.yml`

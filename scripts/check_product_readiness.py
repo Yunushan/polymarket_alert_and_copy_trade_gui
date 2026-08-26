@@ -5,7 +5,9 @@ from __future__ import annotations
 The local checks can be run from a clean checkout. External evidence is never
 inferred from CI configuration: operators must provide reviewed JSON evidence
 manifests before the deployment, platform, repository-setting, credentialed,
-or funded points are awarded.
+or funded points are awarded. Public-live points may instead use a narrowly
+scoped report whose exact bytes, workflow identity, source revision, and
+GitHub-hosted execution are verified through GitHub artifact attestations.
 """
 
 import argparse
@@ -31,11 +33,55 @@ PUBLIC_LIVE_ATTEMPTS = 2
 PUBLIC_LIVE_RETRY_DELAY_SECONDS = 1.0
 EVIDENCE_MAX_AGE_DAYS = 30
 EVIDENCE_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+PUBLIC_LIVE_REPORT_MAX_BYTES = 1024 * 1024
+PUBLIC_LIVE_EVIDENCE_MAX_AGE_HOURS = 24
+PUBLIC_LIVE_REPOSITORY = "Yunushan/market-sentinel"
+PUBLIC_LIVE_WORKFLOW = ".github/workflows/ci.yml"
+PUBLIC_LIVE_WORKFLOW_NAME = "CI"
+PUBLIC_LIVE_JOB_NAME = "Public Polymarket live / GitHub-hosted"
+PUBLIC_LIVE_TRUSTED_REF = "refs/heads/main"
+PUBLIC_LIVE_REPORT_NAME = "public-polymarket-live.json"
+REQUIRED_PUBLIC_LIVE_JOB_STEPS = (
+    "Verify exact clean source before probe",
+    "Probe reviewed public Polymarket endpoints",
+    "Revalidate public-only evidence before attestation",
+    "Reverify exact clean source after probe",
+    "Attest exact public-live evidence file",
+    "Upload public-live evidence",
+)
 REQUIRED_PUBLIC_LIVE_CHECKS = (
     "clob_time",
     "gamma_markets",
     "data_leaderboard",
     "bridge_supported_assets",
+)
+REQUIRED_PUBLIC_LIVE_SAFETY = {
+    "dotenv_loaded": False,
+    "credentials_present": False,
+    "credential_variables_present": [],
+    "authenticated_reads_attempted": False,
+    "authenticated_user_websocket_attempted": False,
+    "bridge_mutations_attempted": False,
+    "funded_orders_attempted": False,
+    "public_requests_read_only": True,
+}
+REQUIRED_PUBLIC_LIVE_EVIDENCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "profile",
+        "repository",
+        "source_revision",
+        "run_id",
+        "run_attempt",
+        "workflow",
+        "workflow_name",
+        "workflow_ref",
+        "event",
+        "runner_environment",
+        "generated_at",
+        "started_at",
+        "completed_at",
+    }
 )
 
 CATEGORY_WEIGHTS = {
@@ -234,6 +280,608 @@ def _run_public_live() -> dict[str, Any]:
         if attempt < PUBLIC_LIVE_ATTEMPTS:
             time.sleep(PUBLIC_LIVE_RETRY_DELAY_SECONDS)
     return last_result
+
+
+class _DuplicateJsonKey(ValueError):
+    """Raised when security-sensitive JSON contains duplicate object keys."""
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in output:
+            raise _DuplicateJsonKey(f"duplicate JSON key: {key}")
+        output[key] = value
+    return output
+
+
+def _reject_nonfinite_json(value: str) -> Any:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _strict_json_bytes(raw: bytes, *, maximum_bytes: int = PUBLIC_LIVE_REPORT_MAX_BYTES) -> Any:
+    """Parse bounded UTF-8 JSON while rejecting duplicates and non-finite numbers."""
+
+    if not raw or len(raw) > maximum_bytes:
+        raise ValueError("JSON input is empty or exceeds the size limit")
+    text = raw.decode("utf-8")
+    return json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_nonfinite_json,
+    )
+
+
+def _recent_timestamp(value: Any, *, now: datetime) -> tuple[datetime | None, str]:
+    if not _is_nonblank_string(value):
+        return None, "must be a non-empty ISO-8601 string"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None, "must be valid ISO-8601"
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None, "must include a timezone"
+    normalized = parsed.astimezone(timezone.utc)
+    age = now.astimezone(timezone.utc) - normalized
+    if age < -timedelta(seconds=EVIDENCE_MAX_FUTURE_SKEW_SECONDS):
+        return None, "is in the future"
+    if age > timedelta(hours=PUBLIC_LIVE_EVIDENCE_MAX_AGE_HOURS):
+        return None, f"is older than {PUBLIC_LIVE_EVIDENCE_MAX_AGE_HOURS} hours"
+    return normalized, ""
+
+
+def _run_gh_json(command: list[str], *, timeout: int = 30) -> tuple[Any | None, str]:
+    """Run a fixed-shape GitHub CLI query and parse its bounded JSON response."""
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"{type(exc).__name__} while invoking GitHub CLI"
+    if result.returncode != 0:
+        return None, "GitHub CLI verification failed"
+    stdout = result.stdout if isinstance(result.stdout, bytes) else str(result.stdout).encode("utf-8")
+    try:
+        payload = _strict_json_bytes(stdout)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError, _DuplicateJsonKey):
+        return None, "GitHub CLI returned malformed or oversized JSON"
+    return payload, ""
+
+
+def _attestation_result_matches(
+    item: Any,
+    *,
+    report_hash: str,
+    revision: str,
+    workflow_ref: str,
+    run_id: int,
+    run_attempt: int,
+    now: datetime,
+) -> bool:
+    """Enforce certificate-backed identity and exact SLSA subject/run bindings."""
+
+    if not isinstance(item, dict) or not isinstance(item.get("attestation"), dict) or not item["attestation"]:
+        return False
+    verification = item.get("verificationResult")
+    if not isinstance(verification, dict):
+        return False
+    if (
+        verification.get("mediaType")
+        != "application/vnd.dev.sigstore.verificationresult+json;version=0.1"
+    ):
+        return False
+    statement = verification.get("statement")
+    signature = verification.get("signature")
+    if not isinstance(statement, dict) or not isinstance(signature, dict):
+        return False
+    if (
+        statement.get("_type") != "https://in-toto.io/Statement/v1"
+        or statement.get("predicateType") != "https://slsa.dev/provenance/v1"
+    ):
+        return False
+    subjects = statement.get("subject")
+    if not isinstance(subjects, list) or len(subjects) != 1 or not isinstance(subjects[0], dict):
+        return False
+    subject = subjects[0]
+    if subject.get("name") != PUBLIC_LIVE_REPORT_NAME:
+        return False
+    digest = subject.get("digest")
+    if not isinstance(digest, dict) or set(digest) != {"sha256"} or digest.get("sha256") != report_hash:
+        return False
+
+    certificate = signature.get("certificate")
+    if not isinstance(certificate, dict):
+        return False
+    ref = workflow_ref.split("@", 1)[1]
+    cert_workflow_uri = f"https://github.com/{workflow_ref}"
+    repository_uri = f"https://github.com/{PUBLIC_LIVE_REPOSITORY}"
+    invocation_uri = (
+        f"https://github.com/{PUBLIC_LIVE_REPOSITORY}/actions/runs/{run_id}/attempts/{run_attempt}"
+    )
+    certificate_contract = {
+        "subjectAlternativeName": cert_workflow_uri,
+        "issuer": "https://token.actions.githubusercontent.com",
+        "buildSignerURI": cert_workflow_uri,
+        "buildSignerDigest": revision,
+        "runnerEnvironment": "github-hosted",
+        "sourceRepositoryURI": repository_uri,
+        "sourceRepositoryDigest": revision,
+        "sourceRepositoryRef": ref,
+        "sourceRepositoryOwnerURI": "https://github.com/Yunushan",
+        "buildConfigURI": cert_workflow_uri,
+        "buildConfigDigest": revision,
+        "buildTrigger": "workflow_dispatch",
+        "runInvocationURI": invocation_uri,
+        "sourceRepositoryVisibilityAtSigning": "public",
+    }
+    if any(certificate.get(key) != value for key, value in certificate_contract.items()):
+        return False
+
+    timestamps = verification.get("verifiedTimestamps")
+    if not isinstance(timestamps, list) or not timestamps:
+        return False
+    for timestamp in timestamps:
+        if not isinstance(timestamp, dict):
+            return False
+        parsed, _ = _recent_timestamp(timestamp.get("timestamp"), now=now)
+        if parsed is None:
+            return False
+
+    predicate = statement.get("predicate")
+    if not isinstance(predicate, dict):
+        return False
+    build_definition = predicate.get("buildDefinition")
+    run_details = predicate.get("runDetails")
+    if not isinstance(build_definition, dict) or not isinstance(run_details, dict):
+        return False
+    if build_definition.get("buildType") != "https://actions.github.io/buildtypes/workflow/v1":
+        return False
+    external = build_definition.get("externalParameters")
+    internal = build_definition.get("internalParameters")
+    dependencies = build_definition.get("resolvedDependencies")
+    workflow = external.get("workflow") if isinstance(external, dict) else None
+    github = internal.get("github") if isinstance(internal, dict) else None
+    if not isinstance(workflow, dict) or not isinstance(github, dict) or not isinstance(dependencies, list):
+        return False
+    if workflow != {"path": PUBLIC_LIVE_WORKFLOW, "ref": ref, "repository": repository_uri}:
+        return False
+    if github.get("event_name") != "workflow_dispatch" or github.get("runner_environment") != "github-hosted":
+        return False
+    dependency_uri = f"git+{repository_uri}@{ref}"
+    matching_dependencies = [
+        dependency
+        for dependency in dependencies
+        if isinstance(dependency, dict)
+        and dependency.get("uri") == dependency_uri
+        and dependency.get("digest") == {"gitCommit": revision}
+    ]
+    if len(matching_dependencies) != 1:
+        return False
+    builder = run_details.get("builder")
+    metadata = run_details.get("metadata")
+    if not isinstance(builder, dict) or builder.get("id") != cert_workflow_uri:
+        return False
+    if not isinstance(metadata, dict) or metadata.get("invocationId") != invocation_uri:
+        return False
+    return True
+
+
+def _attested_public_live_report(
+    path_value: str | None,
+    *,
+    expected_revision: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate a GitHub-hosted, artifact-attested, public-only live report.
+
+    The report is useful only when its embedded identity, GitHub Actions run,
+    and Sigstore-backed artifact attestation all bind to the exact clean HEAD.
+    Every failure is closed and described without retaining command output.
+    """
+
+    if not _is_nonblank_string(path_value):
+        return {
+            "status": "not_run",
+            "mode": "attested",
+            "detail": "Provide --public-live-report with a fresh GitHub-attested public-only report.",
+        }
+    if not _COMMIT_RE.fullmatch(expected_revision or ""):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Attested public-live evidence requires an exact clean repository revision.",
+        }
+
+    path = Path(path_value).expanduser()
+    try:
+        if not path.is_file():
+            raise OSError("not a regular file")
+        size = path.stat().st_size
+        if size <= 0 or size > PUBLIC_LIVE_REPORT_MAX_BYTES:
+            raise ValueError("invalid report size")
+        raw = path.read_bytes()
+        payload = _strict_json_bytes(raw)
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError, _DuplicateJsonKey):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report is unreadable, malformed, duplicated-key, non-finite, or oversized JSON.",
+        }
+    if not isinstance(payload, dict):
+        return {"status": "fail", "mode": "attested", "detail": "Public-live report must be a JSON object."}
+
+    expected_top_level = {"ok", "mode", "market_id", "public_checks", "safety", "evidence"}
+    if set(payload) != expected_top_level:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report does not match the exact reviewed top-level schema.",
+        }
+    if payload.get("ok") is not True or payload.get("mode") != "public_only" or payload.get("market_id") != "polymarket":
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report must be a successful public_only Polymarket report.",
+        }
+
+    public_checks = payload.get("public_checks")
+    if not isinstance(public_checks, dict) or set(public_checks) != set(REQUIRED_PUBLIC_LIVE_CHECKS):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report must contain exactly the four reviewed public checks.",
+        }
+    if any(not isinstance(public_checks[name], dict) or public_checks[name].get("status") != "ok" for name in REQUIRED_PUBLIC_LIVE_CHECKS):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Every reviewed public endpoint check must have status=ok.",
+        }
+
+    safety = payload.get("safety")
+    if not isinstance(safety, dict) or set(safety) != set(REQUIRED_PUBLIC_LIVE_SAFETY):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report safety metadata does not match the public-only contract.",
+        }
+    if any(type(safety[key]) is not type(expected) or safety[key] != expected for key, expected in REQUIRED_PUBLIC_LIVE_SAFETY.items()):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report attempted credentials, authenticated reads, bridge mutations, or funded actions.",
+        }
+
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, dict) or set(evidence) != REQUIRED_PUBLIC_LIVE_EVIDENCE_FIELDS:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report evidence metadata does not match the exact reviewed schema.",
+        }
+    exact_metadata = {
+        "schema_version": 1,
+        "profile": "public-only",
+        "repository": PUBLIC_LIVE_REPOSITORY,
+        "source_revision": expected_revision,
+        "workflow": PUBLIC_LIVE_WORKFLOW,
+        "workflow_name": PUBLIC_LIVE_WORKFLOW_NAME,
+        "event": "workflow_dispatch",
+        "runner_environment": "github-hosted",
+    }
+    if any(type(evidence.get(key)) is not type(expected) or evidence.get(key) != expected for key, expected in exact_metadata.items()):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report repository, revision, workflow, event, runner, or profile identity is invalid.",
+        }
+    run_id = evidence.get("run_id")
+    run_attempt = evidence.get("run_attempt")
+    if type(run_id) is not int or run_id <= 0 or type(run_attempt) is not int or run_attempt <= 0:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report run_id and run_attempt must be positive integers.",
+        }
+    workflow_ref = evidence.get("workflow_ref")
+    trusted_workflow_ref = (
+        f"{PUBLIC_LIVE_REPOSITORY}/{PUBLIC_LIVE_WORKFLOW}@{PUBLIC_LIVE_TRUSTED_REF}"
+    )
+    if workflow_ref != trusted_workflow_ref:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live report workflow_ref is invalid.",
+        }
+
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise ValueError("public-live evidence validation clock must include a timezone")
+    evidence_times: dict[str, datetime] = {}
+    for field in ("started_at", "generated_at", "completed_at"):
+        parsed, error = _recent_timestamp(evidence.get(field), now=current_time)
+        if parsed is None:
+            return {
+                "status": "fail",
+                "mode": "attested",
+                "detail": f"Public-live evidence {field} {error}.",
+            }
+        evidence_times[field] = parsed
+    if not (
+        evidence_times["started_at"]
+        <= evidence_times["completed_at"]
+        <= evidence_times["generated_at"]
+    ):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live evidence timestamps are not monotonically ordered.",
+        }
+
+    report_hash = hashlib.sha256(raw).hexdigest()
+    signer_workflow = f"{PUBLIC_LIVE_REPOSITORY}/{PUBLIC_LIVE_WORKFLOW}"
+    with tempfile.TemporaryDirectory(prefix="market-sentinel-attestation-") as temporary:
+        attestation_target = Path(temporary) / PUBLIC_LIVE_REPORT_NAME
+        attestation_target.write_bytes(raw)
+        attestation, attestation_error = _run_gh_json(
+            [
+                "gh",
+                "attestation",
+                "verify",
+                str(attestation_target),
+                "--repo",
+                PUBLIC_LIVE_REPOSITORY,
+                "--signer-workflow",
+                signer_workflow,
+                "--cert-identity",
+                f"https://github.com/{workflow_ref}",
+                "--cert-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                "--signer-digest",
+                expected_revision,
+                "--source-digest",
+                expected_revision,
+                "--source-ref",
+                workflow_ref.split("@", 1)[1],
+                "--predicate-type",
+                "https://slsa.dev/provenance/v1",
+                "--digest-alg",
+                "sha256",
+                "--deny-self-hosted-runners",
+                "--format",
+                "json",
+            ],
+            timeout=60,
+        )
+    matching_attestations = (
+        [
+            item
+            for item in attestation
+            if _attestation_result_matches(
+                item,
+                report_hash=report_hash,
+                revision=expected_revision,
+                workflow_ref=workflow_ref,
+                run_id=run_id,
+                run_attempt=run_attempt,
+                now=current_time,
+            )
+        ]
+        if isinstance(attestation, list)
+        else []
+    )
+    if len(matching_attestations) != 1:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": (
+                "Artifact attestation was not accepted: "
+                f"{attestation_error or 'expected exactly one certificate-bound matching result'}."
+            ),
+            "report": {"sha256": report_hash},
+        }
+
+    api_payload, api_error = _run_gh_json(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{PUBLIC_LIVE_REPOSITORY}/actions/runs/{run_id}",
+        ]
+    )
+    if not isinstance(api_payload, dict):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": f"GitHub Actions run could not be verified: {api_error or 'malformed run response'}.",
+            "report": {"sha256": report_hash},
+        }
+    expected_run_fields = {
+        "id": run_id,
+        "head_sha": expected_revision,
+        "name": PUBLIC_LIVE_WORKFLOW_NAME,
+        "path": PUBLIC_LIVE_WORKFLOW,
+        "event": "workflow_dispatch",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": run_attempt,
+        "head_branch": "main",
+    }
+    if any(type(api_payload.get(key)) is not type(expected) or api_payload.get(key) != expected for key, expected in expected_run_fields.items()):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions run identity, revision, workflow, event, attempt, or conclusion does not match the report.",
+            "report": {"sha256": report_hash},
+        }
+    head_repository = api_payload.get("head_repository")
+    if not isinstance(head_repository, dict) or head_repository.get("full_name") != PUBLIC_LIVE_REPOSITORY:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions run head repository does not match the trusted repository.",
+            "report": {"sha256": report_hash},
+        }
+    api_times: dict[str, datetime] = {}
+    for field in ("created_at", "run_started_at", "updated_at"):
+        parsed, error = _recent_timestamp(api_payload.get(field), now=current_time)
+        if parsed is None:
+            return {
+                "status": "fail",
+                "mode": "attested",
+                "detail": f"GitHub Actions run {field} {error}.",
+                "report": {"sha256": report_hash},
+            }
+        api_times[field] = parsed
+    if not api_times["created_at"] <= api_times["run_started_at"] <= api_times["updated_at"]:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions run timestamps are not monotonically ordered.",
+            "report": {"sha256": report_hash},
+        }
+    skew = timedelta(seconds=EVIDENCE_MAX_FUTURE_SKEW_SECONDS)
+    if (
+        evidence_times["started_at"] < api_times["run_started_at"] - skew
+        or evidence_times["generated_at"] > api_times["updated_at"] + skew
+    ):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live evidence timestamps fall outside the trusted GitHub Actions run window.",
+            "report": {"sha256": report_hash},
+        }
+
+    jobs_payload, jobs_error = _run_gh_json(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{PUBLIC_LIVE_REPOSITORY}/actions/runs/{run_id}/jobs?filter=latest&per_page=100",
+        ]
+    )
+    jobs = jobs_payload.get("jobs") if isinstance(jobs_payload, dict) else None
+    jobs_total = jobs_payload.get("total_count") if isinstance(jobs_payload, dict) else None
+    if (
+        not isinstance(jobs, list)
+        or type(jobs_total) is not int
+        or jobs_total != len(jobs)
+        or jobs_total > 100
+    ):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": f"GitHub Actions public job could not be verified: {jobs_error or 'malformed jobs response'}.",
+            "report": {"sha256": report_hash},
+        }
+    matching_jobs = [job for job in jobs if isinstance(job, dict) and job.get("name") == PUBLIC_LIVE_JOB_NAME]
+    if len(matching_jobs) != 1:
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions run must contain exactly one reviewed public-live job.",
+            "report": {"sha256": report_hash},
+        }
+    public_job = matching_jobs[0]
+    labels = public_job.get("labels")
+    if (
+        public_job.get("status") != "completed"
+        or public_job.get("conclusion") != "success"
+        or not isinstance(labels, list)
+        or "ubuntu-24.04" not in labels
+        or "self-hosted" in labels
+    ):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions public-live job was not a successful GitHub-hosted ubuntu-24.04 job.",
+            "report": {"sha256": report_hash},
+        }
+    steps = public_job.get("steps")
+    if not isinstance(steps, list):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions public-live job is missing reviewed step results.",
+            "report": {"sha256": report_hash},
+        }
+    step_names = [step.get("name") for step in steps if isinstance(step, dict)]
+    if len(step_names) != len(steps) or len(step_names) != len(set(step_names)):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions public-live job contains malformed or duplicate step names.",
+            "report": {"sha256": report_hash},
+        }
+    required_step_results = {
+        step.get("name"): (step.get("status"), step.get("conclusion"))
+        for step in steps
+        if isinstance(step, dict) and step.get("name") in REQUIRED_PUBLIC_LIVE_JOB_STEPS
+    }
+    if set(required_step_results) != set(REQUIRED_PUBLIC_LIVE_JOB_STEPS) or any(
+        result != ("completed", "success") for result in required_step_results.values()
+    ):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "GitHub Actions public-live job did not successfully complete every reviewed safety step.",
+            "report": {"sha256": report_hash},
+        }
+    job_times: dict[str, datetime] = {}
+    for field in ("started_at", "completed_at"):
+        parsed, error = _recent_timestamp(public_job.get(field), now=current_time)
+        if parsed is None:
+            return {
+                "status": "fail",
+                "mode": "attested",
+                "detail": f"GitHub Actions public-live job {field} {error}.",
+                "report": {"sha256": report_hash},
+            }
+        job_times[field] = parsed
+    if (
+        job_times["started_at"] > job_times["completed_at"]
+        or evidence_times["started_at"] < job_times["started_at"] - skew
+        or evidence_times["generated_at"] > job_times["completed_at"] + skew
+    ):
+        return {
+            "status": "fail",
+            "mode": "attested",
+            "detail": "Public-live evidence timestamps fall outside the reviewed public job window.",
+            "report": {"sha256": report_hash},
+        }
+
+    return {
+        "status": "pass",
+        "mode": "attested",
+        "detail": "Fresh public-only report, GitHub Actions run, and artifact attestation were verified.",
+        "report": {
+            "sha256": report_hash,
+            "public_check_statuses": {
+                name: public_checks[name]["status"] for name in REQUIRED_PUBLIC_LIVE_CHECKS
+            },
+            "exact_check_set": True,
+        },
+        "evidence": {
+            "repository": PUBLIC_LIVE_REPOSITORY,
+            "source_revision": expected_revision,
+            "run_id": run_id,
+            "run_attempt": run_attempt,
+            "workflow": PUBLIC_LIVE_WORKFLOW,
+            "event": "workflow_dispatch",
+            "runner_environment": "github-hosted",
+            "attestation": "verified",
+            "github_run": "verified",
+            "github_job": "verified",
+        },
+    }
 
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -570,6 +1218,10 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the no-credentials, public-only Polymarket readiness probe.",
     )
+    parser.add_argument(
+        "--public-live-report",
+        help="Fresh GitHub-hosted public-only report with a verifiable artifact attestation.",
+    )
     parser.add_argument("--deployment-evidence", help="Reviewed JSON manifest for a real production deployment.")
     parser.add_argument("--platform-ci-evidence", help="Reviewed JSON manifest for successful hosted platform CI lanes.")
     parser.add_argument("--platform-evidence", help="Reviewed JSON manifest for full platform evidence.")
@@ -593,7 +1245,27 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         if args.run_local
         else {"status": "not_run", "profile": "full" if args.full_local else "core"}
     )
-    public_result = _run_public_live() if args.run_public_live else {"status": "not_run"}
+    direct_public_result = _run_public_live() if args.run_public_live else {"status": "not_run", "mode": "direct"}
+    attested_public_result = _attested_public_live_report(
+        args.public_live_report,
+        expected_revision=repository_revision_initial,
+    )
+    direct_public_ok = direct_public_result.get("status") == "pass"
+    attested_public_ok = attested_public_result.get("status") == "pass"
+    public_result = {
+        "status": "pass" if direct_public_ok or attested_public_ok else "fail" if args.run_public_live or args.public_live_report else "not_run",
+        "award_source": (
+            "direct_and_attested"
+            if direct_public_ok and attested_public_ok
+            else "direct"
+            if direct_public_ok
+            else "attested"
+            if attested_public_ok
+            else "none"
+        ),
+        "direct": direct_public_result,
+        "attested": attested_public_result,
+    }
     project_version = _project_version()
 
     architecture_ok = _paths_exist(REQUIRED_ARCHITECTURE_FILES) and _contains(
@@ -760,7 +1432,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         platform["missing"].append(platform_detail)
 
     live_ok = _paths_exist(REQUIRED_LIVE_FILES)
-    public_ok = public_result.get("status") == "pass"
+    public_ok = direct_public_ok or attested_public_ok
     credentialed_ok, credentialed_detail = _reviewed_evidence(
         args.credentialed_evidence,
         "credentialed Polymarket",
@@ -827,6 +1499,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             (deployment_ok, operations, 3, "deployment"),
             (platform_ci_ok, platform, 3, "platform CI"),
             (platform_evidence_ok, platform, 2, "platform"),
+            (public_ok, live, 3, "public Polymarket"),
             (credentialed_ok, live, 1, "credentialed Polymarket"),
             (funded_ok, live, 1, "funded Polymarket"),
         )

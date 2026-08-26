@@ -5,8 +5,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Callable
 from unittest.mock import patch
 
 
@@ -24,6 +26,194 @@ def repository_revision() -> str:
     if len(revision) != 40:
         raise AssertionError("tests require a Git checkout with a resolvable HEAD")
     return revision
+
+
+def attested_public_live_payload(revision: str, *, now: datetime | None = None) -> dict[str, object]:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    started = current - timedelta(minutes=4)
+    completed = current - timedelta(minutes=3)
+    generated = current - timedelta(minutes=2)
+    return {
+        "ok": True,
+        "mode": "public_only",
+        "market_id": "polymarket",
+        "public_checks": {
+            name: {"status": "ok", "detail": "read-only endpoint responded"}
+            for name in ("clob_time", "gamma_markets", "data_leaderboard", "bridge_supported_assets")
+        },
+        "safety": {
+            "dotenv_loaded": False,
+            "credentials_present": False,
+            "credential_variables_present": [],
+            "authenticated_reads_attempted": False,
+            "authenticated_user_websocket_attempted": False,
+            "bridge_mutations_attempted": False,
+            "funded_orders_attempted": False,
+            "public_requests_read_only": True,
+        },
+        "evidence": {
+            "schema_version": 1,
+            "profile": "public-only",
+            "repository": "Yunushan/market-sentinel",
+            "source_revision": revision,
+            "run_id": 123456,
+            "run_attempt": 1,
+            "workflow": ".github/workflows/ci.yml",
+            "workflow_name": "CI",
+            "workflow_ref": "Yunushan/market-sentinel/.github/workflows/ci.yml@refs/heads/main",
+            "event": "workflow_dispatch",
+            "runner_environment": "github-hosted",
+            "generated_at": generated.isoformat().replace("+00:00", "Z"),
+            "started_at": started.isoformat().replace("+00:00", "Z"),
+            "completed_at": completed.isoformat().replace("+00:00", "Z"),
+        },
+    }
+
+
+def successful_public_live_gh_run(
+    revision: str,
+    *,
+    now: datetime | None = None,
+    run_overrides: dict[str, object] | None = None,
+    jobs_overrides: dict[str, object] | None = None,
+    attestation_mutator: Callable[[list[dict[str, Any]]], None] | None = None,
+) -> Callable[..., subprocess.CompletedProcess[bytes]]:
+    current = now or datetime.now(timezone.utc)
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if command[:3] == ["gh", "attestation", "verify"]:
+            import hashlib
+
+            report_hash = hashlib.sha256(Path(command[3]).read_bytes()).hexdigest()
+            workflow_ref = "refs/heads/main"
+            workflow_uri = (
+                "https://github.com/Yunushan/market-sentinel/.github/workflows/ci.yml@" + workflow_ref
+            )
+            repository_uri = "https://github.com/Yunushan/market-sentinel"
+            invocation_uri = "https://github.com/Yunushan/market-sentinel/actions/runs/123456/attempts/1"
+            attestation = [
+                {
+                    "attestation": {"bundle": "verified"},
+                    "verificationResult": {
+                        "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+                        "statement": {
+                            "_type": "https://in-toto.io/Statement/v1",
+                            "predicateType": "https://slsa.dev/provenance/v1",
+                            "subject": [
+                                {
+                                    "name": "public-polymarket-live.json",
+                                    "digest": {"sha256": report_hash},
+                                }
+                            ],
+                            "predicate": {
+                                "buildDefinition": {
+                                    "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+                                    "externalParameters": {
+                                        "workflow": {
+                                            "path": ".github/workflows/ci.yml",
+                                            "ref": workflow_ref,
+                                            "repository": repository_uri,
+                                        }
+                                    },
+                                    "internalParameters": {
+                                        "github": {
+                                            "event_name": "workflow_dispatch",
+                                            "runner_environment": "github-hosted",
+                                        }
+                                    },
+                                    "resolvedDependencies": [
+                                        {
+                                            "uri": f"git+{repository_uri}@{workflow_ref}",
+                                            "digest": {"gitCommit": revision},
+                                        }
+                                    ],
+                                },
+                                "runDetails": {
+                                    "builder": {"id": workflow_uri},
+                                    "metadata": {"invocationId": invocation_uri},
+                                },
+                            },
+                        },
+                        "signature": {
+                            "certificate": {
+                                "subjectAlternativeName": workflow_uri,
+                                "issuer": "https://token.actions.githubusercontent.com",
+                                "buildSignerURI": workflow_uri,
+                                "buildSignerDigest": revision,
+                                "runnerEnvironment": "github-hosted",
+                                "sourceRepositoryURI": repository_uri,
+                                "sourceRepositoryDigest": revision,
+                                "sourceRepositoryRef": workflow_ref,
+                                "sourceRepositoryOwnerURI": "https://github.com/Yunushan",
+                                "buildConfigURI": workflow_uri,
+                                "buildConfigDigest": revision,
+                                "buildTrigger": "workflow_dispatch",
+                                "runInvocationURI": invocation_uri,
+                                "sourceRepositoryVisibilityAtSigning": "public",
+                            }
+                        },
+                        "verifiedTimestamps": [
+                            {
+                                "type": "Tlog",
+                                "timestamp": (current - timedelta(minutes=1)).isoformat().replace(
+                                    "+00:00", "Z"
+                                ),
+                            }
+                        ],
+                    },
+                }
+            ]
+            if attestation_mutator is not None:
+                attestation_mutator(attestation)
+            return subprocess.CompletedProcess(command, 0, json.dumps(attestation).encode("utf-8"), b"")
+        if command[:2] == ["gh", "api"] and "/jobs?" in command[-1]:
+            jobs_payload = {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "name": "Public Polymarket live / GitHub-hosted",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "labels": ["ubuntu-24.04"],
+                        "started_at": (current - timedelta(minutes=4)).isoformat().replace("+00:00", "Z"),
+                        "completed_at": (current - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                        "steps": [
+                            {"name": name, "status": "completed", "conclusion": "success"}
+                            for name in (
+                                "Verify exact clean source before probe",
+                                "Probe reviewed public Polymarket endpoints",
+                                "Revalidate public-only evidence before attestation",
+                                "Reverify exact clean source after probe",
+                                "Attest exact public-live evidence file",
+                                "Upload public-live evidence",
+                            )
+                        ],
+                    }
+                ],
+                **(jobs_overrides or {}),
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(jobs_payload).encode("utf-8"), b"")
+        if command[:2] == ["gh", "api"]:
+            payload = {
+                "id": 123456,
+                "head_sha": revision,
+                "name": "CI",
+                "path": ".github/workflows/ci.yml",
+                "event": "workflow_dispatch",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 1,
+                "head_branch": "main",
+                "created_at": (current - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "run_started_at": (current - timedelta(minutes=4)).isoformat().replace("+00:00", "Z"),
+                "updated_at": (current - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                "head_repository": {"full_name": "Yunushan/market-sentinel"},
+                **(run_overrides or {}),
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload).encode("utf-8"), b"")
+        raise AssertionError(f"unexpected command: {command}")
+
+    return run
 
 
 class ProductReadinessTests(unittest.TestCase):
@@ -142,6 +332,285 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual(result["attempt"], 2)
         self.assertEqual(calls, 2)
         sleep.assert_called_once()
+
+    def test_attested_public_live_report_accepts_exact_fresh_github_evidence(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-live.json"
+            path.write_text(json.dumps(attested_public_live_payload(revision, now=now)), encoding="utf-8")
+            with patch(
+                "scripts.check_product_readiness.subprocess.run",
+                side_effect=successful_public_live_gh_run(revision, now=now),
+            ) as run:
+                result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
+
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(result["evidence"]["run_id"], 123456)
+        self.assertEqual(result["evidence"]["github_job"], "verified")
+        commands = [call.args[0] for call in run.call_args_list]
+        attestation_command = commands[0]
+        self.assertEqual(attestation_command[:3], ["gh", "attestation", "verify"])
+        self.assertIn("--deny-self-hosted-runners", attestation_command)
+        self.assertEqual(attestation_command[attestation_command.index("--digest-alg") + 1], "sha256")
+        self.assertEqual(
+            attestation_command[attestation_command.index("--predicate-type") + 1],
+            "https://slsa.dev/provenance/v1",
+        )
+        self.assertEqual(
+            attestation_command[attestation_command.index("--signer-digest") + 1],
+            revision,
+        )
+        self.assertEqual(
+            attestation_command[attestation_command.index("--source-digest") + 1],
+            revision,
+        )
+        self.assertEqual(
+            attestation_command[attestation_command.index("--signer-workflow") + 1],
+            "Yunushan/market-sentinel/.github/workflows/ci.yml",
+        )
+        self.assertTrue(any(command[-1].endswith("/actions/runs/123456") for command in commands))
+        self.assertTrue(any("/actions/runs/123456/jobs?" in command[-1] for command in commands))
+
+    def test_attested_public_live_report_rejects_forged_or_unsafe_content_before_gh(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        now = datetime.now(timezone.utc)
+        variants: list[tuple[str, dict[str, object]]] = []
+        forged = attested_public_live_payload(revision, now=now)
+        forged["evidence"]["source_revision"] = "f" * 40  # type: ignore[index]
+        variants.append(("forged revision", forged))
+        unsafe = attested_public_live_payload(revision, now=now)
+        unsafe["safety"]["credentials_present"] = True  # type: ignore[index]
+        variants.append(("credential present", unsafe))
+        missing_check = attested_public_live_payload(revision, now=now)
+        del missing_check["public_checks"]["clob_time"]  # type: ignore[index]
+        variants.append(("missing public check", missing_check))
+        injected_ref = attested_public_live_payload(revision, now=now)
+        injected_ref["evidence"]["workflow_ref"] = (  # type: ignore[index]
+            "Yunushan/market-sentinel/.github/workflows/ci.yml@refs/heads/main'$(touch injected)'"
+        )
+        variants.append(("shell metacharacters in ref", injected_ref))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-live.json"
+            for label, payload in variants:
+                with self.subTest(label=label):
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with patch("scripts.check_product_readiness.subprocess.run") as run:
+                        result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
+                    self.assertEqual(result["status"], "fail")
+                    run.assert_not_called()
+
+    def test_attested_public_live_report_rejects_duplicate_keys_and_nan(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        malformed_values = (
+            '{"ok":true,"ok":true}',
+            '{"ok":NaN}',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-live.json"
+            for value in malformed_values:
+                with self.subTest(value=value):
+                    path.write_text(value, encoding="utf-8")
+                    with patch("scripts.check_product_readiness.subprocess.run") as run:
+                        result = _attested_public_live_report(str(path), expected_revision=revision)
+                    self.assertEqual(result["status"], "fail")
+                    self.assertIn("malformed", result["detail"])
+                    run.assert_not_called()
+
+    def test_attested_public_live_report_fails_closed_when_attestation_fails(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-live.json"
+            path.write_text(json.dumps(attested_public_live_payload(revision, now=now)), encoding="utf-8")
+
+            def fail_attestation(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                self.assertEqual(command[:3], ["gh", "attestation", "verify"])
+                return subprocess.CompletedProcess(command, 1, b"", b"not trusted")
+
+            with patch("scripts.check_product_readiness.subprocess.run", side_effect=fail_attestation) as run:
+                result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("attestation", result["detail"].casefold())
+        self.assertEqual(run.call_count, 1)
+
+    def test_attested_public_live_report_rejects_github_run_mismatch(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        now = datetime.now(timezone.utc)
+        mismatches = (
+            {"head_sha": "f" * 40},
+            {"event": "push"},
+            {"conclusion": "failure"},
+            {"run_attempt": 2},
+            {"path": ".github/workflows/release.yml"},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-live.json"
+            path.write_text(json.dumps(attested_public_live_payload(revision, now=now)), encoding="utf-8")
+            for mismatch in mismatches:
+                with self.subTest(mismatch=mismatch):
+                    with patch(
+                        "scripts.check_product_readiness.subprocess.run",
+                        side_effect=successful_public_live_gh_run(
+                            revision,
+                            now=now,
+                            run_overrides=mismatch,
+                        ),
+                    ):
+                        result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
+                    self.assertEqual(result["status"], "fail")
+                    self.assertIn("run identity", result["detail"])
+
+    def test_attested_public_live_report_rejects_paginated_or_inconsistent_jobs(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-live.json"
+            path.write_text(json.dumps(attested_public_live_payload(revision, now=now)), encoding="utf-8")
+            for total_count in (2, 101):
+                with self.subTest(total_count=total_count):
+                    with patch(
+                        "scripts.check_product_readiness.subprocess.run",
+                        side_effect=successful_public_live_gh_run(
+                            revision,
+                            now=now,
+                            jobs_overrides={"total_count": total_count},
+                        ),
+                    ):
+                        result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
+                    self.assertEqual(result["status"], "fail")
+                    self.assertIn("public job", result["detail"])
+
+    def test_attested_public_live_report_rejects_immutable_binding_mutations(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        now = datetime.now(timezone.utc)
+        mutations: tuple[tuple[str, tuple[str | int, ...], object], ...] = (
+            ("subject name", (0, "verificationResult", "statement", "subject", 0, "name"), "other.json"),
+            ("subject digest", (0, "verificationResult", "statement", "subject", 0, "digest", "sha256"), "0" * 64),
+            ("predicate type", (0, "verificationResult", "statement", "predicateType"), "https://example.invalid"),
+            ("certificate SAN", (0, "verificationResult", "signature", "certificate", "subjectAlternativeName"), "https://example.invalid"),
+            ("signer digest", (0, "verificationResult", "signature", "certificate", "buildSignerDigest"), "f" * 40),
+            ("source ref", (0, "verificationResult", "signature", "certificate", "sourceRepositoryRef"), "refs/heads/other"),
+            ("runner", (0, "verificationResult", "signature", "certificate", "runnerEnvironment"), "self-hosted"),
+            ("config digest", (0, "verificationResult", "signature", "certificate", "buildConfigDigest"), "f" * 40),
+            ("trigger", (0, "verificationResult", "signature", "certificate", "buildTrigger"), "push"),
+            ("invocation", (0, "verificationResult", "signature", "certificate", "runInvocationURI"), "https://example.invalid"),
+            ("timestamps", (0, "verificationResult", "verifiedTimestamps"), []),
+        )
+
+        def set_path(value: list[dict[str, Any]], path: tuple[str | int, ...], replacement: object) -> None:
+            target: Any = value
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]] = replacement
+
+        with tempfile.TemporaryDirectory() as temporary:
+            report_path = Path(temporary) / "public-live.json"
+            report_path.write_text(
+                json.dumps(attested_public_live_payload(revision, now=now)),
+                encoding="utf-8",
+            )
+            for label, mutation_path, replacement in mutations:
+                with self.subTest(label=label):
+                    def mutate(
+                        attestation: list[dict[str, Any]],
+                        path: tuple[str | int, ...] = mutation_path,
+                        changed: object = replacement,
+                    ) -> None:
+                        set_path(attestation, path, deepcopy(changed))
+
+                    with patch(
+                        "scripts.check_product_readiness.subprocess.run",
+                        side_effect=successful_public_live_gh_run(
+                            revision,
+                            now=now,
+                            attestation_mutator=mutate,
+                        ),
+                    ):
+                        result = _attested_public_live_report(
+                            str(report_path),
+                            expected_revision=revision,
+                            now=now,
+                        )
+                    self.assertEqual(result["status"], "fail")
+                    self.assertIn("attestation", result["detail"].casefold())
+
+    def test_direct_and_attested_public_live_evidence_does_not_stack_points(self) -> None:
+        from scripts.check_product_readiness import _parser, build_report
+
+        revision = repository_revision()
+        args = _parser().parse_args(
+            ["--no-run-local", "--run-public-live", "--public-live-report", "attested.json"]
+        )
+        with (
+            patch("scripts.check_product_readiness._repository_is_clean", return_value=True),
+            patch("scripts.check_product_readiness._repository_revision", return_value=revision),
+            patch("scripts.check_product_readiness._run_public_live", return_value={"status": "pass"}),
+            patch(
+                "scripts.check_product_readiness._attested_public_live_report",
+                return_value={"status": "pass"},
+            ),
+        ):
+            report = build_report(args)
+
+        live = next(item for item in report["categories"] if item["name"] == "live_acceptance")
+        self.assertEqual(live["earned"], 3)
+        self.assertEqual(report["checks"]["public_live"]["award_source"], "direct_and_attested")
+
+    def test_attested_public_live_points_are_revoked_when_repository_changes(self) -> None:
+        from scripts.check_product_readiness import _parser, build_report
+
+        initial_revision = "a" * 40
+        final_revision = "b" * 40
+        args = _parser().parse_args(["--no-run-local", "--public-live-report", "attested.json"])
+        with (
+            patch("scripts.check_product_readiness._repository_is_clean", side_effect=(True, True)),
+            patch(
+                "scripts.check_product_readiness._repository_revision",
+                side_effect=(initial_revision, final_revision),
+            ),
+            patch(
+                "scripts.check_product_readiness._attested_public_live_report",
+                return_value={"status": "pass"},
+            ),
+        ):
+            report = build_report(args)
+
+        live = next(item for item in report["categories"] if item["name"] == "live_acceptance")
+        self.assertEqual(live["earned"], 0)
+        self.assertTrue(any("public Polymarket" in item and "revoked" in item for item in live["missing"]))
+
+    def test_direct_public_live_points_are_revoked_when_repository_changes(self) -> None:
+        from scripts.check_product_readiness import _parser, build_report
+
+        revision = "a" * 40
+        args = _parser().parse_args(["--no-run-local", "--run-public-live"])
+        with (
+            patch("scripts.check_product_readiness._repository_is_clean", side_effect=(True, False)),
+            patch("scripts.check_product_readiness._repository_revision", return_value=revision),
+            patch("scripts.check_product_readiness._run_public_live", return_value={"status": "pass"}),
+        ):
+            report = build_report(args)
+
+        live = next(item for item in report["categories"] if item["name"] == "live_acceptance")
+        self.assertEqual(live["earned"], 0)
+        self.assertTrue(any("public Polymarket" in item and "revoked" in item for item in live["missing"]))
 
     def test_readiness_scorer_reports_conservative_static_score(self) -> None:
         result = subprocess.run(

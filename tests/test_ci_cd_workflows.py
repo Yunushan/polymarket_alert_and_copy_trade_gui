@@ -127,6 +127,7 @@ class CiCdWorkflowTests(unittest.TestCase):
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
                     "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
+                    "actions/attest-build-provenance": (4, "4d101475d8b20a2381f78447822ac1eab6504dd8"),
                 },
             ),
         )
@@ -140,6 +141,70 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertIn("WINDOWS_10_ENABLED: ${{ vars.ENABLE_WINDOWS_10_SELF_HOSTED }}", package)
         self.assertIn('if [ "${WINDOWS_10_ENABLED}" = "true" ]', package)
         self.assertIn('"Required opt-in CI job windows-10-self-hosted finished with ${WINDOWS_10_RESULT}."', package)
+
+    def test_manual_ci_public_probe_is_read_only_exact_sha_and_attested(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = text.split("  public-polymarket-live:\n", 1)[1].split("  package:\n", 1)[0]
+
+        for fragment in (
+            "name: Public Polymarket live / GitHub-hosted",
+            "if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+            "runs-on: ubuntu-24.04",
+            "contents: read",
+            "attestations: write",
+            "id-token: write",
+            "persist-credentials: false",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "Verify exact clean source before probe",
+            "Reverify exact clean source after probe",
+            'test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"',
+            "git status --porcelain=v1 --untracked-files=all",
+            'report_dir="${RUNNER_TEMP}/public-live"',
+            "for probe_attempt in 1 2",
+            "sleep 1",
+            'if [ "${probe_succeeded}" != true ]',
+            "--public-only",
+            "--validate-public-only-report",
+            '--source-repository "${GITHUB_REPOSITORY}"',
+            '--source-revision "${GITHUB_SHA}"',
+            '--source-run-id "${GITHUB_RUN_ID}"',
+            '--source-run-attempt "${GITHUB_RUN_ATTEMPT}"',
+            '--source-workflow-ref "${GITHUB_WORKFLOW_REF}"',
+            '"error":"probe terminated before a report was written"',
+            "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
+            "subject-path: ${{ runner.temp }}/public-live/public-polymarket-live.json",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+            "name: public-polymarket-live-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+            "if-no-files-found: error",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, job)
+
+        for forbidden in (
+            "env:",
+            "secrets.",
+            "requirements-live.lock",
+            "python -m pip install --no-cache-dir --no-deps -e .",
+            "--skip-authenticated-read-checks",
+            "--require-authenticated-read-ok",
+            "--include-user-websocket-connect",
+            "--include-bridge-address-creation",
+            "--allow-funded-order",
+            "--token-id",
+            "--private-key",
+            "${{ github.workflow_ref }}",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, job)
+
+        probe_index = job.index("Probe reviewed public Polymarket endpoints")
+        validate_index = job.index("Revalidate public-only evidence before attestation")
+        attest_index = job.index("Attest exact public-live evidence file")
+        upload_index = job.index("Upload public-live evidence")
+        self.assertLess(probe_index, validate_index)
+        self.assertLess(validate_index, attest_index)
+        self.assertLess(attest_index, upload_index)
 
     def test_release_workflow_publishes_checked_and_checksummed_assets(self) -> None:
         text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
