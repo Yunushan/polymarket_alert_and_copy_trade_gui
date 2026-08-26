@@ -56,7 +56,7 @@ The latest local audit on 2026-08-26 is **83/100 (not ready)** when no external
 evidence manifests are supplied. Local verification covers the adapter catalog
 (68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
 files, documentation, workflows, secret hygiene, frontend build/browser smoke,
-and packaging checks. The current verifier passed 1,076 tests (7 intentionally
+and packaging checks. The current verifier passed 1,078 tests (7 intentionally
 skipped on Windows), achieved 72% overall and 75% backend branch coverage,
 satisfied the enforced coverage floors, and passed Ruff. Counts are reported
 from this run rather than carried forward from an older artifact.
