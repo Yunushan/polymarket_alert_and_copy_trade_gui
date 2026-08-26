@@ -1200,7 +1200,7 @@ def run_market_set(args: argparse.Namespace) -> int:
         settings = dict(payload.get("settings") or {})
         _merge_kv(settings, args.setting)
         payload["settings"] = settings
-    apply_market_patch(cfg, args.market_id, payload)
+    apply_market_patch(cfg, args.market_id, payload, allow_outbound_endpoint_changes=True)
     _save_cfg(args, cfg)
     return _write_command_payload(args, markets_payload(cfg, _registry()))
 

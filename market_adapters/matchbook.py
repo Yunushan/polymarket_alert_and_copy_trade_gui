@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError
+from .errors import MarketConfigurationError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -758,30 +758,18 @@ class MatchbookAdapter(MarketAdapter):
         auth: bool = False,
         login: bool = False,
     ) -> Any:
-        self.runtime.rate_limiter.wait()
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if auth:
             token = self._resolve_session_token(required=True)
             headers["session-token"] = token
         base = self.login_base_url if login else self.api_base_url
-        try:
-            response = self.runtime.session.request(
-                method.upper(),
-                self._url(base, path),
-                params=dict(params) if params is not None else None,
-                json=dict(body) if body is not None else None,
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            method.upper(),
+            self._url(base, path),
+            params=dict(params) if params is not None else None,
+            json_body=dict(body) if body is not None else None,
+            headers=headers,
+        )
 
     def _resolve_session_token(self, *, required: bool) -> str:
         if self._session_token:

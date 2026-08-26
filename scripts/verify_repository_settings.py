@@ -137,6 +137,15 @@ def check_release_variable(variable: dict[str, Any]) -> dict[str, str]:
     )
 
 
+REQUIRED_RELEASE_ENVIRONMENT_CHECKS = (
+    "release_required_reviewers",
+    "release_prevent_self_review",
+    "release_protected_branches",
+    "release_signing_secrets",
+    "release_windows_code_signing_required",
+)
+
+
 def collect_checks(repository: str, branch: str, token: str, timeout: float, request_json: JsonRequest) -> list[dict[str, str]]:
     owner, name = repository.split("/", 1)
     prefix = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"

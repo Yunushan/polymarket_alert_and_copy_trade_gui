@@ -13,15 +13,24 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib import error as urllib_error
-from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 from dotenv import load_dotenv
 
-from core.models import AppConfig, MarketConfig, PaperTradeRecord, PriceAlert, WalletWatch, CopyTradeSettings
+from core.models import (
+    AppConfig,
+    CopyActivityOutboxEntry,
+    CopyActivityState,
+    CopyTradeSettings,
+    MarketConfig,
+    PaperTradeRecord,
+    PriceAlert,
+    WalletWatch,
+)
 from core.storage import ConfigLoadError, load_config, save_config
 from market_adapters import build_default_registry
 from market_adapters.base import MarketAdapter
@@ -262,6 +271,214 @@ def _set_windows_titlebar_theme(
 # Background wallet poller
 # ---------------------------
 
+@dataclass
+class WalletActivityTask:
+    watch_id: str
+    activity: Dict[str, Any]
+    checkpoint_key: str
+    market_id: str = ""
+    completion: "queue.Queue[bool]" = field(default_factory=lambda: queue.Queue(maxsize=1))
+
+    def acknowledge(self, persisted: bool) -> None:
+        try:
+            self.completion.put_nowait(bool(persisted))
+        except queue.Full:
+            pass
+
+
+@dataclass(frozen=True)
+class CopyActivityOutcome:
+    state: CopyActivityState
+    code: str
+    message: str
+    dispatch: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class WalletActivityCheckpoint:
+    cfg: AppConfig
+    watch: WalletWatch
+    previous_watch: Tuple[Optional[int], str, List[str]]
+    previous_outbox: List[CopyActivityOutboxEntry]
+    changed: bool = False
+
+
+_COPY_ACTIVITY_FIELDS = (
+    "timestamp",
+    "transactionHash",
+    "activityId",
+    "activity_id",
+    "proxyWallet",
+    "asset",
+    "contract_id",
+    "side",
+    "price",
+    "size",
+    "slug",
+    "outcome",
+    "odds",
+    "shares",
+    "pseudonym",
+    "name",
+)
+_COPY_OUTBOX_CONCLUSIVE_STATES = {"completed", "rejected"}
+_COPY_OUTBOX_REPLAYABLE_STATES = {"pending", "retryable"}
+_COPY_OUTBOX_HISTORY_LIMIT = 500
+_COPY_ACTIVITY_MAX_REPLAY_AGE_SECONDS = 300
+
+
+def _copy_activity_snapshot(activity: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only the scalar fields needed to audit and replay copy handling."""
+
+    snapshot: Dict[str, Any] = {}
+    for key in _COPY_ACTIVITY_FIELDS:
+        value = activity.get(key)
+        if value is None or isinstance(value, (str, int, float, bool)):
+            snapshot[key] = value
+    return snapshot
+
+
+def _copy_execution_policy(settings: CopyTradeSettings) -> Dict[str, Any]:
+    """Canonical policy bound to a signal before any processing occurs."""
+
+    return {
+        "allow_sells": bool(settings.allow_sells),
+        "conflict_guard": bool(settings.conflict_guard),
+        "conflict_window_seconds": max(0, int(settings.conflict_window_seconds or 0)),
+        "enabled": bool(settings.enabled),
+        "follow_wallets": list(settings.normalized_follow_wallets()),
+        "live": bool(settings.live),
+        "max_usdc_per_trade": float(settings.max_usdc_per_trade),
+        "scale": float(settings.scale),
+        "slippage": float(settings.slippage),
+    }
+
+
+def _find_copy_activity_entry(
+    cfg: AppConfig,
+    watch_id: str,
+    checkpoint_key: str,
+    market_id: str = "",
+) -> Optional[CopyActivityOutboxEntry]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    return next(
+        (
+            entry
+            for entry in cfg.copy_activity_outbox
+            if entry.watch_id == watch_id and entry.activity_key == checkpoint_key
+            and (not normalized_market_id or entry.market_id == normalized_market_id)
+        ),
+        None,
+    )
+
+
+def _prune_copy_activity_outbox(cfg: AppConfig) -> None:
+    overflow = len(cfg.copy_activity_outbox) - _COPY_OUTBOX_HISTORY_LIMIT
+    if overflow <= 0:
+        return
+    removable_ids = {
+        entry.id
+        for entry in sorted(cfg.copy_activity_outbox, key=lambda item: (item.updated_at, item.created_at))
+        if entry.state in _COPY_OUTBOX_CONCLUSIVE_STATES
+    }
+    retained: List[CopyActivityOutboxEntry] = []
+    for entry in cfg.copy_activity_outbox:
+        if overflow > 0 and entry.id in removable_ids:
+            overflow -= 1
+            removable_ids.remove(entry.id)
+            continue
+        retained.append(entry)
+    cfg.copy_activity_outbox = retained
+
+
+def _apply_wallet_activity_checkpoint(
+    cfg: AppConfig,
+    task: WalletActivityTask,
+) -> Optional[WalletActivityCheckpoint]:
+    watch = next((item for item in cfg.wallets if item.id == task.watch_id), None)
+    if watch is None:
+        raise ValueError("Wallet watch no longer exists.")
+    source_market_id = str(task.market_id or cfg.selected_market_id or "polymarket").strip().lower()
+    existing = _find_copy_activity_entry(
+        cfg,
+        task.watch_id,
+        task.checkpoint_key,
+        source_market_id,
+    )
+    if existing is not None and existing.state not in _COPY_OUTBOX_REPLAYABLE_STATES:
+        return None
+    any_outbox_match = _find_copy_activity_entry(cfg, task.watch_id, task.checkpoint_key)
+    if (
+        existing is None
+        and any_outbox_match is None
+        and task.checkpoint_key in set(watch.seen_activity_keys or [])
+    ):
+        # Legacy checkpoints did not include outbox state. Preserve their
+        # historical at-most-once behavior instead of guessing whether a live
+        # order was placed.
+        return None
+    previous = (watch.last_seen_ts, watch.last_seen_tx, list(watch.seen_activity_keys))
+    checkpoint = WalletActivityCheckpoint(cfg, watch, previous, list(cfg.copy_activity_outbox))
+    if existing is None:
+        if len(cfg.copy_activity_outbox) >= _COPY_OUTBOX_HISTORY_LIMIT:
+            required_slots = len(cfg.copy_activity_outbox) - _COPY_OUTBOX_HISTORY_LIMIT + 1
+            oldest_conclusive = sorted(
+                (
+                    entry
+                    for entry in cfg.copy_activity_outbox
+                    if entry.state in _COPY_OUTBOX_CONCLUSIVE_STATES
+                ),
+                key=lambda entry: (entry.updated_at, entry.created_at, entry.id),
+            )
+            if len(oldest_conclusive) < required_slots:
+                raise RuntimeError(
+                    "Copy activity outbox is full of unresolved entries; reconcile them before polling."
+                )
+            removable_ids = {entry.id for entry in oldest_conclusive[:required_slots]}
+            cfg.copy_activity_outbox = [
+                entry for entry in cfg.copy_activity_outbox if entry.id not in removable_ids
+            ]
+        watch.last_seen_ts = max(watch.last_seen_ts or 0, int(task.activity.get("timestamp") or 0))
+        watch.last_seen_tx = str(task.activity.get("transactionHash") or watch.last_seen_tx or "")
+        watch.seen_activity_keys.append(task.checkpoint_key)
+        if len(watch.seen_activity_keys) > 200:
+            watch.seen_activity_keys = watch.seen_activity_keys[-200:]
+        cfg.copy_activity_outbox.append(
+            CopyActivityOutboxEntry(
+                watch_id=task.watch_id,
+                activity_key=task.checkpoint_key,
+                activity=_copy_activity_snapshot(task.activity),
+                market_id=source_market_id,
+                execution_policy=_copy_execution_policy(cfg.copytrading),
+            )
+        )
+        checkpoint.changed = True
+        _prune_copy_activity_outbox(cfg)
+    return checkpoint
+
+
+def _restore_wallet_activity_checkpoint(
+    checkpoint: WalletActivityCheckpoint,
+) -> None:
+    watch = checkpoint.watch
+    watch.last_seen_ts, watch.last_seen_tx, previous_keys = checkpoint.previous_watch
+    watch.seen_activity_keys = previous_keys
+    checkpoint.cfg.copy_activity_outbox = checkpoint.previous_outbox
+
+
+def _set_copy_activity_outcome(
+    entry: CopyActivityOutboxEntry,
+    outcome: CopyActivityOutcome,
+) -> None:
+    if outcome.state not in {"retryable", "completed", "rejected", "ambiguous"}:
+        raise ValueError(f"Unsupported copy activity outcome state: {outcome.state}")
+    entry.state = outcome.state
+    entry.outcome_code = outcome.code
+    entry.outcome_message = outcome.message
+    entry.dispatch = dict(outcome.dispatch)
+    entry.updated_at = int(time.time())
+
+
 class WalletPoller:
     def __init__(
         self,
@@ -286,10 +503,12 @@ class WalletPoller:
     def stop(self):
         self._stop.set()
 
-    def _list_activity(self, wallet: str) -> List[Dict[str, Any]]:
+    def _list_activity(self, wallet: str, *, market_id: str = "") -> List[Dict[str, Any]]:
         """Read wallet trades through the selected market's official adapter feed."""
 
-        market_id = str(getattr(self.cfg, "selected_market_id", "polymarket") or "polymarket").strip().lower()
+        market_id = str(
+            market_id or getattr(self.cfg, "selected_market_id", "polymarket") or "polymarket"
+        ).strip().lower()
         market_cfg = self.cfg.markets.get(market_id)
         if self.adapter_registry is not None:
             adapter = self.adapter_registry.create(market_id, market_cfg.settings if market_cfg else {})
@@ -305,7 +524,29 @@ class WalletPoller:
             "This market does not expose an official wallet activity feed in the desktop app.",
         )
 
+    def _queue_wallet_activity(self, task: WalletActivityTask) -> bool:
+        self.ui_queue.put(("wallet_activity", task))
+        while not self._stop.is_set():
+            try:
+                return bool(task.completion.get(timeout=0.25))
+            except queue.Empty:
+                continue
+        return False
+
     def _run(self):
+        startup_pending_ids = {
+            entry.id for entry in self.cfg.copy_activity_outbox if entry.state == "pending"
+        }
+        for entry in self.cfg.copy_activity_outbox:
+            if entry.state == "ambiguous":
+                self.ui_queue.put(
+                    (
+                        "log",
+                        "[copy reconcile] Activity "
+                        f"{entry.activity_key} may have dispatched a live order. "
+                        "Automatic replay is blocked; reconcile it against venue order history.",
+                    )
+                )
         while not self._stop.is_set():
             for w in list(self.cfg.wallets):
                 if self._stop.is_set():
@@ -313,7 +554,35 @@ class WalletPoller:
                 if not w.enabled:
                     continue
                 try:
-                    items = self._list_activity(w.wallet)
+                    replay_entries = sorted(
+                        (
+                            entry
+                            for entry in self.cfg.copy_activity_outbox
+                            if entry.watch_id == w.id
+                            and (
+                                entry.state == "retryable"
+                                or (entry.state == "pending" and entry.id in startup_pending_ids)
+                            )
+                        ),
+                        key=lambda entry: (entry.created_at, entry.id),
+                    )
+                    replay_failed = False
+                    for entry in replay_entries:
+                        startup_pending_ids.discard(entry.id)
+                        task = WalletActivityTask(
+                            w.id,
+                            dict(entry.activity),
+                            entry.activity_key,
+                            entry.market_id,
+                        )
+                        if not self._queue_wallet_activity(task):
+                            replay_failed = True
+                            break
+                    if replay_failed or self._stop.is_set():
+                        continue
+
+                    source_market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+                    items = self._list_activity(w.wallet, market_id=source_market_id)
                     # Items are sorted DESC per API; process oldest->newest
                     new_items = []
                     seen_keys = set(w.seen_activity_keys or [])
@@ -322,6 +591,19 @@ class WalletPoller:
                         tx = str(it.get("transactionHash") or "")
                         key = activity_key(it)
                         if key in seen_keys:
+                            same_market_entry = _find_copy_activity_entry(
+                                self.cfg,
+                                w.id,
+                                key,
+                                source_market_id,
+                            )
+                            any_market_entry = _find_copy_activity_entry(self.cfg, w.id, key)
+                            if same_market_entry is not None or any_market_entry is None:
+                                continue
+                            # A global legacy key collided with an outbox entry
+                            # from another venue. Preserve the market-bound
+                            # signal instead of silently dropping it.
+                            new_items.append((key, it))
                             continue
                         if ts > (w.last_seen_ts or 0):
                             new_items.append((key, it))
@@ -336,21 +618,23 @@ class WalletPoller:
                         if w.only_market_slug:
                             if str(it.get("slug") or "") != w.only_market_slug:
                                 continue
-                        self.ui_queue.put(("wallet_activity", w.id, it))
-
-                        # update last seen to this item
-                        w.last_seen_ts = max(w.last_seen_ts or 0, int(it.get("timestamp") or 0))
-                        w.last_seen_tx = str(it.get("transactionHash") or w.last_seen_tx or "")
+                        # Queue one activity at a time and wait until the UI
+                        # thread has durably checkpointed exactly this item.
+                        # This prevents a later item in the same API batch from
+                        # being persisted before an earlier item is handled.
+                        task = WalletActivityTask(
+                            w.id,
+                            dict(it),
+                            key,
+                            source_market_id,
+                        )
+                        acknowledged = self._queue_wallet_activity(task)
+                        if not acknowledged:
+                            break
                         seen_keys.add(key)
-                        w.seen_activity_keys.append(key)
-                        if len(w.seen_activity_keys) > 200:
-                            w.seen_activity_keys = w.seen_activity_keys[-200:]
-                            seen_keys = set(w.seen_activity_keys)
 
                 except Exception as e:
                     self.ui_queue.put(("log", f"[wallet poll] {w.wallet}: {e}"))
-            # Persist updated last_seen state
-            self.ui_queue.put(("config_changed", None, None))
 
             # sleep
             end = time.time() + self.poll_interval
@@ -367,11 +651,13 @@ class AdapterPricePoller:
         cfg: AppConfig,
         adapter_registry: Any,
         poll_interval: float = 30.0,
+        stream_connected: Optional[Callable[[str], bool]] = None,
     ):
         self.ui_queue = ui_queue
         self.cfg = cfg
         self.adapter_registry = adapter_registry
         self.poll_interval = poll_interval
+        self.stream_connected = stream_connected or (lambda _market_id: False)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -390,11 +676,11 @@ class AdapterPricePoller:
             if not alert.enabled:
                 continue
             market_id = str(getattr(alert, "market_id", "polymarket") or "polymarket").strip().lower()
-            if market_id == "polymarket":
-                continue
             grouped.setdefault(market_id, set()).add(alert.token_id)
 
         for market_id, contract_ids in grouped.items():
+            if self.stream_connected(market_id):
+                continue
             market_cfg = self.cfg.markets.get(market_id)
             if not market_config_enabled(self.cfg, market_id):
                 self.ui_queue.put(("log", f"[alerts] {market_id}: disabled in local market config."))
@@ -513,7 +799,12 @@ class App(tk.Tk):
             poll_interval=10.0,
             adapter_registry=self.adapter_registry,
         )
-        self.adapter_price_poller = AdapterPricePoller(self.ui_queue, self.cfg, self.adapter_registry)
+        self.adapter_price_poller = AdapterPricePoller(
+            self.ui_queue,
+            self.cfg,
+            self.adapter_registry,
+            stream_connected=lambda market_id: market_id == "polymarket" and self.market_ws.is_connected,
+        )
         if self._background_workers_started:
             self.adapter_price_poller.start()
 
@@ -4443,47 +4734,123 @@ class App(tk.Tk):
             previous_side = str(existing.get("side") or "").upper()
             previous_wallet = str(existing.get("wallet") or "")
             if previous_wallet == wallet:
-                self._copy_conflict_cache[key] = {
-                    "side": side,
-                    "wallet": wallet,
-                    "timestamp": timestamp,
-                    "activity_key": activity_key(item),
-                }
                 return None
             if previous_side and previous_side != side:
                 return f"opposite-side same-token copy already accepted from {previous_wallet}"
             return f"duplicate same-token copy already accepted from {previous_wallet}"
-        self._copy_conflict_cache[key] = {
-            "side": side,
-            "wallet": wallet,
-            "timestamp": timestamp,
-            "activity_key": activity_key(item),
-        }
         return None
 
-    def _copy_trade_from_activity(self, item: Dict[str, Any]):
-        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
-        s = self.cfg.copytrading
-        if not s.enabled:
+    def _commit_copy_conflict(self, item: Dict[str, Any]) -> None:
+        settings = self.cfg.copytrading
+        if not settings.conflict_guard:
             return
+        key = App._copy_guard_key(item)
+        if not key:
+            return
+        self._copy_conflict_cache[key] = {
+            "side": str(item.get("side") or "").upper(),
+            "wallet": str(item.get("proxyWallet") or "").strip().lower(),
+            "timestamp": int(safe_float(item.get("timestamp"), time.time()) or time.time()),
+            "activity_key": activity_key(item),
+        }
+
+    def _copy_trade_from_activity(
+        self,
+        item: Dict[str, Any],
+        *,
+        market_id: str = "",
+        execution_policy: Optional[Dict[str, Any]] = None,
+        staged_at: int = 0,
+        replay_authorized_at: int = 0,
+        before_live_dispatch: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> CopyActivityOutcome:
+        now = time.time()
+        manual_replay_authorized = int(replay_authorized_at or 0) > 0
+        replay_age_origin = int(replay_authorized_at or staged_at or 0)
+        replay_age = now - replay_age_origin if replay_age_origin else 0.0
+        if replay_age_origin and (
+            replay_age > _COPY_ACTIVITY_MAX_REPLAY_AGE_SECONDS or replay_age < -60
+        ):
+            return CopyActivityOutcome(
+                "rejected",
+                "copy_activity_stale",
+                "The copy signal exceeded the automatic replay age limit.",
+            )
+        selected_market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        market_id = str(market_id or selected_market_id).strip().lower()
+        if market_id != selected_market_id:
+            self.ui_queue.put(
+                (
+                    "log",
+                    "[copy] Source market changed before activity handling; refusing cross-market replay.",
+                )
+            )
+            return CopyActivityOutcome(
+                "retryable",
+                "source_market_mismatch",
+                "Select the activity's durable source market before retrying it.",
+            )
+        current_policy = _copy_execution_policy(self.cfg.copytrading)
+        if execution_policy is not None:
+            if not execution_policy:
+                return CopyActivityOutcome(
+                    "ambiguous",
+                    "execution_policy_missing",
+                    "Legacy replay state has no bound execution policy; manual reconciliation is required.",
+                )
+            if dict(execution_policy) != current_policy:
+                return CopyActivityOutcome(
+                    "retryable",
+                    "execution_policy_changed",
+                    "Copy settings changed after staging; restore the original policy or reconcile manually.",
+                )
+            s = CopyTradeSettings.from_dict(execution_policy)
+        else:
+            s = self.cfg.copytrading
+        if s.live:
+            raw_activity_timestamp = safe_float(item.get("timestamp"), None)
+            if raw_activity_timestamp is None or raw_activity_timestamp <= 0:
+                return CopyActivityOutcome(
+                    "rejected",
+                    "live_activity_timestamp_missing",
+                    "Live copy dispatch requires a source activity timestamp.",
+                )
+            activity_timestamp = float(raw_activity_timestamp)
+            if activity_timestamp >= 1_000_000_000_000:
+                activity_timestamp /= 1000.0
+            activity_age = now - activity_timestamp
+            if (
+                activity_age < -60
+                or (
+                    activity_age > _COPY_ACTIVITY_MAX_REPLAY_AGE_SECONDS
+                    and not manual_replay_authorized
+                )
+            ):
+                return CopyActivityOutcome(
+                    "rejected",
+                    "live_activity_timestamp_stale",
+                    "The source activity timestamp is outside the live-copy freshness window.",
+                )
+        if not s.enabled:
+            return CopyActivityOutcome("rejected", "copy_disabled", "Copy trading is disabled.")
         followed_wallets = set(s.normalized_follow_wallets())
         if not followed_wallets:
-            return
+            return CopyActivityOutcome("rejected", "no_follow_wallets", "No copy-trading wallets are configured.")
 
         activity_identity = normalize_activity_identity(market_id, item.get("proxyWallet"))
         if not activity_identity or activity_identity not in followed_wallets:
-            return
+            return CopyActivityOutcome("rejected", "wallet_not_followed", "Activity wallet is not followed.")
 
         side = str(item.get("side") or "").upper()
         if side not in ("BUY", "SELL"):
-            return
+            return CopyActivityOutcome("rejected", "invalid_side", "Activity side is not copyable.")
         if side == "SELL" and not s.allow_sells:
             self.ui_queue.put(("log", "[copy] Skipping SELL trade (allow_sells=false)."))
-            return
+            return CopyActivityOutcome("rejected", "sells_disabled", "SELL copy trading is disabled.")
 
         token_id = str(item.get("asset") or item.get("contract_id") or "").strip()
         if not token_id:
-            return
+            return CopyActivityOutcome("rejected", "missing_contract", "Activity has no contract identifier.")
 
         raw_size = safe_float(item.get("size"), 0.0) or 0.0
         raw_price = safe_float(item.get("price"), None)
@@ -4491,12 +4858,16 @@ class App(tk.Tk):
         adapter = (
             self._get_polymarket_adapter()
             if market_id == "polymarket"
-            else self._get_selected_market_adapter()
+            else App._adapter_for_market(self, market_id)
         )
         capabilities = getattr(adapter, "capabilities", None)
         if capabilities is not None and not bool(getattr(capabilities, "copy_trading", False)):
             self.ui_queue.put(("log", f"[copy] {adapter.display_name} does not support copy trading."))
-            return
+            return CopyActivityOutcome(
+                "rejected",
+                "copy_not_supported",
+                "The selected market does not support copy trading.",
+            )
 
         # Pull current best bid/ask for safer limit pricing
         best_bid = best_ask = None
@@ -4509,6 +4880,18 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+        if s.live and market_id == "polymarket":
+            executable_quote = best_ask if side == "BUY" else best_bid
+            if executable_quote is None:
+                self.ui_queue.put(
+                    ("log", "[copy LIVE] fresh executable-side orderbook quote is unavailable.")
+                )
+                return CopyActivityOutcome(
+                    "retryable",
+                    "live_quote_unavailable",
+                    "A fresh executable-side quote is required before live dispatch.",
+                )
+
         slip = max(0.0, min(float(s.slippage), 1.0))
         if is_azuro:
             raw_odds = safe_float(item.get("odds"), None)
@@ -4516,7 +4899,11 @@ class App(tk.Tk):
                 raw_odds = 1.0 / raw_price
             if raw_odds is None or raw_odds <= 0:
                 self.ui_queue.put(("log", "[copy] Azuro activity has no valid decimal odds."))
-                return
+                return CopyActivityOutcome(
+                    "rejected",
+                    "invalid_odds",
+                    "Activity has no valid decimal odds.",
+                )
             # Azuro's minimum-odds field is a decimal-odds floor. Allow the
             # configured slippage to reduce that floor, rather than treating
             # it as a 0..1 probability cap.
@@ -4545,11 +4932,15 @@ class App(tk.Tk):
                 size = max_shares
 
         if size <= 0:
-            return
+            return CopyActivityOutcome("rejected", "zero_size", "Scaled copy order size is zero.")
         conflict_reason = App._copy_conflict_reason(self, item)
         if conflict_reason:
             self.ui_queue.put(("log", f"[copy] Conflict guard skipped {token_id[:10]}...: {conflict_reason}."))
-            return
+            return CopyActivityOutcome(
+                "rejected",
+                "conflict_guard",
+                "Copy conflict guard rejected this activity.",
+            )
 
         if not s.live:
             order_metadata: Dict[str, Any] = {"source": "copy_trading", "activity": dict(item)}
@@ -4571,8 +4962,14 @@ class App(tk.Tk):
                 # useful when no paper ledger is available.
                 paper_result = None
             except Exception as exc:
-                self.ui_queue.put(("log", f"[copy SIM] {market_id} paper order rejected: {exc}"))
-                return
+                self.ui_queue.put(
+                    ("log", f"[copy SIM] {market_id} paper order failed before live dispatch ({type(exc).__name__}).")
+                )
+                return CopyActivityOutcome(
+                    "retryable",
+                    "paper_order_failure",
+                    "Paper-order handling failed and can be retried safely.",
+                )
             suffix = ""
             if paper_result is not None:
                 suffix = f" accepted={bool(paper_result.accepted)}"
@@ -4584,7 +4981,18 @@ class App(tk.Tk):
                     f"size={size:.4f} price<= {limit_price:.4f}{suffix}",
                 )
             )
-            return
+            if paper_result is not None and not bool(paper_result.accepted):
+                return CopyActivityOutcome(
+                    "rejected",
+                    "paper_order_rejected",
+                    "The paper-order adapter rejected the simulated order.",
+                )
+            App._commit_copy_conflict(self, item)
+            return CopyActivityOutcome(
+                "completed",
+                "paper_order_completed",
+                "Copy simulation completed without live dispatch.",
+            )
 
         if market_id != "polymarket":
             self.ui_queue.put(
@@ -4594,14 +5002,40 @@ class App(tk.Tk):
                     "use simulation until its official signing SDK is integrated.",
                 )
             )
-            return
+            return CopyActivityOutcome(
+                "rejected",
+                "live_market_not_supported",
+                "Live copy trading is not supported for the selected market.",
+            )
 
-        # LIVE mode safety: geoblock
-        if self._geoblock_cache is None:
-            self.do_geoblock_check()
-        if self._geoblock_cache and self._geoblock_cache.get("blocked") is True:
+        # LIVE mode safety: never rely on a cached or UI-initiated result. A
+        # fresh, explicit ``blocked is False`` response is required for every
+        # dispatch attempt; errors and malformed responses fail closed before
+        # the non-replayable dispatch boundary.
+        try:
+            geoblock = adapter.check_geoblock()
+        except Exception as exc:
+            self.ui_queue.put(("log", f"[copy LIVE] fresh geoblock check failed ({type(exc).__name__})."))
+            return CopyActivityOutcome(
+                "retryable",
+                "geoblock_check_failure",
+                "Fresh geoblock verification failed before dispatch and may be retried.",
+            )
+        if not isinstance(geoblock, dict) or not isinstance(geoblock.get("blocked"), bool):
+            self.ui_queue.put(("log", "[copy LIVE] geoblock status is unknown; refusing order."))
+            return CopyActivityOutcome(
+                "retryable",
+                "geoblock_status_unknown",
+                "Fresh geoblock verification returned no conclusive status.",
+            )
+        self._geoblock_cache = {**geoblock, "checked_at": int(time.time())}
+        if geoblock.get("blocked") is True:
             self.ui_queue.put(("log", "[copy] BLOCKED by geoblock. Refusing to place order."))
-            return
+            return CopyActivityOutcome(
+                "rejected",
+                "geoblock",
+                "Live copy order was rejected by the geoblock safety gate.",
+            )
 
         order = PaperOrderRequest(
             market_id=market_id,
@@ -4614,10 +5048,54 @@ class App(tk.Tk):
         try:
             preflight = adapter.preflight_live_order(order, feature_name="live copy trading")
         except Exception as e:
-            self.ui_queue.put(("log", f"[copy LIVE] preflight blocked order: {e}"))
-            return
+            self.ui_queue.put(("log", f"[copy LIVE] preflight blocked order ({type(e).__name__})."))
+            if isinstance(e, (MarketConfigurationError, UnsupportedFeatureError, ValueError)):
+                return CopyActivityOutcome(
+                    "rejected",
+                    "live_preflight_rejected",
+                    "Live-order preflight conclusively rejected this copy order.",
+                )
+            return CopyActivityOutcome(
+                "retryable",
+                "live_preflight_failure",
+                "Live-order preflight failed before dispatch and may be retried.",
+            )
 
-        trader = self._get_trader()
+        try:
+            trader = self._get_trader()
+        except Exception as exc:
+            self.ui_queue.put(("log", f"[copy LIVE] trader setup failed ({type(exc).__name__})."))
+            return CopyActivityOutcome(
+                "retryable",
+                "trader_setup_failure",
+                "Trader setup failed before dispatch and may be retried.",
+            )
+        dispatch = {
+            "market_id": market_id,
+            "contract_id": token_id,
+            "side": side,
+            "size": size,
+            "limit_price": limit_price,
+            "tif": "FOK",
+            "approx_notional": float(preflight["approx_notional"]),
+        }
+        if before_live_dispatch is None:
+            self.ui_queue.put(("log", "[copy LIVE] durable dispatch outbox is unavailable; refusing order."))
+            return CopyActivityOutcome(
+                "retryable",
+                "dispatch_persistence_unavailable",
+                "Live dispatch was refused because its durable outbox was unavailable.",
+            )
+        try:
+            before_live_dispatch(dispatch)
+        except Exception as exc:
+            self.ui_queue.put(("log", f"[copy LIVE] dispatch intent persistence failed ({type(exc).__name__})."))
+            return CopyActivityOutcome(
+                "retryable",
+                "dispatch_intent_persistence_failure",
+                "Dispatch intent could not be persisted; no live order was sent.",
+            )
+        App._commit_copy_conflict(self, item)
         self.ui_queue.put(
             (
                 "log",
@@ -4630,7 +5108,19 @@ class App(tk.Tk):
             resp = trader.place_limit_order(token_id=token_id, side=side, price=limit_price, size=size, tif="FOK")
             self.ui_queue.put(("log", f"[copy LIVE] response: {resp}"))
         except Exception as e:
-            self.ui_queue.put(("log", f"[copy LIVE] error: {e}"))
+            self.ui_queue.put(("log", f"[copy LIVE] dispatch outcome is ambiguous ({type(e).__name__})."))
+            return CopyActivityOutcome(
+                "ambiguous",
+                "live_dispatch_ambiguous",
+                "The venue call did not return a conclusive result; manual reconciliation is required.",
+                dispatch,
+            )
+        return CopyActivityOutcome(
+            "completed",
+            "live_dispatch_completed",
+            "The venue returned a conclusive live-order response.",
+            dispatch,
+        )
 
     # ------------------ Market WS event handling ------------------
 
@@ -4804,9 +5294,129 @@ class App(tk.Tk):
                 elif kind == "adapter_price":
                     self._update_adapter_price_state(a)  # type: ignore
                 elif kind == "wallet_activity":
-                    watch_id = a
-                    item = b
-                    self._handle_wallet_activity(watch_id, item)  # type: ignore
+                    task = (
+                        a
+                        if isinstance(a, WalletActivityTask)
+                        else WalletActivityTask(str(a), dict(b or {}), activity_key(b or {}))
+                    )
+                    checkpoint = None
+                    try:
+                        checkpoint = _apply_wallet_activity_checkpoint(self.cfg, task)
+                        if checkpoint is None:
+                            task.acknowledge(True)
+                            continue
+                        if checkpoint.changed:
+                            save_config(self.cfg)
+                    except Exception as exc:
+                        if checkpoint is not None:
+                            _restore_wallet_activity_checkpoint(checkpoint)
+                        self.log(
+                            "[copy] Refusing wallet activity because its replay checkpoint "
+                            f"could not be persisted ({type(exc).__name__})."
+                        )
+                        task.acknowledge(False)
+                        continue
+
+                    outbox_entry = _find_copy_activity_entry(
+                        self.cfg,
+                        task.watch_id,
+                        task.checkpoint_key,
+                        task.market_id,
+                    )
+                    if outbox_entry is None:
+                        self.log(
+                            "[copy] Refusing wallet activity because its durable outbox entry is missing."
+                        )
+                        task.acknowledge(False)
+                        continue
+                    outbox_entry.attempts += 1
+                    outbox_entry.updated_at = int(time.time())
+
+                    def before_live_dispatch(
+                        dispatch: Dict[str, Any],
+                        _outbox_entry: CopyActivityOutboxEntry = outbox_entry,
+                    ) -> None:
+                        previous = (
+                            _outbox_entry.state,
+                            _outbox_entry.outcome_code,
+                            _outbox_entry.outcome_message,
+                            dict(_outbox_entry.dispatch),
+                            _outbox_entry.updated_at,
+                        )
+                        _set_copy_activity_outcome(
+                            _outbox_entry,
+                            CopyActivityOutcome(
+                                "ambiguous",
+                                "live_dispatch_started",
+                                "A live dispatch was initiated; reconcile venue order history before retrying.",
+                                dispatch,
+                            ),
+                        )
+                        try:
+                            # This commit is the safety boundary. The exchange
+                            # call must not start unless the non-replayable
+                            # dispatch intent is durable first.
+                            save_config(self.cfg)
+                        except Exception:
+                            (
+                                _outbox_entry.state,
+                                _outbox_entry.outcome_code,
+                                _outbox_entry.outcome_message,
+                                previous_dispatch,
+                                _outbox_entry.updated_at,
+                            ) = previous
+                            _outbox_entry.dispatch = previous_dispatch
+                            raise
+
+                    try:
+                        outcome = self._handle_wallet_activity(
+                            task.watch_id,
+                            task.activity,
+                            market_id=outbox_entry.market_id,
+                            execution_policy=outbox_entry.execution_policy,
+                            staged_at=outbox_entry.created_at,
+                            replay_authorized_at=outbox_entry.replay_authorized_at,
+                            before_live_dispatch=before_live_dispatch,
+                        )
+                        if not isinstance(outcome, CopyActivityOutcome):
+                            outcome = CopyActivityOutcome(
+                                "completed",
+                                "handled",
+                                "Wallet activity handling completed.",
+                            )
+                    except Exception as exc:
+                        if outbox_entry.state == "ambiguous":
+                            outcome = CopyActivityOutcome(
+                                "ambiguous",
+                                outbox_entry.outcome_code or "live_dispatch_ambiguous",
+                                outbox_entry.outcome_message
+                                or "A live dispatch may have occurred; manual reconciliation is required.",
+                                dict(outbox_entry.dispatch),
+                            )
+                            self.log(
+                                "[copy] Wallet activity handling failed after the live dispatch boundary "
+                                f"({type(exc).__name__}); manual reconciliation remains required."
+                            )
+                        else:
+                            outcome = CopyActivityOutcome(
+                                "retryable",
+                                "pre_dispatch_handler_failure",
+                                "Handling failed before a confirmed live dispatch and may be retried.",
+                            )
+                            self.log(
+                                "[copy] Wallet activity handling failed before dispatch "
+                                f"({type(exc).__name__}); it remains retryable."
+                            )
+                    _set_copy_activity_outcome(outbox_entry, outcome)
+                    _prune_copy_activity_outbox(self.cfg)
+                    try:
+                        save_config(self.cfg)
+                    except Exception as exc:
+                        self.log(
+                            "[copy] Copy activity outcome could not be persisted "
+                            f"({type(exc).__name__}). Its previously durable state remains authoritative."
+                        )
+                    task.acknowledge(True)
                 elif kind == "config_changed":
                     # Persist config (for last_seen state)
                     save_config(self.cfg)
@@ -4852,7 +5462,17 @@ class App(tk.Tk):
             if not self._shutdown_started:
                 self._queue_after_id = self.after(100, self._process_queue)
 
-    def _handle_wallet_activity(self, watch_id: str, item: Dict[str, Any]):
+    def _handle_wallet_activity(
+        self,
+        watch_id: str,
+        item: Dict[str, Any],
+        *,
+        market_id: str = "",
+        execution_policy: Optional[Dict[str, Any]] = None,
+        staged_at: int = 0,
+        replay_authorized_at: int = 0,
+        before_live_dispatch: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> CopyActivityOutcome:
         # Add to activity UI
         ts = int(item.get("timestamp") or 0)
         tss = time.strftime("%H:%M:%S", time.localtime(ts)) if ts else "?"
@@ -4872,7 +5492,14 @@ class App(tk.Tk):
         self.log(f"[activity] {line}")
 
         # Copy trade logic
-        self._copy_trade_from_activity(item)
+        return self._copy_trade_from_activity(
+            item,
+            market_id=market_id,
+            execution_policy=execution_policy,
+            staged_at=staged_at,
+            replay_authorized_at=replay_authorized_at,
+            before_live_dispatch=before_live_dispatch,
+        )
 
 
 def application_resource_roots() -> List[Path]:

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import csv
+import errno
 import hashlib
 import io
 import json
 import os
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from copy import deepcopy
+from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +22,42 @@ DEFAULT_ANALYTICS_CACHE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_ANALYTICS_CACHE_MAX_ENTRIES = 100
 ANALYTICS_CACHE_VERSION = 1
 POLYMARKET_MDD_AUDIT_KIND = "polymarket_mdd_audit"
+ANALYTICS_CACHE_LOCK_TIMEOUT_SECONDS = 10.0
+ANALYTICS_CACHE_LOCK_POLL_SECONDS = 0.05
+_MISSING_REVISION = "missing"
+_REVISION_ATTR = "_analytics_cache_storage_revision"
+_CACHE_THREAD_LOCKS_GUARD = threading.Lock()
+_CACHE_THREAD_LOCKS: Dict[str, threading.RLock] = {}
+_CACHE_THREAD_STATE = threading.local()
+
+
+class AnalyticsCacheConflictError(RuntimeError):
+    """Raised when a stale snapshot would overwrite a newer cache revision."""
+
+
+class AnalyticsCacheLockError(RuntimeError):
+    """Raised when an analytics-cache mutation cannot acquire its lock."""
+
+
+class AnalyticsCacheDurabilityError(OSError):
+    """Raised after replacement committed but directory durability failed."""
+
+    def __init__(self, path: Path, revision: str) -> None:
+        super().__init__(
+            f"Analytics cache replacement committed at {path}, but parent-directory durability could not be confirmed. "
+            "Retry the exact snapshot to re-confirm durability, or reload before changing it."
+        )
+        self.path = path
+        self.revision = revision
+        self.committed = True
+
+
+class _RevisionedAnalyticsCache(dict[str, Any]):
+    """A cache snapshot carrying non-persisted compare-and-swap provenance."""
+
+    def __init__(self, *args: Any, revision: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        setattr(self, _REVISION_ATTR, revision)
 
 
 def analytics_cache_path(path: Optional[Path | str] = None) -> Path:
@@ -29,6 +69,160 @@ def analytics_cache_path(path: Optional[Path | str] = None) -> Path:
     return DEFAULT_ANALYTICS_CACHE_PATH
 
 
+def _cache_lock_key(target: Path) -> str:
+    return os.path.normcase(str(target.expanduser().resolve(strict=False)))
+
+
+def _cache_thread_lock(target: Path) -> threading.RLock:
+    key = _cache_lock_key(target)
+    with _CACHE_THREAD_LOCKS_GUARD:
+        lock = _CACHE_THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CACHE_THREAD_LOCKS[key] = lock
+    return lock
+
+
+def _cache_lock_path(target: Path) -> Path:
+    return target.with_name(f".{target.name}.lock")
+
+
+def _lock_is_contended(error: OSError) -> bool:
+    return error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or getattr(error, "winerror", None) in {
+        33,
+        36,
+        158,
+    }
+
+
+def _try_lock_file(handle: Any) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: Any) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _initialize_lock_file(handle: Any, target: Path) -> None:
+    try:
+        if os.name == "posix":
+            os.fchmod(handle.fileno(), 0o600)
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        raise AnalyticsCacheLockError(f"Analytics cache lock file initialization failed: {target}") from None
+
+
+@contextmanager
+def _cross_process_cache_lock(
+    target: Path,
+    *,
+    timeout_seconds: float = ANALYTICS_CACHE_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
+    lock_path = _cache_lock_path(target)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+    except OSError:
+        raise AnalyticsCacheLockError(f"Analytics cache lock file is unavailable: {target}") from None
+
+    acquired = False
+    try:
+        _initialize_lock_file(handle, target)
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while not acquired:
+            try:
+                _try_lock_file(handle)
+                acquired = True
+            except OSError as error:
+                if not _lock_is_contended(error):
+                    raise AnalyticsCacheLockError(f"Analytics cache lock acquisition failed: {target}") from None
+                if time.monotonic() >= deadline:
+                    raise AnalyticsCacheLockError(f"Analytics cache lock acquisition timed out: {target}") from None
+                time.sleep(ANALYTICS_CACHE_LOCK_POLL_SECONDS)
+        yield
+    finally:
+        if acquired:
+            try:
+                _unlock_file(handle)
+            except OSError:
+                # Closing the descriptor releases the advisory lock even if
+                # an explicit unlock races with process teardown.
+                pass
+        handle.close()
+
+
+@contextmanager
+def _analytics_cache_mutation_lock(target: Path) -> Iterator[None]:
+    key = _cache_lock_key(target)
+    thread_lock = _cache_thread_lock(target)
+    if not thread_lock.acquire(timeout=ANALYTICS_CACHE_LOCK_TIMEOUT_SECONDS):
+        raise AnalyticsCacheLockError(f"Analytics cache in-process lock acquisition timed out: {target}")
+
+    depths = getattr(_CACHE_THREAD_STATE, "depths", None)
+    if depths is None:
+        depths = {}
+        _CACHE_THREAD_STATE.depths = depths
+    depth = int(depths.get(key, 0))
+    depths[key] = depth + 1
+    try:
+        if depth:
+            yield
+        else:
+            with _cross_process_cache_lock(target):
+                yield
+    finally:
+        remaining = int(depths.get(key, 1)) - 1
+        if remaining > 0:
+            depths[key] = remaining
+        else:
+            depths.pop(key, None)
+        thread_lock.release()
+
+
+def _locked_cache_mutation(*, path_parameter: str, positional_index: Optional[int] = None) -> Any:
+    def decorate(function: Any) -> Any:
+        @wraps(function)
+        def locked(*args: Any, **kwargs: Any) -> Any:
+            configured_path = kwargs.get(path_parameter)
+            if configured_path is None and positional_index is not None and len(args) > positional_index:
+                configured_path = args[positional_index]
+            target = analytics_cache_path(configured_path)
+            with _analytics_cache_mutation_lock(target):
+                return function(*args, **kwargs)
+
+        return locked
+
+    return decorate
+
+
+def _analytics_cache_file_revision(target: Path) -> str:
+    if not target.exists():
+        return _MISSING_REVISION
+    return hashlib.sha256(target.read_bytes()).hexdigest()
+
+
 def make_cache_key(kind: str, params: Mapping[str, Any]) -> str:
     body = json.dumps(_jsonable(params), sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(f"{kind}:{body}".encode("utf-8")).hexdigest()
@@ -37,16 +231,23 @@ def make_cache_key(kind: str, params: Mapping[str, Any]) -> str:
 
 def load_analytics_cache(path: Optional[Path | str] = None) -> Dict[str, Any]:
     target = analytics_cache_path(path)
+    with _analytics_cache_mutation_lock(target):
+        return _load_analytics_cache_unlocked(target)
+
+
+def _load_analytics_cache_unlocked(target: Path) -> Dict[str, Any]:
     if not target.exists():
-        return _empty_cache()
+        return _empty_cache(revision=_MISSING_REVISION)
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
+        encoded = target.read_bytes()
+        decoded = json.loads(encoded.decode("utf-8"))
     except Exception:
         _quarantine_invalid_cache(target)
-        return _empty_cache()
-    if not isinstance(raw, dict):
+        return _empty_cache(revision=_MISSING_REVISION)
+    if not isinstance(decoded, dict):
         _quarantine_invalid_cache(target)
-        return _empty_cache()
+        return _empty_cache(revision=_MISSING_REVISION)
+    raw = _RevisionedAnalyticsCache(decoded, revision=hashlib.sha256(encoded).hexdigest())
     entries = raw.get("entries")
     if not isinstance(entries, dict):
         raw["entries"] = {}
@@ -58,17 +259,51 @@ def load_analytics_cache(path: Optional[Path | str] = None) -> Dict[str, Any]:
 
 def save_analytics_cache(cache: Mapping[str, Any], path: Optional[Path | str] = None) -> Path:
     target = analytics_cache_path(path)
+    with _analytics_cache_mutation_lock(target):
+        return _save_analytics_cache_unlocked(cache, target)
+
+
+def _save_analytics_cache_unlocked(cache: Mapping[str, Any], target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(cache, indent=2, sort_keys=True) + "\n"
+    data = (json.dumps(cache, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    committed_revision = hashlib.sha256(data).hexdigest()
+    current_revision = _analytics_cache_file_revision(target)
+    expected_revision = getattr(cache, _REVISION_ATTR, _MISSING_REVISION)
+    if expected_revision != current_revision:
+        if current_revision == committed_revision:
+            # The exact bytes already reached the commit point (most commonly
+            # after a previous parent-directory fsync error). This is an
+            # idempotent durability retry, not a stale overwrite.
+            if isinstance(cache, _RevisionedAnalyticsCache):
+                setattr(cache, _REVISION_ATTR, committed_revision)
+            try:
+                _fsync_parent_directory(target)
+            except OSError as error:
+                raise AnalyticsCacheDurabilityError(target, committed_revision) from error
+            return target
+        raise AnalyticsCacheConflictError(
+            f"Analytics cache changed in another writer: {target}. Reload it before saving; no data was written."
+        )
+
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        with os.fdopen(descriptor, "wb") as stream:
+            if os.name == "posix":
+                os.fchmod(stream.fileno(), 0o600)
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
-        _fsync_parent_directory(target)
+        # Replacement is the commit point. Update snapshot provenance before
+        # directory fsync so the same object can safely retry after an
+        # acknowledged-but-not-durability-confirmed commit.
+        if isinstance(cache, _RevisionedAnalyticsCache):
+            setattr(cache, _REVISION_ATTR, committed_revision)
+        try:
+            _fsync_parent_directory(target)
+        except OSError as error:
+            raise AnalyticsCacheDurabilityError(target, committed_revision) from error
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -207,6 +442,7 @@ def list_analytics_artifacts(
     }
 
 
+@_locked_cache_mutation(path_parameter="path")
 def purge_analytics_artifacts(
     *,
     keys: Optional[Iterable[str]] = None,
@@ -264,6 +500,7 @@ def purge_analytics_artifacts(
     return inventory
 
 
+@_locked_cache_mutation(path_parameter="path")
 def store_analytics_artifact(
     kind: str,
     params: Mapping[str, Any],
@@ -381,9 +618,12 @@ def mdd_payload_to_csv(payload: Mapping[str, Any]) -> str:
     return buffer.getvalue()
 
 
-def _empty_cache() -> Dict[str, Any]:
+def _empty_cache(*, revision: str = _MISSING_REVISION) -> Dict[str, Any]:
     now = _now()
-    return {"version": ANALYTICS_CACHE_VERSION, "created_at": now, "updated_at": now, "entries": {}}
+    return _RevisionedAnalyticsCache(
+        {"version": ANALYTICS_CACHE_VERSION, "created_at": now, "updated_at": now, "entries": {}},
+        revision=revision,
+    )
 
 
 def _now() -> int:

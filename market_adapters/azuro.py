@@ -732,8 +732,15 @@ class AzuroAdapter(MarketAdapter):
             game_ids=game_ids,
             condition_ids=condition_ids,
         )
+        safe_websocket_url = self.runtime.validate_endpoint(
+            self.websocket_url,
+            setting_key="azuro_ws_url",
+            kind="websocket",
+            base_url=True,
+            resolve_addresses=False,
+        )
         return {
-            "url": self.websocket_url,
+            "url": safe_websocket_url,
             "environment": self.environment,
             "subscriptions": messages,
             "events": ["GameUpdated", "ConditionUpdated"],

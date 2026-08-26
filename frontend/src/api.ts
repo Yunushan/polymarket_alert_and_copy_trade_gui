@@ -136,6 +136,60 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return payload;
 }
 
+const pendingIdempotencyKeys = new Map<string, string>();
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const members = Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
+  return `{${members.join(",")}}`;
+}
+
+function newIdempotencyKey(): string {
+  if (typeof globalThis.crypto?.randomUUID !== "function") {
+    throw new Error("This browser cannot safely generate an idempotency key.");
+  }
+  return `market-sentinel-${globalThis.crypto.randomUUID()}`;
+}
+
+async function requestIdempotentMutation<T>(path: string, payload: object): Promise<T> {
+  const requestIdentity = `${path}:${canonicalJson(payload)}`;
+  let idempotencyKey = pendingIdempotencyKeys.get(requestIdentity);
+  if (!idempotencyKey) {
+    idempotencyKey = newIdempotencyKey();
+    pendingIdempotencyKeys.set(requestIdentity, idempotencyKey);
+  }
+  try {
+    const response = await request<T>(path, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(payload)
+    });
+    pendingIdempotencyKeys.delete(requestIdentity);
+    return response;
+  } catch (error) {
+    // A non-retryable 4xx response is terminal. Network/parse failures, 429,
+    // and all 5xx responses are ambiguous, so retain the key for reconciliation.
+    if (
+      error instanceof ApiRequestError &&
+      error.status !== undefined &&
+      error.status < 500 &&
+      error.status !== 429
+    ) {
+      pendingIdempotencyKeys.delete(requestIdentity);
+    }
+    throw error;
+  }
+}
+
 export function fetchHealth(): Promise<HealthPayload> {
   return request<HealthPayload>("/api/health");
 }
@@ -310,10 +364,10 @@ export function fetchPolymarketLiveValidationReportReview(key: string): Promise<
 export function storePolymarketLiveValidationReport(
   payload: PolymarketLiveValidationReportStoreRequest
 ): Promise<PolymarketLiveValidationReportsPayload> {
-  return request<PolymarketLiveValidationReportsPayload>("/api/polymarket/live-validation/reports", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
+  return requestIdempotentMutation<PolymarketLiveValidationReportsPayload>(
+    "/api/polymarket/live-validation/reports",
+    payload
+  );
 }
 
 export function fetchPolymarketLiveValidationDecisions(reportKey = ""): Promise<PolymarketLiveValidationDecisionLedgerPayload> {
@@ -357,22 +411,19 @@ export function fetchPolymarketLiveValidationPromotionProposalSnapshot(
 export function storePolymarketLiveValidationPromotionProposalSnapshot(
   payload: PolymarketLiveValidationPromotionProposalSnapshotStoreRequest
 ): Promise<PolymarketLiveValidationPromotionProposalSnapshotsPayload> {
-  return request<PolymarketLiveValidationPromotionProposalSnapshotsPayload>(
+  return requestIdempotentMutation<PolymarketLiveValidationPromotionProposalSnapshotsPayload>(
     "/api/polymarket/live-validation/promotion-proposal/snapshots",
-    {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }
+    payload
   );
 }
 
 export function storePolymarketLiveValidationDecision(
   payload: PolymarketLiveValidationDecisionStoreRequest
 ): Promise<PolymarketLiveValidationDecisionLedgerPayload> {
-  return request<PolymarketLiveValidationDecisionLedgerPayload>("/api/polymarket/live-validation/decisions", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
+  return requestIdempotentMutation<PolymarketLiveValidationDecisionLedgerPayload>(
+    "/api/polymarket/live-validation/decisions",
+    payload
+  );
 }
 
 export function deletePolymarketLiveValidationReport(key: string): Promise<PolymarketLiveValidationReportsPayload> {

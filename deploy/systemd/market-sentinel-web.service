@@ -12,8 +12,12 @@ Group=market-sentinel
 WorkingDirectory=/opt/market-sentinel
 StateDirectory=market-sentinel
 StateDirectoryMode=0700
-EnvironmentFile=-/etc/market-sentinel/market-sentinel.env
+EnvironmentFile=/etc/market-sentinel/market-sentinel.env
 Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/test "${POLYMARKET_ANALYTICS_CACHE_PATH}" = /var/lib/market-sentinel/polymarket_analytics_cache.json
+ExecStartPre=/usr/bin/test "${POLYMARKET_LIVE_VALIDATION_REPORTS_PATH}" = /var/lib/market-sentinel/polymarket_live_validation_reports.json
+ExecStartPre=/usr/bin/test "${POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH}" = /var/lib/market-sentinel/polymarket_live_validation_decisions.json
+ExecStartPre=/usr/bin/test "${POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH}" = /var/lib/market-sentinel/polymarket_live_validation_promotion_proposal_snapshots.json
 ExecStartPre=/opt/market-sentinel/.venv/bin/python -m market_sentinel_cli doctor --strict --compact --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
 ExecStart=/opt/market-sentinel/.venv/bin/python -m web_api --host 127.0.0.1 --port 8765 --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
 ExecStartPost=/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_service_health.py --retries 20 --retry-delay 1

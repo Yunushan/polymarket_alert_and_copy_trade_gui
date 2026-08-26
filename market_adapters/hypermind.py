@@ -361,20 +361,12 @@ class HypermindAdapter(MarketAdapter):
         return result
 
     def _get_text(self, url: str, label: str) -> str:
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                "GET",
-                url,
-                headers={"Accept": "text/csv,text/plain", "User-Agent": "market-sentinel/1.0"},
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"Hypermind {label} request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400 or status <= 0:
-            raise MarketHTTPError(f"Hypermind {label} HTTP {status}.")
-        return str(getattr(response, "text", "") or "")
+        return self.runtime.request_text(
+            "GET",
+            url,
+            headers={"Accept": "text/csv,text/plain", "User-Agent": "market-sentinel/1.0"},
+            error_context=f"Hypermind {label}",
+        )
 
     def _validated_url(self, value: Any, label: str) -> str:
         url = str(value or "").strip()

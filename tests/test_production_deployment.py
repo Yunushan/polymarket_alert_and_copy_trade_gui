@@ -19,8 +19,10 @@ from core.deployment_identity import frontend_tree_sha256
 from scripts.backup_state import create_backup
 from scripts import verify_production_deployment as deployment
 from scripts.verify_production_deployment import (
+    DURABLE_STATE_PATHS,
     PUBLIC_PROXY_AUTH_PROBES,
     check_backup_evidence,
+    check_durable_state_wiring,
     check_evidence_output_directory,
     check_filesystem_permissions,
     check_loopback,
@@ -321,6 +323,94 @@ class ProductionDeploymentTests(unittest.TestCase):
         paths["market-sentinel.env"] = SimpleNamespace(st_mode=0o100640, st_uid=123)
         environment = check_filesystem_permissions(lambda path: paths[path.name])[0]
         self.assertEqual(environment["status"], "fail")
+
+    def test_durable_state_wiring_proves_running_paths_and_backup_source(self) -> None:
+        properties = {
+            ("market-sentinel-web.service", "EnvironmentFiles"): (
+                "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)"
+            ),
+            ("market-sentinel-web.service", "ReadWritePaths"): "/var/lib/market-sentinel",
+            ("market-sentinel-backup.service", "ExecStart"): (
+                "{ path=/opt/market-sentinel/.venv/bin/python ; "
+                "argv[]=/opt/market-sentinel/.venv/bin/python scripts/backup_state.py "
+                "--source /var/lib/market-sentinel --destination /var/lib/market-sentinel-backups ; }"
+            ),
+            ("market-sentinel-web.service", "MainPID"): "4242",
+        }
+
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            key = (args[2], args[3].removeprefix("--property="))
+            return subprocess.CompletedProcess(args, 0, properties[key] + "\n", "")
+
+        process_environment = b"\0".join(
+            [
+                b"UNRELATED_SECRET=must-not-appear",
+                *[
+                    f"{name}={path.as_posix()}".encode("utf-8")
+                    for name, path in DURABLE_STATE_PATHS.items()
+                ],
+            ]
+        )
+        check = check_durable_state_wiring(runner, lambda pid: process_environment)
+
+        self.assertEqual(check["status"], "pass")
+        self.assertEqual(check["durable_store_count"], 4)
+        self.assertEqual(check["backup_source"], "/var/lib/market-sentinel")
+        self.assertNotIn("must-not-appear", check["detail"])
+
+    def test_durable_state_wiring_fails_closed_for_an_unsafe_runtime_path(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            property_name = args[3].removeprefix("--property=")
+            values = {
+                "EnvironmentFiles": "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)",
+                "ReadWritePaths": "/var/lib/market-sentinel",
+                "ExecStart": "--source /var/lib/market-sentinel --destination /var/lib/backups",
+                "MainPID": "17",
+            }
+            return subprocess.CompletedProcess(args, 0, values[property_name] + "\n", "")
+
+        process_environment = b"\0".join(
+            [
+                f"{name}={('/opt/market-sentinel/data/cache.json' if name == 'POLYMARKET_ANALYTICS_CACHE_PATH' else path.as_posix())}".encode(
+                    "utf-8"
+                )
+                for name, path in DURABLE_STATE_PATHS.items()
+            ]
+        )
+        check = check_durable_state_wiring(runner, lambda pid: process_environment)
+
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("unsafe POLYMARKET_ANALYTICS_CACHE_PATH", check["detail"])
+
+    def test_durable_state_wiring_fails_when_backup_does_not_cover_state_root(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            property_name = args[3].removeprefix("--property=")
+            values = {
+                "EnvironmentFiles": "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)",
+                "ReadWritePaths": "/var/lib/market-sentinel",
+                "ExecStart": "--source /opt/market-sentinel/data --destination /var/lib/backups",
+                "MainPID": "17",
+            }
+            return subprocess.CompletedProcess(args, 0, values[property_name] + "\n", "")
+
+        check = check_durable_state_wiring(runner, lambda pid: b"")
+
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("does not capture the durable state directory", check["detail"])
+
+    def test_durable_state_wiring_rejects_an_optional_service_environment(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "/etc/market-sentinel/market-sentinel.env (ignore_errors=yes)\n",
+                "",
+            )
+
+        check = check_durable_state_wiring(runner, lambda pid: b"")
+
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("optional instead of fail-fast", check["detail"])
 
     @unittest.skipUnless(os.name == "posix", "symbolic-link safety is verified on POSIX hosts")
     def test_filesystem_check_rejects_a_symlinked_critical_path(self) -> None:
@@ -679,6 +769,10 @@ class ProductionDeploymentTests(unittest.TestCase):
                 return_value={"name": "verified_recent_state_backup", "status": "pass"},
             ) as backup_check,
             patch(
+                "scripts.verify_production_deployment.check_durable_state_wiring",
+                return_value={"name": "durable_state_wiring", "status": "pass"},
+            ) as durable_state_check,
+            patch(
                 "scripts.verify_production_deployment.check_loopback",
                 return_value={"name": "loopback_health", "status": "pass"},
             ),
@@ -693,6 +787,7 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue())["status"], "ok")
         systemd_check.assert_called_once_with()
         filesystem_check.assert_called_once_with(backup_directory=backup_directory)
+        durable_state_check.assert_called_once_with()
         backup_check.assert_called_once_with(backup_directory)
 
     def test_verifier_requires_an_expected_source_revision(self) -> None:

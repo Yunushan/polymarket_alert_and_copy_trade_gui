@@ -1,7 +1,18 @@
 from __future__ import annotations
 
 from typing import Any, Dict
-import requests
+
+from .endpoints import PolymarketEndpoint
+from .http_client import RetryPolicy, request_json
+
+
+_GEOBLOCK_ENDPOINT = PolymarketEndpoint(
+    service="geoblock",
+    method="GET",
+    path="/api/geoblock",
+    base_url="https://polymarket.com",
+)
+_NO_RETRY = RetryPolicy(max_attempts=1)
 
 
 def check_geoblock(timeout: float = 10.0) -> Dict[str, Any]:
@@ -10,7 +21,5 @@ def check_geoblock(timeout: float = 10.0) -> Dict[str, Any]:
     GET https://polymarket.com/api/geoblock
     Returns {blocked:boolean, ip:string, country:string, region:string}
     """
-    r = requests.get("https://polymarket.com/api/geoblock", timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
+    data = request_json(_GEOBLOCK_ENDPOINT, timeout=timeout, retry_policy=_NO_RETRY)
     return data if isinstance(data, dict) else {}

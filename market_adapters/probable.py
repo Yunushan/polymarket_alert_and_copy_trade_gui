@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError
+from .errors import MarketConfigurationError
 from .identity import require_activity_identity
 from .types import (
     MarketCandle,
@@ -747,29 +747,13 @@ class ProbableAdapter(MarketAdapter):
         return self.runtime.get_json(self._url(self.clob_api_base_url, path), params=params)
 
     def _request_json(self, method: str, path: str, body: Optional[str], headers: Mapping[str, str]) -> Any:
-        self.runtime.rate_limiter.wait()
         request_headers = {"Accept": "application/json", "User-Agent": self.runtime.user_agent, **dict(headers)}
-        request_kwargs: Dict[str, Any] = {
-            "headers": request_headers,
-            "timeout": self.runtime.timeout_seconds,
-        }
-        if body is not None:
-            request_kwargs["data"] = body
-        try:
-            response = self.runtime.session.request(
-                method.upper(),
-                self._url(self.clob_api_base_url, path),
-                **request_kwargs,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            method.upper(),
+            self._url(self.clob_api_base_url, path),
+            data=body,
+            headers=request_headers,
+        )
 
     def _l2_request(self, method: str, path: str, body: Optional[Any] = None) -> Any:
         credentials = self._l2_credentials()

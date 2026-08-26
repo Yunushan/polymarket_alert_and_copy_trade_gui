@@ -82,11 +82,25 @@ REQUIRED_PROXY_HEADER_VALUES = {
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
 DEFAULT_BACKUP_DIRECTORY = Path("/var/lib/market-sentinel-backups")
+DEFAULT_STATE_DIRECTORY = Path("/var/lib/market-sentinel")
+DEFAULT_SERVICE_ENVIRONMENT_PATH = Path("/etc/market-sentinel/market-sentinel.env")
+DURABLE_STATE_PATHS = {
+    "POLYMARKET_ANALYTICS_CACHE_PATH": DEFAULT_STATE_DIRECTORY / "polymarket_analytics_cache.json",
+    "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": (
+        DEFAULT_STATE_DIRECTORY / "polymarket_live_validation_reports.json"
+    ),
+    "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": (
+        DEFAULT_STATE_DIRECTORY / "polymarket_live_validation_decisions.json"
+    ),
+    "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": (
+        DEFAULT_STATE_DIRECTORY / "polymarket_live_validation_promotion_proposal_snapshots.json"
+    ),
+}
 EVIDENCE_SCHEMA_VERSION = 1
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_PRIVATE_PATHS = (
-    (Path("/etc/market-sentinel/market-sentinel.env"), S_IFREG, True),
-    (Path("/var/lib/market-sentinel"), S_IFDIR, False),
+    (DEFAULT_SERVICE_ENVIRONMENT_PATH, S_IFREG, True),
+    (DEFAULT_STATE_DIRECTORY, S_IFDIR, False),
 )
 PUBLIC_PROXY_AUTH_PROBES = (
     ("GET", ""),
@@ -250,6 +264,104 @@ def check_filesystem_permissions(
         _check_private_path(path, expected_type, require_root_owner, stat_reader)
         for path, expected_type, require_root_owner in required_paths
     ]
+
+
+def _systemd_property(runner: CommandRunner, unit: str, property_name: str) -> str:
+    result = runner(["systemctl", "show", unit, f"--property={property_name}", "--value"])
+    if result.returncode != 0:
+        raise RuntimeError(f"systemd could not read {property_name} for {unit}")
+    value = result.stdout.strip()
+    if not value:
+        raise RuntimeError(f"systemd returned an empty {property_name} for {unit}")
+    return value
+
+
+def _contains_path_token(value: str, path: Path) -> bool:
+    path_text = re.escape(path.as_posix())
+    return re.search(rf"(?<![A-Za-z0-9_./-]){path_text}(?![A-Za-z0-9_./-])", value) is not None
+
+
+def _read_process_environment(pid: int) -> bytes:
+    return Path(f"/proc/{pid}/environ").read_bytes()
+
+
+def check_durable_state_wiring(
+    runner: CommandRunner = _run_command,
+    process_environment_reader: Callable[[int], bytes] = _read_process_environment,
+) -> dict[str, Any]:
+    """Prove the running service stores every durable artifact inside the backed-up state root."""
+    base = {
+        "name": "durable_state_wiring",
+        "state_directory": DEFAULT_STATE_DIRECTORY.as_posix(),
+        "backup_source": DEFAULT_STATE_DIRECTORY.as_posix(),
+        "durable_store_count": len(DURABLE_STATE_PATHS),
+    }
+    try:
+        environment_files = _systemd_property(runner, "market-sentinel-web.service", "EnvironmentFiles")
+        if not _contains_path_token(environment_files, DEFAULT_SERVICE_ENVIRONMENT_PATH):
+            raise RuntimeError("the web service does not load the protected service environment file")
+        required_environment_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_./-]){re.escape(DEFAULT_SERVICE_ENVIRONMENT_PATH.as_posix())}"
+            r"\s+\(ignore_errors=no\)(?!\S)"
+        )
+        if required_environment_pattern.search(environment_files) is None:
+            raise RuntimeError("the web service environment file is optional instead of fail-fast")
+
+        writable_paths = _systemd_property(runner, "market-sentinel-web.service", "ReadWritePaths")
+        if not _contains_path_token(writable_paths, DEFAULT_STATE_DIRECTORY):
+            raise RuntimeError("the durable state directory is not writable in the web service sandbox")
+
+        backup_command = _systemd_property(runner, "market-sentinel-backup.service", "ExecStart")
+        backup_source_pattern = re.compile(
+            rf"(?:^|[\s;])--source(?:=|\s+)[\"']?{re.escape(DEFAULT_STATE_DIRECTORY.as_posix())}"
+            rf"[\"']?(?=$|[\s;}}])"
+        )
+        if backup_source_pattern.search(backup_command) is None:
+            raise RuntimeError("the backup service does not capture the durable state directory")
+
+        raw_pid = _systemd_property(runner, "market-sentinel-web.service", "MainPID")
+        try:
+            pid = int(raw_pid)
+        except ValueError as exc:
+            raise RuntimeError("the web service MainPID is invalid") from exc
+        if pid <= 0:
+            raise RuntimeError("the web service is not running")
+
+        raw_environment = process_environment_reader(pid)
+        if len(raw_environment) > 1024 * 1024:
+            raise RuntimeError("the web service environment exceeds the verifier safety limit")
+        observed: dict[str, str] = {}
+        required_names = {name.encode("ascii"): name for name in DURABLE_STATE_PATHS}
+        for entry in raw_environment.split(b"\0"):
+            key, separator, value = entry.partition(b"=")
+            name = required_names.get(key)
+            if not separator or name is None:
+                continue
+            if name in observed:
+                raise RuntimeError(f"the running service has duplicate {name} entries")
+            try:
+                observed[name] = value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise RuntimeError(f"the running service has a non-UTF-8 {name} value") from exc
+
+        for name, expected_path in DURABLE_STATE_PATHS.items():
+            actual = observed.get(name)
+            if actual is None:
+                raise RuntimeError(f"the running service is missing {name}")
+            if actual != expected_path.as_posix():
+                raise RuntimeError(f"the running service has an unsafe {name} value")
+            if not expected_path.is_relative_to(DEFAULT_STATE_DIRECTORY):
+                raise RuntimeError(f"the expected {name} path is outside the durable state directory")
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {**base, "status": "fail", "detail": str(exc)}
+
+    return {
+        **base,
+        "status": "pass",
+        "detail": (
+            "running service paths are exact, sandbox-writable, and beneath the effective backup source"
+        ),
+    }
 
 
 def _check_private_path(
@@ -750,6 +862,7 @@ def main() -> int:
             if not args.skip_systemd:
                 checks.extend(check_systemd())
                 checks.extend(check_filesystem_permissions(backup_directory=args.backup_directory))
+                checks.append(check_durable_state_wiring())
                 checks.append(check_backup_evidence(args.backup_directory))
             if args.public_url and not args.token.strip():
                 raise ValueError("public proxy verification requires a non-empty upstream API token")

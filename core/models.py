@@ -12,6 +12,7 @@ PriceSource = Literal["last_trade", "midpoint", "best_bid", "best_ask"]
 Direction = Literal["above", "below"]
 Theme = Literal["light", "dark"]
 UIDesign = Literal["classic", "aurora_2026", "graphite_2026", "sentinel_2027"]
+CopyActivityState = Literal["pending", "retryable", "completed", "rejected", "ambiguous"]
 DEFAULT_MARKET_ID = "polymarket"
 DEFAULT_UI_DESIGN: UIDesign = "aurora_2026"
 
@@ -106,6 +107,83 @@ class WalletWatch:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "WalletWatch":
         return WalletWatch(**d)
+
+
+@dataclass
+class CopyActivityOutboxEntry:
+    """Durable copy-trading disposition for one observed wallet activity.
+
+    ``pending`` and ``retryable`` entries may be processed automatically.
+    ``ambiguous`` means a live dispatch may have reached the venue and must
+    never be retried without operator reconciliation.
+    """
+
+    watch_id: str
+    activity_key: str
+    activity: Dict[str, Any]
+    market_id: str = DEFAULT_MARKET_ID
+    execution_policy: Dict[str, Any] = field(default_factory=dict)
+    state: CopyActivityState = "pending"
+    attempts: int = 0
+    outcome_code: str = ""
+    outcome_message: str = ""
+    dispatch: Dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=_uuid)
+    created_at: int = field(default_factory=lambda: int(time.time()))
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+    replay_authorized_at: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "CopyActivityOutboxEntry":
+        data = dict(d or {})
+        raw_state = str(data.get("state") or "pending").strip().lower()
+        # Unknown future/invalid states fail closed: automatic replay could
+        # duplicate a live order whose dispatch status is not understood.
+        state: CopyActivityState = (
+            cast(CopyActivityState, raw_state)
+            if raw_state in {"pending", "retryable", "completed", "rejected", "ambiguous"}
+            else "ambiguous"
+        )
+        activity = data.get("activity")
+        dispatch = data.get("dispatch")
+        execution_policy = data.get("execution_policy")
+        try:
+            attempts = max(0, int(data.get("attempts") or 0))
+        except (TypeError, ValueError):
+            attempts = 0
+        try:
+            created_at = max(0, int(data.get("created_at") or 0))
+        except (TypeError, ValueError):
+            created_at = 0
+        try:
+            updated_at = max(0, int(data.get("updated_at") or created_at))
+        except (TypeError, ValueError):
+            updated_at = created_at
+        try:
+            replay_authorized_at = max(0, int(data.get("replay_authorized_at") or 0))
+        except (TypeError, ValueError):
+            replay_authorized_at = 0
+        return CopyActivityOutboxEntry(
+            watch_id=str(data.get("watch_id") or ""),
+            activity_key=str(data.get("activity_key") or ""),
+            activity=dict(activity) if isinstance(activity, dict) else {},
+            market_id=str(data.get("market_id") or DEFAULT_MARKET_ID).strip().lower(),
+            execution_policy=(
+                dict(execution_policy) if isinstance(execution_policy, dict) else {}
+            ),
+            state=state,
+            attempts=attempts,
+            outcome_code=str(data.get("outcome_code") or ""),
+            outcome_message=str(data.get("outcome_message") or ""),
+            dispatch=dict(dispatch) if isinstance(dispatch, dict) else {},
+            id=str(data.get("id") or _uuid()),
+            created_at=created_at,
+            updated_at=updated_at,
+            replay_authorized_at=replay_authorized_at,
+        )
 
 
 @dataclass
@@ -215,17 +293,60 @@ class AppConfig:
     alerts: List[PriceAlert] = field(default_factory=list)
     paper_trades: List[PaperTradeRecord] = field(default_factory=list)
     wallets: List[WalletWatch] = field(default_factory=list)
+    copy_activity_outbox: List[CopyActivityOutboxEntry] = field(default_factory=list)
     copytrading: CopyTradeSettings = field(default_factory=CopyTradeSettings)
     markets: Dict[str, MarketConfig] = field(default_factory=default_market_configs)
     selected_market_id: str = DEFAULT_MARKET_ID
     theme: Theme = "light"
     ui_design: UIDesign = DEFAULT_UI_DESIGN
 
+    def reconcile_ambiguous_copy_activity(
+        self,
+        entry_id: str,
+        resolution: str,
+    ) -> CopyActivityOutboxEntry:
+        """Record an operator's venue reconciliation for one ambiguous dispatch."""
+
+        entry = next((item for item in self.copy_activity_outbox if item.id == entry_id), None)
+        if entry is None:
+            raise ValueError("Copy activity outbox entry was not found.")
+        if entry.state != "ambiguous":
+            raise ValueError("Only ambiguous copy activity entries can be reconciled.")
+        normalized = str(resolution or "").strip().lower().replace("-", "_")
+        transitions = {
+            "confirmed_dispatched": (
+                "completed",
+                "manual_dispatch_confirmed",
+                "Operator confirmed the live dispatch in venue order history.",
+            ),
+            "confirmed_not_dispatched": (
+                "retryable",
+                "manual_dispatch_cleared",
+                "Operator confirmed no venue dispatch; automatic retry is allowed.",
+            ),
+            "discard": (
+                "rejected",
+                "manual_dispatch_discarded",
+                "Operator discarded the ambiguous activity without retry.",
+            ),
+        }
+        transition = transitions.get(normalized)
+        if transition is None:
+            raise ValueError(
+                "Resolution must be confirmed_dispatched, confirmed_not_dispatched, or discard."
+            )
+        state, entry.outcome_code, entry.outcome_message = transition
+        entry.state = cast(CopyActivityState, state)
+        entry.updated_at = int(time.time())
+        entry.replay_authorized_at = entry.updated_at if normalized == "confirmed_not_dispatched" else 0
+        return entry
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "alerts": [a.to_dict() for a in self.alerts],
             "paper_trades": [t.to_dict() for t in self.paper_trades],
             "wallets": [w.to_dict() for w in self.wallets],
+            "copy_activity_outbox": [entry.to_dict() for entry in self.copy_activity_outbox],
             "copytrading": self.copytrading.to_dict(),
             "markets": {market_id: cfg.to_dict() for market_id, cfg in self.markets.items()},
             "selected_market_id": self.selected_market_id,
@@ -238,6 +359,12 @@ class AppConfig:
         alerts = [PriceAlert.from_dict(x) for x in d.get("alerts", [])]
         paper_trades = [PaperTradeRecord.from_dict(x) for x in d.get("paper_trades", [])]
         wallets = [WalletWatch.from_dict(x) for x in d.get("wallets", [])]
+        raw_outbox = d.get("copy_activity_outbox", [])
+        copy_activity_outbox = (
+            [CopyActivityOutboxEntry.from_dict(x) for x in raw_outbox if isinstance(x, dict)]
+            if isinstance(raw_outbox, list)
+            else []
+        )
         copytrading = CopyTradeSettings.from_dict(d.get("copytrading", {}))
         markets = default_market_configs()
         raw_markets = d.get("markets", {})
@@ -261,6 +388,7 @@ class AppConfig:
             alerts=alerts,
             paper_trades=paper_trades,
             wallets=wallets,
+            copy_activity_outbox=copy_activity_outbox,
             copytrading=copytrading,
             markets=markets,
             selected_market_id=selected_market_id,

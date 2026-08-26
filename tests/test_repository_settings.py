@@ -6,6 +6,7 @@ from unittest.mock import patch
 import scripts.verify_repository_settings as repository_settings
 from scripts.verify_repository_settings import (
     REQUIRED_CHECKS,
+    REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
     check_branch_protection,
     check_release_environment,
     check_release_variable,
@@ -33,6 +34,22 @@ def _passing_environment() -> dict:
 
 
 class RepositorySettingsTests(unittest.TestCase):
+    def test_release_environment_check_contract_matches_readiness_scorer(self) -> None:
+        from scripts.check_product_readiness import REQUIRED_RELEASE_ENVIRONMENT_CHECKS as SCORER_CHECKS
+
+        generated = {
+            check["name"]
+            for check in [
+                *check_release_environment(
+                    _passing_environment(),
+                    ["WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64", "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD"],
+                ),
+                check_release_variable({"value": "true"}),
+            ]
+        }
+        self.assertEqual(tuple(REQUIRED_RELEASE_ENVIRONMENT_CHECKS), tuple(SCORER_CHECKS))
+        self.assertEqual(generated, set(REQUIRED_RELEASE_ENVIRONMENT_CHECKS))
+
     def test_request_transport_uses_system_trust_store_when_available(self) -> None:
         previous = repository_settings._TRUSTSTORE_INJECTED
         try:

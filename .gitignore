@@ -27,11 +27,14 @@ frontend/*.tsbuildinfo
 
 # Local config/state
 data/config.json
+data/.config.json.lock
 data/polymarket_live_validation_reports.json
 data/polymarket_live_validation_decisions.json
 data/polymarket_live_validation_promotion_proposal_snapshots.json
+data/.polymarket_live_validation_*.json.lock
 data/config.paper-marks.json
 data/polymarket_analytics_cache.json
+data/.polymarket_analytics_cache.json.lock
 data/polymarket_analytics_cache.json.corrupt-*
 data/.polymarket_analytics_cache.json.*.tmp
 data/*.sqlite*

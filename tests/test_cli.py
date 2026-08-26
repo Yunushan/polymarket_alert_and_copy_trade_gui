@@ -2457,6 +2457,8 @@ class MarketSentinelCliTests(unittest.TestCase):
                         "--no-live-trading-kill-switch",
                         "--live-trading-max-size",
                         "5",
+                        "--setting",
+                        "clob_api_base_url=https://clob.polymarket.com",
                         "--compact",
                     ]
                 ),
@@ -2468,6 +2470,28 @@ class MarketSentinelCliTests(unittest.TestCase):
             self.assertEqual(cfg.ui_design, "sentinel_2027")
             self.assertTrue(cfg.markets["polymarket"].enabled)
             self.assertEqual(cfg.markets["polymarket"].settings["live_trading_max_size"], 5.0)
+            self.assertEqual(cfg.markets["polymarket"].settings["clob_api_base_url"], "https://clob.polymarket.com")
+
+    def test_market_cli_rejects_persisted_credentials_without_writing_or_echoing_them(self) -> None:
+        secret = "cli-do-not-persist"
+        unsafe_arguments = (
+            ["--setting", f"gemini_api_secret={secret}"],
+            ["--json", json.dumps({"settings": {"nested": {"POLY_PASSPHRASE": secret}}})],
+        )
+        for extra in unsafe_arguments:
+            with self.subTest(option=extra[0]), tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.json"
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                    exit_code = market_sentinel_cli.main(
+                        ["markets", "set", "gemini", "--config", str(config_path), *extra, "--compact"]
+                    )
+
+                self.assertEqual(exit_code, 1)
+                self.assertFalse(config_path.exists())
+                self.assertNotIn(secret, stdout.getvalue())
+                self.assertNotIn(secret, stderr.getvalue())
 
     def test_wallet_and_copy_cli_manage_persisted_state(self) -> None:
         wallet = "0x" + "1" * 40

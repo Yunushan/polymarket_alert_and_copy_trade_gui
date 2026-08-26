@@ -4,6 +4,7 @@ import math
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
@@ -24,6 +25,10 @@ from .types import (
 DEFAULT_OPINION_BASE_URL = "https://openapi.opinion.trade/openapi"
 DEFAULT_OPINION_CLOB_HOST = "https://proxy.opinion.trade:8443"
 DEFAULT_OPINION_CHAIN_ID = 56
+SUPPORTED_OPINION_CLOB_SDK_VERSION = "0.7.0"
+SUPPORTED_OPINION_API_VERSION = "0.4.0"
+OPINION_SDK_MAX_TIMEOUT_SECONDS = 30.0
+OPINION_SDK_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 OPINION_PRICE_HISTORY_INTERVALS = ("1m", "1h", "1d", "1w", "max")
 OPINION_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
@@ -42,6 +47,114 @@ OPINION_REFERENCES = (
     "https://docs.opinion.trade/developer-guide/opinion-clob-python-sdk/overview",
     "https://pypi.org/project/opinion-clob-sdk/",
 )
+
+
+class _BufferedOpinionSDKResponse:
+    """Minimal response surface consumed by opinion-api's RESTResponse."""
+
+    status = 200
+    reason = "OK"
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.headers = {"content-type": "application/json"}
+
+
+class _ManagedOpinionSDKRestClient:
+    """Route the pinned Opinion SDK through the adapter's managed transport."""
+
+    def __init__(
+        self,
+        *,
+        runtime: Any,
+        trusted_host: str,
+        api_key: str,
+        rest_response_type: Any,
+    ) -> None:
+        timeout = float(runtime.timeout_seconds)
+        if (
+            not math.isfinite(timeout)
+            or timeout <= 0
+            or timeout > OPINION_SDK_MAX_TIMEOUT_SECONDS
+        ):
+            raise MarketConfigurationError(
+                "Opinion SDK HTTP timeout must be finite and between 0 and "
+                f"{OPINION_SDK_MAX_TIMEOUT_SECONDS:g} seconds."
+            )
+        self._runtime = runtime
+        self._trusted_origin = self._origin(trusted_host)
+        self._api_key = api_key
+        self._rest_response_type = rest_response_type
+        self._max_response_bytes = min(
+            int(runtime.max_response_bytes),
+            OPINION_SDK_MAX_RESPONSE_BYTES,
+        )
+
+    @staticmethod
+    def _origin(value: str) -> tuple[str, str, int]:
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Opinion SDK request URL is invalid.") from exc
+        hostname = str(parsed.hostname or "").rstrip(".").lower()
+        if parsed.scheme.lower() != "https" or not hostname:
+            raise MarketConfigurationError("Opinion SDK requests require an absolute HTTPS URL.")
+        return parsed.scheme.lower(), hostname, port
+
+    def request(
+        self,
+        method: Any,
+        url: Any,
+        headers: Any = None,
+        body: Any = None,
+        post_params: Any = None,
+        _request_timeout: Any = None,
+    ) -> Any:
+        del _request_timeout  # The bounded AdapterRuntime timeout is authoritative.
+        normalized_method = str(method or "").upper()
+        if normalized_method not in {"GET", "POST"}:
+            raise MarketConfigurationError("Opinion SDK transport permits only GET and POST requests.")
+        if self._origin(str(url or "")) != self._trusted_origin:
+            raise MarketConfigurationError("Opinion SDK request origin did not match the configured CLOB host.")
+        if post_params:
+            raise MarketConfigurationError("Opinion SDK form or multipart requests are not supported.")
+        if normalized_method == "GET" and body is not None:
+            raise MarketConfigurationError("Opinion SDK GET requests cannot contain a body.")
+        if normalized_method == "POST" and body is not None and not isinstance(body, (Mapping, list)):
+            raise MarketConfigurationError("Opinion SDK POST requests require a JSON object or array body.")
+
+        try:
+            request_headers = dict(headers or {})
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Opinion SDK request headers are invalid.") from exc
+        api_key_headers = [
+            value
+            for key, value in request_headers.items()
+            if str(key).strip().lower() == "apikey"
+        ]
+        if len(api_key_headers) != 1 or str(api_key_headers[0]) != self._api_key:
+            raise MarketConfigurationError("Opinion SDK request did not contain the expected API key header.")
+        if normalized_method == "POST" and body is not None:
+            content_types = [
+                str(value).split(";", 1)[0].strip().lower()
+                for key, value in request_headers.items()
+                if str(key).strip().lower() == "content-type"
+            ]
+            if content_types != ["application/json"]:
+                raise MarketConfigurationError(
+                    "Opinion SDK POST requests require the application/json content type."
+                )
+
+        payload = self._runtime.request_bytes(
+            normalized_method,
+            str(url),
+            json_body=body if normalized_method == "POST" else None,
+            headers=request_headers,
+            max_response_bytes=self._max_response_bytes,
+            error_context="Opinion SDK",
+        )
+        return self._rest_response_type(_BufferedOpinionSDKResponse(payload))
 
 
 class OpinionAdapter(MarketAdapter):
@@ -412,6 +525,11 @@ class OpinionAdapter(MarketAdapter):
         self.ensure_capability("live_trading")
         self._validate_order(order)
         audit = self.preflight_live_order(order, feature_name="Opinion CLOB live trading")
+        if self.config_bool("opinion_live_check_approval", False):
+            raise MarketConfigurationError(
+                "Opinion SDK approval checks are disabled until its Web3 RPC transport is managed. "
+                "Pre-approve through a separately reviewed workflow and keep opinion_live_check_approval=false."
+            )
         market_id, outcome, token_id = self._split_contract_id(order.contract_id)
         if not market_id.isdigit() or int(market_id) <= 0:
             raise MarketConfigurationError("Opinion live orders require a positive numeric market id.")
@@ -589,12 +707,29 @@ class OpinionAdapter(MarketAdapter):
 
     def _create_clob_client(self):
         try:
-            from opinion_clob_sdk import Client
+            import opinion_api
+            import opinion_clob_sdk
+            from opinion_api.rest import RESTResponse
         except ImportError as exc:
             raise MarketConfigurationError(
                 "Opinion live trading requires the official opinion-clob-sdk package; "
                 "install requirements-live.lock before enabling it."
             ) from exc
+
+        sdk_version = str(getattr(opinion_clob_sdk, "__version__", "") or "")
+        api_version = str(getattr(opinion_api, "__version__", "") or "")
+        if (
+            sdk_version != SUPPORTED_OPINION_CLOB_SDK_VERSION
+            or api_version != SUPPORTED_OPINION_API_VERSION
+        ):
+            raise MarketConfigurationError(
+                "Opinion live trading requires the reviewed opinion-clob-sdk "
+                f"{SUPPORTED_OPINION_CLOB_SDK_VERSION} and opinion-api "
+                f"{SUPPORTED_OPINION_API_VERSION} dependency versions."
+            )
+        Client = getattr(opinion_clob_sdk, "Client", None)
+        if not callable(Client):
+            raise MarketConfigurationError("Opinion SDK did not expose the reviewed Client interface.")
 
         api_key = self.resolve_credential("opinion_api_key", ("OPINION_API_KEY",), required=True, label="OPINION_API_KEY")
         private_key = self.resolve_credential(
@@ -615,22 +750,61 @@ class OpinionAdapter(MarketAdapter):
             required=True,
             label="OPINION_RPC_URL",
         )
-        return Client(
-            host=self.clob_host,
+        safe_clob_host = self.runtime.validate_endpoint(
+            self.clob_host,
+            setting_key="opinion_clob_host",
+            base_url=True,
+        )
+        safe_rpc_url = self.runtime.validate_endpoint(
+            rpc_url.value,
+            setting_key="opinion_rpc_url",
+            base_url=True,
+        )
+        client = Client(
+            host=safe_clob_host,
             apikey=api_key.value,
             chain_id=self.chain_id,
-            rpc_url=rpc_url.value,
+            rpc_url=safe_rpc_url,
             private_key=private_key.value,
             multi_sig_addr=multi_sig.value,
         )
+        api_client = getattr(client, "api_client", None)
+        rest_client = getattr(api_client, "rest_client", None)
+        market_api = getattr(client, "market_api", None)
+        user_api = getattr(client, "user_api", None)
+        if (
+            api_client is None
+            or rest_client is None
+            or getattr(market_api, "api_client", None) is not api_client
+            or getattr(user_api, "api_client", None) is not api_client
+        ):
+            raise MarketConfigurationError(
+                "Opinion SDK transport layout did not match the reviewed dependency version."
+            )
+        managed_transport = _ManagedOpinionSDKRestClient(
+            runtime=self.runtime,
+            trusted_host=safe_clob_host,
+            api_key=api_key.value,
+            rest_response_type=RESTResponse,
+        )
+        api_client.rest_client = managed_transport
+        if api_client.rest_client is not managed_transport:
+            raise MarketConfigurationError("Opinion SDK managed transport could not be installed.")
+        return client
 
     @staticmethod
     def _clob_sdk_available() -> bool:
         try:
-            from opinion_clob_sdk import Client as _Client  # noqa: F401
+            import opinion_api
+            import opinion_clob_sdk
         except ImportError:
             return False
-        return True
+        return bool(
+            callable(getattr(opinion_clob_sdk, "Client", None))
+            and getattr(opinion_clob_sdk, "__version__", None)
+            == SUPPORTED_OPINION_CLOB_SDK_VERSION
+            and getattr(opinion_api, "__version__", None) == SUPPORTED_OPINION_API_VERSION
+        )
 
     @staticmethod
     def _order_management_id(value: Any) -> str:

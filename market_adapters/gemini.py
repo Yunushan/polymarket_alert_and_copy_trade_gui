@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError
+from .errors import MarketConfigurationError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -758,24 +758,12 @@ class GeminiPredictionAdapter(MarketAdapter):
     ) -> Any:
         body = json.dumps(dict(payload), separators=(",", ":")) if send_body else ""
         headers = self._auth_headers(payload, content_type="application/json" if send_body else "text/plain")
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                method,
-                self._url(path),
-                data=body,
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            method,
+            self._url(path),
+            data=body,
+            headers=headers,
+        )
 
     def _ensure_prediction_terms_accepted(self) -> None:
         status = self._authenticated_get("/v1/prediction-markets/terms/status")

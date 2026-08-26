@@ -4,8 +4,10 @@ import importlib.metadata as importlib_metadata
 import json
 import io
 import os
+import socket
 import threading
 import tempfile
+import time
 import unittest
 import zipfile
 from http import HTTPStatus
@@ -15,7 +17,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
-from core.storage import ConfigLoadError, load_config, save_config
+from core.storage import ConfigConflictError, ConfigLoadError, load_config, save_config
 from market_adapters.base import MarketAdapter
 from market_adapters.types import (
     MarketCapabilities,
@@ -31,11 +33,19 @@ from market_adapters.types import (
     MarketTrade,
 )
 from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.outbound import OUTBOUND_ENDPOINT_SETTING_KEYS, OUTBOUND_POLICY_SETTING_KEYS
 from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
 from polymarket.http_client import PolymarketRateLimitError
+from polymarket.live_reports import (
+    LiveValidationStoreDurabilityError,
+    live_validation_coverage_promotion_proposal,
+)
 from polymarket.mdd import MDD_METHOD_MARK_REPLAY, MDD_METHOD_V2
 from web_api import (
+    HTTP_CONNECTION_TIMEOUT_SECONDS,
+    MAX_HTTP_RESPONSE_BYTES,
+    MAX_HTTP_WORKERS,
     activity_key,
     _fetch_polymarket_leaderboard_scan_rows,
     _read_json_body,
@@ -69,6 +79,7 @@ from web_api import (
     market_price_payload,
     market_trades_payload,
     market_support_payload,
+    main as web_api_main,
     paper_payload,
     paper_order_impact,
     paper_order_from_payload,
@@ -105,6 +116,7 @@ from web_api import (
     _safe_http_header_value,
     static_cache_control,
     run_server,
+    sanitize_settings,
     submit_paper_order,
     update_wallet_watch,
     wallets_payload,
@@ -299,8 +311,14 @@ class SecretFailRegistry:
 
 
 class FakeBodyHandler:
-    def __init__(self, body: bytes, content_length: str | None = None) -> None:
+    def __init__(
+        self,
+        body: bytes,
+        content_length: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.headers = {"Content-Length": content_length if content_length is not None else str(len(body))}
+        self.headers.update(headers or {})
         self.rfile = io.BytesIO(body)
 
 
@@ -313,7 +331,16 @@ class WebApiTests(unittest.TestCase):
             archive.writestr("positions.csv", positions_csv)
         return buffer.getvalue()
 
-    def _serve_api(self, config_path: Path, frontend_dir: Path, *, api_token: str = ""):
+    def _serve_api(
+        self,
+        config_path: Path,
+        frontend_dir: Path,
+        *,
+        api_token: str = "",
+        max_http_workers: int = MAX_HTTP_WORKERS,
+        max_mutation_workers: int | None = None,
+        mutation_lock_timeout_seconds: float = 5.0,
+    ):
         with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
             server = ReactGuiServer(
                 ("127.0.0.1", 0),
@@ -322,6 +349,9 @@ class WebApiTests(unittest.TestCase):
                 frontend_dir=frontend_dir,
                 adapter_registry=FakeRegistry(FakePaperAdapter()),
                 api_token=api_token,
+                max_http_workers=max_http_workers,
+                max_mutation_workers=max_mutation_workers,
+                mutation_lock_timeout_seconds=mutation_lock_timeout_seconds,
             )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -403,8 +433,568 @@ class WebApiTests(unittest.TestCase):
                 self.assertTrue(server.daemon_threads)
                 self.assertFalse(server.block_on_close)
                 self.assertEqual(server.request_queue_size, 32)
+                self.assertEqual(server.max_http_workers, MAX_HTTP_WORKERS)
             finally:
                 server.server_close()
+
+    def test_server_rejects_connections_promptly_at_worker_limit_and_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(
+                root / "config.json",
+                frontend_dir,
+                max_http_workers=2,
+            )
+            occupied: list[socket.socket] = []
+            try:
+                host, port = server.server_address
+                for _ in range(2):
+                    connection = socket.create_connection((host, port), timeout=2)
+                    connection.sendall(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n")
+                    occupied.append(connection)
+
+                deadline = time.monotonic() + 3
+                while "market_sentinel_http_requests_in_flight 2" not in server.http_metrics.prometheus_text():
+                    if time.monotonic() >= deadline:
+                        self.fail("HTTP workers did not reach the configured limit")
+                    time.sleep(0.01)
+
+                overloaded = socket.create_connection((host, port), timeout=2)
+                try:
+                    overloaded.settimeout(2)
+                    response = b""
+                    while True:
+                        chunk = overloaded.recv(4096)
+                        if not chunk:
+                            break
+                        response += chunk
+                finally:
+                    overloaded.close()
+
+                headers, body = response.split(b"\r\n\r\n", 1)
+                self.assertIn(b"HTTP/1.1 503 Service Unavailable", headers)
+                self.assertIn(b"Retry-After: 1", headers)
+                self.assertEqual(json.loads(body.decode("utf-8"))["error"]["code"], "server_overloaded")
+                self.assertIn("market_sentinel_http_overload_rejections_total 1", server.http_metrics.prometheus_text())
+
+                for connection in occupied:
+                    connection.close()
+                occupied.clear()
+                deadline = time.monotonic() + 3
+                while "market_sentinel_http_requests_in_flight 0" not in server.http_metrics.prometheus_text():
+                    if time.monotonic() >= deadline:
+                        self.fail("HTTP worker slots were not released")
+                    time.sleep(0.01)
+
+                status, payload = self._request_json(base_url, "/api/health")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["observability"]["max_http_workers"], 2)
+            finally:
+                for connection in occupied:
+                    connection.close()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertIn("market_sentinel_http_requests_in_flight 0", server.http_metrics.prometheus_text())
+
+    def test_authenticated_mutations_are_serialized_and_preserve_both_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            second_entered = threading.Event()
+            apply_count = 0
+            apply_count_lock = threading.Lock()
+            results: list[tuple[int, dict]] = []
+
+            def blocking_apply(cfg: AppConfig, payload: dict) -> AppConfig:
+                nonlocal apply_count
+                with apply_count_lock:
+                    apply_count += 1
+                    current = apply_count
+                if current == 1:
+                    first_entered.set()
+                    if not release_first.wait(timeout=5):
+                        raise RuntimeError("timed out waiting to release first mutation")
+                else:
+                    second_entered.set()
+                return apply_config_patch(cfg, payload)
+
+            def mutate(payload: dict) -> None:
+                results.append(self._request_json(base_url, "/api/config", method="PATCH", payload=payload))
+
+            first = threading.Thread(target=mutate, args=({"theme": "dark"},), daemon=True)
+            second = threading.Thread(target=mutate, args=({"selected_market_id": "kalshi"},), daemon=True)
+            try:
+                with patch("web_api.apply_config_patch", side_effect=blocking_apply):
+                    first.start()
+                    self.assertTrue(first_entered.wait(timeout=2))
+                    second.start()
+                    self.assertFalse(second_entered.wait(timeout=0.2))
+                    release_first.set()
+                    first.join(timeout=5)
+                    second.join(timeout=5)
+            finally:
+                release_first.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(sorted(status for status, _payload in results), [HTTPStatus.OK, HTTPStatus.OK])
+            stored = load_config(config_path)
+            self.assertEqual(stored.theme, "dark")
+            self.assertEqual(stored.selected_market_id, "kalshi")
+
+    def test_mutation_admission_reserves_health_capacity_and_rejects_excess_callers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            server, server_thread, base_url = self._serve_api(
+                config_path,
+                frontend_dir,
+                api_token="test-token",
+                max_http_workers=4,
+                max_mutation_workers=3,
+            )
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            apply_count = 0
+            apply_count_lock = threading.Lock()
+            results: list[tuple[int, dict]] = []
+            auth = {"Authorization": "Bearer test-token"}
+
+            def blocking_apply(cfg: AppConfig, payload: dict) -> AppConfig:
+                nonlocal apply_count
+                with apply_count_lock:
+                    apply_count += 1
+                    current = apply_count
+                if current == 1:
+                    first_entered.set()
+                    if not release_first.wait(timeout=5):
+                        raise RuntimeError("timed out waiting to release first mutation")
+                return apply_config_patch(cfg, payload)
+
+            def mutate(payload: dict) -> None:
+                results.append(
+                    self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload=payload,
+                        headers=auth,
+                    )
+                )
+
+            callers = [
+                threading.Thread(target=mutate, args=({"theme": "dark"},), daemon=True),
+                threading.Thread(target=mutate, args=({"selected_market_id": "kalshi"},), daemon=True),
+                threading.Thread(target=mutate, args=({"ui_design": "classic"},), daemon=True),
+            ]
+            try:
+                with patch("web_api.apply_config_patch", side_effect=blocking_apply):
+                    callers[0].start()
+                    self.assertTrue(first_entered.wait(timeout=2))
+                    callers[1].start()
+                    callers[2].start()
+                    deadline = time.monotonic() + 3
+                    while server.http_metrics.snapshot()["mutations_in_flight"] != 3:
+                        if time.monotonic() >= deadline:
+                            self.fail("mutation callers did not saturate the bounded admission slots")
+                        time.sleep(0.01)
+
+                    health_status, health = self._request_json(
+                        base_url,
+                        "/api/health",
+                        headers=auth,
+                    )
+                    self.assertEqual(health_status, HTTPStatus.OK)
+                    self.assertEqual(health["status"], "ok")
+                    self.assertFalse(health["readiness"]["ready"])
+                    self.assertTrue(health["readiness"]["admission"]["mutation_saturated"])
+                    self.assertEqual(health["readiness"]["admission"]["reserved_read_workers"], 1)
+
+                    rejected_status, rejected = self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "light"},
+                        headers=auth,
+                    )
+                    self.assertEqual(rejected_status, HTTPStatus.SERVICE_UNAVAILABLE)
+                    self.assertEqual(rejected["error"]["code"], "mutation_admission_saturated")
+                    release_first.set()
+                    for caller in callers:
+                        caller.join(timeout=5)
+            finally:
+                release_first.set()
+                for caller in callers:
+                    caller.join(timeout=5)
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            self.assertTrue(all(not caller.is_alive() for caller in callers))
+            self.assertEqual(sorted(status for status, _payload in results), [HTTPStatus.OK] * 3)
+            metrics = server.http_metrics.prometheus_text()
+            self.assertIn("market_sentinel_http_mutation_admission_rejections_total 1", metrics)
+            self.assertIn("market_sentinel_http_mutations_in_flight 0", metrics)
+            self.assertIn("market_sentinel_http_mutations_active 0", metrics)
+            self.assertIn("market_sentinel_http_worker_limit 4", metrics)
+            self.assertIn("market_sentinel_http_mutation_admission_limit 3", metrics)
+            self.assertIn("market_sentinel_http_reserved_read_workers 1", metrics)
+
+    def test_mutation_lock_wait_is_timed_and_health_remains_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            server, server_thread, base_url = self._serve_api(
+                config_path,
+                frontend_dir,
+                max_http_workers=3,
+                max_mutation_workers=2,
+                mutation_lock_timeout_seconds=0.15,
+            )
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            results: list[tuple[int, dict]] = []
+
+            def blocking_apply(cfg: AppConfig, payload: dict) -> AppConfig:
+                first_entered.set()
+                if not release_first.wait(timeout=5):
+                    raise RuntimeError("timed out waiting to release first mutation")
+                return apply_config_patch(cfg, payload)
+
+            first = threading.Thread(
+                target=lambda: results.append(
+                    self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "dark"},
+                    )
+                ),
+                daemon=True,
+            )
+            try:
+                with patch("web_api.apply_config_patch", side_effect=blocking_apply):
+                    first.start()
+                    self.assertTrue(first_entered.wait(timeout=2))
+                    started_at = time.monotonic()
+                    busy_status, busy = self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "light"},
+                    )
+                    elapsed = time.monotonic() - started_at
+                    self.assertEqual(busy_status, HTTPStatus.SERVICE_UNAVAILABLE)
+                    self.assertEqual(busy["error"]["code"], "mutation_busy")
+                    self.assertLess(elapsed, 1.0)
+                    health_status, health = self._request_json(base_url, "/api/health")
+                    self.assertEqual(health_status, HTTPStatus.OK)
+                    self.assertEqual(health["status"], "ok")
+                    release_first.set()
+                    first.join(timeout=5)
+            finally:
+                release_first.set()
+                first.join(timeout=5)
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertEqual([status for status, _payload in results], [HTTPStatus.OK])
+            self.assertIn(
+                "market_sentinel_http_mutation_lock_timeouts_total 1",
+                server.http_metrics.prometheus_text(),
+            )
+
+    def test_health_reports_corrupt_config_without_losing_liveness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text("{not-json", encoding="utf-8")
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            try:
+                status, payload = self._request_json(base_url, "/api/health")
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(payload["status"], "ok")
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["readiness"]["status"], "degraded")
+        config_store = next(
+            row
+            for row in payload["readiness"]["storage"]["stores"]
+            if row["name"] == "configuration"
+        )
+        self.assertFalse(config_store["readable"])
+        self.assertIn("ConfigLoadError", config_store["read_status"])
+
+    def test_health_rejects_malformed_store_shapes_without_mutating_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            store_payloads = {
+                "analytics.json": b"{}",
+                "reports.json": b'{"version":1,"reports":[]}',
+                "decisions.json": b'{"version":999,"decisions":{}}',
+                "snapshots.json": b'{"version":1}',
+            }
+            for filename, content in store_payloads.items():
+                (root / filename).write_bytes(content)
+            environment = {
+                "POLYMARKET_ANALYTICS_CACHE_PATH": str(root / "analytics.json"),
+                "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(root / "reports.json"),
+                "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": str(root / "decisions.json"),
+                "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": str(root / "snapshots.json"),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+                try:
+                    status, payload = self._request_json(base_url, "/api/health")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=5)
+
+            self.assertEqual(status, HTTPStatus.OK)
+            self.assertEqual(payload["status"], "ok")
+            self.assertFalse(payload["ready"])
+            stores = {
+                row["name"]: row
+                for row in payload["readiness"]["storage"]["stores"]
+            }
+            self.assertEqual(stores["analytics_cache"]["read_status"], "schema_version_missing")
+            self.assertEqual(
+                stores["live_validation_reports"]["read_status"],
+                "collection_not_object:reports",
+            )
+            self.assertEqual(
+                stores["live_validation_decisions"]["read_status"],
+                "schema_version_mismatch",
+            )
+            self.assertEqual(
+                stores["live_validation_promotion_snapshots"]["read_status"],
+                "collection_missing:snapshots",
+            )
+            self.assertTrue(all(not row["schema_valid"] for name, row in stores.items() if name != "configuration"))
+            for filename, content in store_payloads.items():
+                self.assertEqual((root / filename).read_bytes(), content)
+            self.assertFalse(any(path.name.startswith("analytics.json.corrupt-") for path in root.iterdir()))
+
+    def test_health_reports_local_store_backup_and_polling_freshness_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            backup_dir = root / "backups"
+            backup_dir.mkdir()
+            archive = backup_dir / "market-sentinel-state.tar.gz"
+            manifest = backup_dir / "market-sentinel-state.tar.gz.manifest.json"
+            archive.write_bytes(b"archive")
+            manifest.write_text("{}", encoding="utf-8")
+            environment = {
+                "POLYMARKET_ANALYTICS_CACHE_PATH": str(root / "analytics.json"),
+                "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(root / "reports.json"),
+                "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": str(root / "decisions.json"),
+                "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": str(root / "snapshots.json"),
+                "MARKET_SENTINEL_BACKUP_DIRECTORY": str(backup_dir),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+                try:
+                    status, payload = self._request_json(base_url, "/api/health")
+                    server.wallet_polling["last_polled_at"] = time.time() - 1_000
+                    stale_status, stale_payload = self._request_json(base_url, "/api/health")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=5)
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["readiness"]["storage"]["ready"])
+        self.assertTrue(payload["readiness"]["frontend"]["ready"])
+        backup = payload["readiness"]["freshness"]["backup"]
+        self.assertEqual(backup["status"], "recent_metadata")
+        self.assertFalse(backup["authoritative"])
+        self.assertFalse(backup["integrity_verified"])
+        self.assertEqual(stale_status, HTTPStatus.OK)
+        self.assertEqual(
+            stale_payload["readiness"]["freshness"]["wallet_polling"]["status"],
+            "stale",
+        )
+
+    def test_live_evidence_routes_forward_validated_idempotency_keys_without_echoing_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            key = "retry-key/2026-08-26:001"
+            routes = (
+                (
+                    "/api/polymarket/live-validation/reports",
+                    "web_api.polymarket_live_validation_report_store_payload",
+                ),
+                (
+                    "/api/polymarket/live-validation/decisions",
+                    "web_api.polymarket_live_validation_decision_store_payload",
+                ),
+                (
+                    "/api/polymarket/live-validation/promotion-proposal/snapshots",
+                    "web_api.polymarket_live_validation_promotion_proposal_snapshot_store_payload",
+                ),
+            )
+            try:
+                for route, helper_name in routes:
+                    with self.subTest(route=route), patch(
+                        helper_name,
+                        return_value={"stored": {"idempotency_key_hash": "a" * 64}},
+                    ) as helper:
+                        status, response = self._request_json(
+                            base_url,
+                            route,
+                            method="POST",
+                            payload={"idempotency_key": key},
+                            headers={"Idempotency-Key": key},
+                        )
+                        self.assertEqual(status, HTTPStatus.OK)
+                        self.assertEqual(helper.call_args.kwargs["idempotency_key"], key)
+                        self.assertNotIn(key, json.dumps(response))
+
+                mismatch_status, mismatch = self._request_json(
+                    base_url,
+                    "/api/polymarket/live-validation/reports",
+                    method="POST",
+                    payload={"idempotency_key": "body-key"},
+                    headers={"Idempotency-Key": "header-key"},
+                )
+                self.assertEqual(mismatch_status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(mismatch["error"]["code"], "validation_error")
+                self.assertNotIn("body-key", json.dumps(mismatch))
+                self.assertNotIn("header-key", json.dumps(mismatch))
+
+                for invalid_key in (" leading-space", "trailing-space ", "interior space", "non-ascii-é"):
+                    invalid_status, invalid = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"idempotency_key": invalid_key},
+                    )
+                    self.assertEqual(invalid_status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(invalid["error"]["code"], "validation_error")
+                    self.assertNotIn(invalid_key, json.dumps(invalid))
+
+                for route, _helper_name in routes:
+                    required_status, required = self._request_json(
+                        base_url,
+                        route,
+                        method="POST",
+                        payload={},
+                    )
+                    self.assertEqual(required_status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(required["error"]["code"], "validation_error")
+                    self.assertIn("required", required["error"]["message"])
+
+                unsupported_status, unsupported = self._request_json(
+                    base_url,
+                    "/api/config",
+                    method="PATCH",
+                    payload={"theme": "dark"},
+                    headers={"Idempotency-Key": key},
+                )
+                self.assertEqual(unsupported_status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(unsupported["error"]["code"], "validation_error")
+                self.assertIn("not supported", unsupported["error"]["message"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+    def test_live_evidence_durability_uncertainty_requires_same_key_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            key = "durability-reconcile-1"
+            uncertain = LiveValidationStoreDurabilityError(root / "reports.json", "f" * 64)
+            reconciled = {
+                "stored": {"key": "report-1", "stored": False, "idempotent_replay": True},
+                "counts": {"entries": 1},
+            }
+            try:
+                with patch(
+                    "web_api.polymarket_live_validation_report_store_payload",
+                    side_effect=[uncertain, reconciled],
+                ) as helper:
+                    first_status, first = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={},
+                        headers={"Idempotency-Key": key},
+                    )
+                    second_status, second = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={},
+                        headers={"Idempotency-Key": key},
+                    )
+
+                self.assertEqual(first_status, HTTPStatus.SERVICE_UNAVAILABLE)
+                self.assertEqual(first["error"]["code"], "live_validation_store_durability_uncertain")
+                self.assertTrue(first["error"]["details"]["committed"])
+                self.assertTrue(first["error"]["details"]["retryable"])
+                self.assertNotIn(key, json.dumps(first))
+                self.assertNotIn("f" * 64, json.dumps(first))
+                self.assertEqual(second_status, HTTPStatus.OK)
+                self.assertTrue(second["stored"]["idempotent_replay"])
+                self.assertEqual(
+                    [call.kwargs["idempotency_key"] for call in helper.call_args_list],
+                    [key, key],
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
 
     def test_custom_frontend_directory_is_confined_to_deployment_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -455,6 +1045,28 @@ class WebApiTests(unittest.TestCase):
 
             with self.assertRaises(ConfigLoadError):
                 run_server("127.0.0.1", 0, config_path)
+
+    def test_web_cli_forwards_configured_frontend_directory(self) -> None:
+        frontend_dir = Path("deployment") / "frontend" / "dist"
+        with patch(
+            "sys.argv",
+            [
+                "web_api.py",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9876",
+                "--config",
+                "state.json",
+                "--frontend-dir",
+                str(frontend_dir),
+            ],
+        ), patch("web_api.run_server") as server:
+            web_api_main()
+
+        server.assert_called_once()
+        self.assertEqual(server.call_args.args, ("127.0.0.1", 9876, Path("state.json")))
+        self.assertEqual(server.call_args.kwargs["frontend_dir"], frontend_dir)
 
     def test_dynamic_http_header_values_cannot_inject_response_headers(self) -> None:
         injected = 'report.csv\r\nSet-Cookie: compromised=true\n'
@@ -510,6 +1122,7 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(headers.get("Access-Control-Allow-Origin"), "http://127.0.0.1:5173")
                 self.assertNotEqual(headers.get("Access-Control-Allow-Origin"), "*")
                 self.assertEqual(headers.get("Access-Control-Expose-Headers"), "X-Request-ID")
+                self.assertIn("Idempotency-Key", headers.get("Access-Control-Allow-Headers", ""))
 
                 status, headers, body = self._request_raw(
                     base_url,
@@ -3825,6 +4438,51 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_market_patch(cfg, "kalshi", {"settings": "bad"})
 
+    def test_apply_market_patch_rejects_nested_credentials_atomically(self) -> None:
+        cfg = AppConfig()
+        before = cfg.markets["kalshi"].to_dict()
+
+        with self.assertRaisesRegex(ValueError, "environment variables") as ctx:
+            apply_market_patch(
+                cfg,
+                "kalshi",
+                {
+                    "enabled": True,
+                    "settings": {"nested": {"POLY_PASSPHRASE": "do-not-persist"}},
+                },
+            )
+
+        self.assertEqual(cfg.markets["kalshi"].to_dict(), before)
+        self.assertNotIn("do-not-persist", str(ctx.exception))
+
+    def test_apply_market_patch_rejects_all_outbound_endpoint_and_policy_settings_atomically(self) -> None:
+        for key in sorted(OUTBOUND_ENDPOINT_SETTING_KEYS | OUTBOUND_POLICY_SETTING_KEYS):
+            with self.subTest(key=key):
+                cfg = AppConfig()
+                before = cfg.markets["kalshi"].to_dict()
+                with self.assertRaisesRegex(ValueError, "cannot be changed through the HTTP API"):
+                    apply_market_patch(cfg, "kalshi", {"enabled": True, "settings": {key: "https://example.com"}})
+                self.assertEqual(cfg.markets["kalshi"].to_dict(), before)
+
+    def test_settings_redaction_is_recursive_without_masking_market_token_identifiers(self) -> None:
+        sanitized = sanitize_settings(
+            {
+                "nested": {
+                    "POLY_PASSPHRASE": "pass",
+                    "POLY_SIGNATURE": "signature",
+                },
+                "sx_bet_base_token": "USDC",
+                "token_id": "contract-yes",
+                "auth_headers": {"custom": "defense-in-depth"},
+            }
+        )
+
+        self.assertEqual(sanitized["nested"]["POLY_PASSPHRASE"], "***")
+        self.assertEqual(sanitized["nested"]["POLY_SIGNATURE"], "***")
+        self.assertEqual(sanitized["sx_bet_base_token"], "USDC")
+        self.assertEqual(sanitized["token_id"], "contract-yes")
+        self.assertEqual(sanitized["auth_headers"], "***")
+
     def test_apply_market_patch_persists_validated_live_safety_fields(self) -> None:
         cfg = AppConfig()
 
@@ -3997,6 +4655,12 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["observability"]["metrics_endpoint"], "/metrics")
         self.assertEqual(payload["observability"]["metrics_format"], "prometheus")
         self.assertEqual(payload["observability"]["request_logging"], "structured_json")
+        self.assertEqual(payload["observability"]["max_http_workers"], MAX_HTTP_WORKERS)
+        self.assertEqual(payload["observability"]["max_http_response_bytes"], MAX_HTTP_RESPONSE_BYTES)
+        self.assertEqual(
+            payload["observability"]["connection_timeout_seconds"],
+            HTTP_CONNECTION_TIMEOUT_SECONDS,
+        )
         self.assertIn("/metrics", payload["routes"]["GET"])
         self.assertIn("/api/state", payload["routes"]["GET"])
         self.assertIn("/api/markets/support-matrix", payload["routes"]["GET"])
@@ -4213,6 +4877,67 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(allowed["stored"]["duplicate_of"], first["stored"]["key"])
                 self.assertIn("Stored duplicate", allowed["message"])
 
+    def test_generated_live_evidence_retries_bind_to_normalized_client_request(self) -> None:
+        cfg = AppConfig()
+        report_a = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        report_b = json.loads(json.dumps(report_a))
+        report_b["generated_at"] = "2099-01-02T03:04:05Z"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report_path = root / "reports.json"
+            decision_path = root / "decisions.json"
+            snapshot_path = root / "snapshots.json"
+            environment = {
+                "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(report_path),
+                "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": str(decision_path),
+                "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": str(snapshot_path),
+            }
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "web_api.polymarket_live_validation_payload",
+                side_effect=[report_a, report_b],
+            ) as report_builder:
+                first_report = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {},
+                    idempotency_key="generated-report-retry",
+                )
+                replayed_report = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {},
+                    idempotency_key="generated-report-retry",
+                )
+
+            self.assertEqual(replayed_report["stored"]["key"], first_report["stored"]["key"])
+            self.assertTrue(replayed_report["stored"]["idempotent_replay"])
+            self.assertEqual(replayed_report["counts"]["entries"], 1)
+            self.assertEqual(report_builder.call_count, 1)
+
+            proposal_a = live_validation_coverage_promotion_proposal(
+                report_store_path=report_path,
+                decision_path=decision_path,
+            )
+            proposal_b = json.loads(json.dumps(proposal_a))
+            proposal_b.pop("proposal_hash", None)
+            proposal_b["generated_at"] = "2099-01-02T03:04:05Z"
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "web_api.live_validation_coverage_promotion_proposal",
+                side_effect=[proposal_a, proposal_b],
+            ) as proposal_builder:
+                first_snapshot = polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+                    {"target_tier": "credential_live_verified"},
+                    idempotency_key="generated-snapshot-retry",
+                )
+                replayed_snapshot = polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+                    {"target_tier": " credential_live_verified "},
+                    idempotency_key="generated-snapshot-retry",
+                )
+
+            self.assertEqual(replayed_snapshot["stored"]["key"], first_snapshot["stored"]["key"])
+            self.assertTrue(replayed_snapshot["stored"]["idempotent_replay"])
+            self.assertEqual(replayed_snapshot["counts"]["entries"], 1)
+            self.assertEqual(proposal_builder.call_count, 1)
+
     def test_polymarket_live_validation_report_routes_open_export_and_delete(self) -> None:
         report = {
             "generated_at": 123.0,
@@ -4255,9 +4980,23 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(report), "label": "route report"},
+                        headers={"Idempotency-Key": "route-report-1"},
                     )
                     self.assertEqual(status, 200)
                     report_key = stored["stored"]["key"]
+
+                    status, replayed = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"report_json": json.dumps(report), "label": "route report"},
+                        headers={"Idempotency-Key": "route-report-1"},
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(replayed["stored"]["key"], report_key)
+                    self.assertTrue(replayed["stored"]["idempotent_replay"])
+                    self.assertEqual(replayed["counts"]["entries"], 1)
+                    self.assertIn("Replayed", replayed["message"])
 
                     status, listing = self._request_json(base_url, "/api/polymarket/live-validation/reports")
                     self.assertEqual(status, 200)
@@ -4322,6 +5061,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/decisions",
                         method="POST",
                         payload={**decision_request, "reviewer_note": "Second rejected route decision."},
+                        headers={"Idempotency-Key": "route-decision-2"},
                     )
                     self.assertEqual(status, 200)
                     self.assertEqual(decision["counts"]["entries"], 2)
@@ -4400,6 +5140,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/promotion-proposal/snapshots",
                         method="POST",
                         payload={"target_tier": "credential_live_verified", "source": "route-test"},
+                        headers={"Idempotency-Key": "route-snapshot-1"},
                     )
                     self.assertEqual(status, 200)
                     self.assertEqual(snapshots["counts"]["entries"], 2)
@@ -4515,6 +5256,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(invalid), "label": "bad fixture"},
+                        headers={"Idempotency-Key": "schema-invalid-1"},
                     )
                     self.assertEqual(status, 400)
                     self.assertEqual(failed["error"]["code"], "live_validation_report_schema_error")
@@ -4532,6 +5274,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(valid), "label": "valid dry-run fixture"},
+                        headers={"Idempotency-Key": "schema-valid-1"},
                     )
                     self.assertEqual(status, 200)
                     self.assertTrue(stored["stored"]["schema_validation"]["ok"])
@@ -4569,6 +5312,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(report), "label": "credentialed read"},
+                        headers={"Idempotency-Key": "credentialed-read-1"},
                     )
                     self.assertEqual(status, 200)
 
@@ -4611,6 +5355,12 @@ class WebApiTests(unittest.TestCase):
             _read_json_body(FakeBodyHandler(b"{}", "1000001"))
         with self.assertRaisesRegex(ValueError, "Content-Length must be an integer"):
             _read_json_body(FakeBodyHandler(b"{}", "bad"))
+        with self.assertRaisesRegex(ValueError, "Content-Length cannot be negative"):
+            _read_json_body(FakeBodyHandler(b"", "-1"))
+        with self.assertRaisesRegex(ValueError, "JSON request body is incomplete"):
+            _read_json_body(FakeBodyHandler(b"{}", "3"))
+        with self.assertRaisesRegex(ValueError, "Transfer-Encoding is not supported"):
+            _read_json_body(FakeBodyHandler(b"{}", headers={"Transfer-Encoding": "chunked"}))
         with self.assertRaisesRegex(ValueError, "JSON request body must be UTF-8"):
             _read_json_body(FakeBodyHandler(b"\xff"))
 
@@ -4633,6 +5383,16 @@ class WebApiTests(unittest.TestCase):
                     method="PATCH",
                     payload={"theme": "blue"},
                 )
+                with patch(
+                    "web_api.save_config",
+                    side_effect=ConfigConflictError("stale conflict with sensitive internal detail"),
+                ):
+                    status_conflict, conflict = self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "dark"},
+                    )
                 status_not_found, not_found = self._request_json(base_url, "/api/missing")
             finally:
                 server.shutdown()
@@ -4645,8 +5405,59 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(status_validation, 400)
         self.assertEqual(validation["error"]["code"], "validation_error")
         self.assertEqual(validation["error"]["message"], "theme must be light or dark.")
+        self.assertEqual(status_conflict, HTTPStatus.CONFLICT)
+        self.assertEqual(conflict["error"]["code"], "config_conflict")
+        self.assertNotIn("sensitive internal detail", json.dumps(conflict))
         self.assertEqual(status_not_found, 404)
         self.assertEqual(not_found["error"]["code"], "not_found")
+
+    def test_http_market_patch_rejects_credentials_and_endpoint_overrides_without_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            before = config_path.read_bytes()
+            server, thread, base_url = self._serve_api(config_path, frontend_dir)
+            credential = "credential-must-never-be-echoed"
+            try:
+                credential_status, credential_payload = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi",
+                    method="PATCH",
+                    payload={
+                        "enabled": True,
+                        "settings": {"nested": {"POLY_PASSPHRASE": credential}},
+                    },
+                )
+                endpoint_status, endpoint_payload = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi",
+                    method="PATCH",
+                    payload={
+                        "enabled": True,
+                        "settings": {"kalshi_api_base_url": "http://127.0.0.1:9999"},
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            after = config_path.read_bytes()
+            stored = load_config(config_path)
+
+        self.assertEqual(credential_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(credential_payload["error"]["code"], "validation_error")
+        self.assertNotIn(credential, json.dumps(credential_payload))
+        self.assertEqual(endpoint_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(endpoint_payload["error"]["code"], "validation_error")
+        self.assertNotIn("127.0.0.1", json.dumps(endpoint_payload))
+        self.assertEqual(after, before)
+        self.assertFalse(stored.markets["kalshi"].enabled)
+        self.assertNotIn("kalshi_api_base_url", stored.markets["kalshi"].settings)
 
     def test_http_static_route_reports_missing_react_build_with_fallbacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4665,6 +5476,56 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("npm run build", payload["error"]["details"]["build_command"])
         self.assertEqual(payload["error"]["details"]["dev_command"], "run_web_gui_dev.bat")
         self.assertIn("run_gui.bat", payload["error"]["details"]["tkinter_fallback"])
+
+    def test_http_rejects_oversized_json_text_and_static_responses_before_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            asset_dir = frontend_dir / "assets"
+            asset_dir.mkdir(parents=True)
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            (asset_dir / "oversized.js").write_bytes(b"x" * 2048)
+            server, thread, base_url = self._serve_api(config_path, frontend_dir)
+            try:
+                with (
+                    patch("web_api.MAX_HTTP_RESPONSE_BYTES", 512),
+                    patch("web_api.health_payload", return_value={"payload": "x" * 2048}),
+                ):
+                    json_status, json_headers, json_body = self._request_raw(base_url, "/api/health")
+
+                with (
+                    patch("web_api.MAX_HTTP_RESPONSE_BYTES", 512),
+                    patch.object(server.http_metrics, "prometheus_text", return_value="x" * 2048),
+                ):
+                    text_status, text_headers, text_body = self._request_raw(base_url, "/metrics")
+
+                with patch("web_api.MAX_HTTP_RESPONSE_BYTES", 512):
+                    static_status, static_headers, static_body = self._request_raw(
+                        base_url,
+                        "/assets/oversized.js",
+                    )
+
+                metrics_status, _metrics_headers, metrics_body = self._request_raw(base_url, "/metrics")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+        for status, headers, body in (
+            (json_status, json_headers, json_body),
+            (text_status, text_headers, text_body),
+            (static_status, static_headers, static_body),
+        ):
+            with self.subTest(status=status):
+                self.assertEqual(status, HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.assertEqual(headers.get("Content-Type"), "application/json; charset=utf-8")
+                self.assertEqual(int(headers["Content-Length"]), len(body))
+                self.assertLess(len(body), 512)
+                self.assertEqual(json.loads(body.decode("utf-8"))["error"]["code"], "response_too_large")
+
+        self.assertEqual(metrics_status, HTTPStatus.OK)
+        self.assertIn(b"market_sentinel_http_response_too_large_total 3", metrics_body)
 
     def test_http_static_route_serves_built_react_assets_and_spa_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

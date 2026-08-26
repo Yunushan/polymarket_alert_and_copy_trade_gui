@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError
+from .errors import MarketConfigurationError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -668,24 +668,12 @@ class PredictFunAdapter(MarketAdapter):
         versioned: bool = True,
     ) -> Any:
         headers = {"Content-Type": "application/json", **self._headers(require_jwt=require_jwt)}
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                method,
-                self._url(path, versioned=versioned),
-                json=dict(payload),
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            method,
+            self._url(path, versioned=versioned),
+            json_body=dict(payload),
+            headers=headers,
+        )
 
     def _url(self, path: str, *, versioned: bool = True) -> str:
         clean_path = "/" + str(path or "").strip("/")

@@ -9,6 +9,7 @@ or funded points are awarded.
 """
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -30,6 +31,12 @@ PUBLIC_LIVE_ATTEMPTS = 2
 PUBLIC_LIVE_RETRY_DELAY_SECONDS = 1.0
 EVIDENCE_MAX_AGE_DAYS = 30
 EVIDENCE_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+REQUIRED_PUBLIC_LIVE_CHECKS = (
+    "clob_time",
+    "gamma_markets",
+    "data_leaderboard",
+    "bridge_supported_assets",
+)
 
 CATEGORY_WEIGHTS = {
     "architecture_scope": 18,
@@ -125,6 +132,7 @@ def _run_local_gates(full: bool) -> dict[str, Any]:
     command = [sys.executable, "-B", "verify.py", "--skip-pip-check"]
     if full:
         command.extend(("--frontend-build", "--frontend-live-smoke"))
+    started = time.monotonic()
     try:
         result = subprocess.run(
             command,
@@ -135,11 +143,20 @@ def _run_local_gates(full: bool) -> dict[str, Any]:
             timeout=900 if full else 600,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"status": "fail", "command": command, "detail": type(exc).__name__}
+        return {
+            "status": "fail",
+            "command": command,
+            "profile": "full" if full else "core",
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "detail": type(exc).__name__,
+        }
     return {
         "status": "pass" if result.returncode == 0 else "fail",
         "command": command,
+        "profile": "full" if full else "core",
         "returncode": result.returncode,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "output": _captured_output_metadata(result.stdout, result.stderr),
     }
 
 
@@ -154,6 +171,7 @@ def _run_public_live() -> dict[str, Any]:
     ]
     last_result: dict[str, Any] = {"status": "fail", "command": command}
     for attempt in range(1, PUBLIC_LIVE_ATTEMPTS + 1):
+        started = time.monotonic()
         try:
             with tempfile.TemporaryDirectory(prefix="market-sentinel-readiness-") as temporary:
                 report_path = Path(temporary) / "public-live.json"
@@ -165,27 +183,54 @@ def _run_public_live() -> dict[str, Any]:
                     check=False,
                     timeout=120,
                 )
-                if result.returncode == 0 and report_path.is_file():
-                    report = json.loads(report_path.read_text(encoding="utf-8"))
-                    public_checks = report.get("public_checks", {})
-                    passed = bool(report.get("ok")) and bool(public_checks) and all(
-                        isinstance(check, dict) and check.get("status") == "ok" for check in public_checks.values()
-                    )
-                    if passed:
-                        return {
-                            "status": "pass",
-                            "command": command,
-                            "returncode": result.returncode,
-                            "attempt": attempt,
-                        }
-                last_result = {
-                    "status": "fail",
+                result_metadata = {
                     "command": command,
                     "returncode": result.returncode,
                     "attempt": attempt,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "output": _captured_output_metadata(result.stdout, result.stderr),
                 }
+                if report_path.is_file():
+                    report_bytes = report_path.read_bytes()
+                    report = json.loads(report_bytes)
+                    public_checks = report.get("public_checks", {})
+                    public_check_statuses: dict[str, str] = {}
+                    if isinstance(public_checks, dict):
+                        for name in REQUIRED_PUBLIC_LIVE_CHECKS:
+                            check = public_checks.get(name)
+                            status = check.get("status") if isinstance(check, dict) else None
+                            public_check_statuses[name] = (
+                                status if status in {"ok", "failed", "skipped"} else "missing_or_malformed"
+                            )
+                    exact_check_set = isinstance(public_checks, dict) and set(public_checks) == set(
+                        REQUIRED_PUBLIC_LIVE_CHECKS
+                    )
+                    result_metadata["report"] = {
+                        "sha256": hashlib.sha256(report_bytes).hexdigest(),
+                        "public_check_statuses": public_check_statuses,
+                        "observed_check_count": len(public_checks) if isinstance(public_checks, dict) else 0,
+                        "exact_check_set": exact_check_set,
+                    }
+                    passed = (
+                        result.returncode == 0
+                        and report.get("ok") is True
+                        and exact_check_set
+                        and all(
+                            isinstance(check, dict) and check.get("status") == "ok"
+                            for check in public_checks.values()
+                        )
+                    )
+                    if passed:
+                        return {"status": "pass", **result_metadata}
+                last_result = {"status": "fail", **result_metadata}
         except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
-            last_result = {"status": "fail", "command": command, "detail": type(exc).__name__, "attempt": attempt}
+            last_result = {
+                "status": "fail",
+                "command": command,
+                "detail": type(exc).__name__,
+                "attempt": attempt,
+                "duration_seconds": round(time.monotonic() - started, 3),
+            }
         if attempt < PUBLIC_LIVE_ATTEMPTS:
             time.sleep(PUBLIC_LIVE_RETRY_DELAY_SECONDS)
     return last_result
@@ -193,6 +238,166 @@ def _run_public_live() -> dict[str, Any]:
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
+    "branch_required_status_checks",
+    "branch_require_up_to_date",
+    "branch_enforce_admins",
+    "branch_require_pull_request",
+    "branch_conversation_resolution",
+    "branch_linear_history",
+    "branch_force_pushes_disabled",
+    "branch_deletions_disabled",
+)
+REQUIRED_RELEASE_ENVIRONMENT_CHECKS = (
+    "release_required_reviewers",
+    "release_prevent_self_review",
+    "release_protected_branches",
+    "release_signing_secrets",
+    "release_windows_code_signing_required",
+)
+REQUIRED_RELEASE_HISTORY_CHECKS = (
+    "published_release_exists",
+    "release_is_not_draft_or_prerelease",
+    "release_lineage_complete",
+    "release_assets_include_checksums_and_python_artifacts",
+)
+REQUIRED_RELEASE_CHECKS = (
+    "published_release_exists",
+    "release_is_not_draft_or_prerelease",
+    "target_commit_matches",
+    "release_assets_complete",
+    "checksums_verified",
+    "python_artifacts_verified",
+    "sbom_verified",
+    "provenance_verified",
+)
+REQUIRED_DEPLOYMENT_CHECKS = (
+    "source_revision",
+    "source_revision_final",
+    "systemd_service_state",
+    "filesystem_permissions",
+    "verified_recent_state_backup",
+    "loopback_health",
+    "loopback_metrics",
+    "loopback_token_auth",
+    "public_https_proxy",
+)
+REQUIRED_PLATFORM_CI_CHECKS = (
+    "aggregate_python_package_build",
+    "python_ubuntu_matrix",
+    "python_macos_14_15_26_matrix",
+    "python_windows_2025_vs2026_matrix",
+    "rhel_ubi_8_9_10_and_rhel_7_abi",
+    "rocky_linux_8_9_10",
+    "windows_11_arm",
+    "react_build",
+    "mobile_web_smoke_android_and_ios",
+    "tkinter_gui_lifecycle",
+)
+REQUIRED_PLATFORM_CHECKS = (
+    "windows_hosted_python_and_smoke",
+    "windows_11_arm_python_and_smoke",
+    "ubuntu_python_tkinter_and_verifier",
+    "macos_14_15_26_python_and_verifier",
+)
+REQUIRED_CREDENTIALED_POLYMARKET_CHECKS = (
+    "report_integrity",
+    "source_revision",
+    "public_live_checks",
+    "credentialed_read_checks",
+    "credential_live_verified",
+)
+REQUIRED_FUNDED_POLYMARKET_CHECKS = (
+    "report_integrity",
+    "source_revision",
+    "public_live_checks",
+    "credentialed_read_checks",
+    "funded_order_cancel",
+    "post_cancel_verified",
+    "funded_live_verified",
+)
+REQUIRED_EVIDENCE_CHECKS = {
+    "repository-settings": REQUIRED_REPOSITORY_SETTINGS_CHECKS,
+    "release-environment": REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
+    "release-history": REQUIRED_RELEASE_HISTORY_CHECKS,
+    "release": REQUIRED_RELEASE_CHECKS,
+    "deployment": REQUIRED_DEPLOYMENT_CHECKS,
+    "platform-ci": REQUIRED_PLATFORM_CI_CHECKS,
+    "platform": REQUIRED_PLATFORM_CHECKS,
+    "credentialed-polymarket": REQUIRED_CREDENTIALED_POLYMARKET_CHECKS,
+    "funded-polymarket": REQUIRED_FUNDED_POLYMARKET_CHECKS,
+}
+REQUIRED_EVIDENCE_FIELDS = {
+    "repository-settings": ("source",),
+    "release-environment": ("source",),
+    "release-history": ("source", "scope", "tag", "target_commit"),
+    "release": ("source", "scope", "tag", "target_commit", "assets"),
+    "deployment": ("source", "scope", "environment", "expected_version", "source_revision"),
+    "platform-ci": ("source", "scope", "run_id", "source_revision"),
+    "platform": ("source", "scope", "targets", "source_revision"),
+    "credentialed-polymarket": ("source", "scope", "target_tier", "report_hash", "source_revision"),
+    "funded-polymarket": (
+        "source",
+        "scope",
+        "target_tier",
+        "report_hash",
+        "live_action",
+        "source_revision",
+    ),
+}
+_STRING_FIELDS = frozenset(
+    {
+        "source",
+        "scope",
+        "environment",
+        "expected_version",
+        "source_revision",
+        "tag",
+        "target_commit",
+        "target_tier",
+        "report_hash",
+    }
+)
+
+
+def _captured_output_metadata(stdout: str, stderr: str) -> dict[str, Any]:
+    """Describe captured process output without retaining its potentially sensitive contents."""
+
+    def describe(value: str) -> dict[str, Any]:
+        text = value if isinstance(value, str) else ""
+        encoded = text.encode("utf-8")
+        return {
+            "bytes": len(encoded),
+            "lines": len(text.splitlines()),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+
+    return {"stdout": describe(stdout), "stderr": describe(stderr)}
+
+
+def _is_nonblank_string(value: Any, *, single_line: bool = True) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and (not single_line or ("\n" not in value and "\r" not in value))
+    )
+
+
+def _required_field_is_valid(field: str, value: Any) -> bool:
+    if field in _STRING_FIELDS:
+        return _is_nonblank_string(value)
+    if field == "run_id":
+        return type(value) is int and value > 0
+    if field in {"assets", "targets"}:
+        return (
+            isinstance(value, list)
+            and bool(value)
+            and all(_is_nonblank_string(item) for item in value)
+            and len(value) == len(set(value))
+        )
+    if field == "live_action":
+        return type(value) is bool and value is True
+    return False
 
 
 def _project_version() -> str:
@@ -218,18 +423,36 @@ def _repository_revision() -> str:
     return revision if result.returncode == 0 and _COMMIT_RE.fullmatch(revision) else ""
 
 
+def _repository_is_clean() -> bool:
+    """Return whether evidence can be bound to the exact committed checkout."""
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and not result.stdout.strip()
+
+
 def _reviewed_evidence(
     path_value: str,
     label: str,
     *,
     evidence_type: str,
     required_fields: tuple[str, ...] = (),
+    required_checks: tuple[str, ...] = (),
     expected_fields: dict[str, Any] | None = None,
     revision_field: str = "",
     expected_revision: str = "",
     now: datetime | None = None,
 ) -> tuple[bool, str]:
-    if not path_value:
+    if not _is_nonblank_string(path_value):
         return False, f"Provide reviewed {label} JSON evidence."
     path = Path(path_value).expanduser()
     try:
@@ -238,16 +461,22 @@ def _reviewed_evidence(
         return False, f"{label} evidence is not readable JSON."
     if not isinstance(payload, dict) or payload.get("verified") is not True:
         return False, f"{label} evidence must contain verified=true."
-    if payload.get("schema_version") != 1:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
         return False, f"{label} evidence must contain schema_version=1."
     if payload.get("evidence_type") != evidence_type:
         return False, f"{label} evidence must declare evidence_type={evidence_type!r}."
-    if not payload.get("reviewed_by") or not payload.get("reviewed_at"):
+    contract_fields = REQUIRED_EVIDENCE_FIELDS.get(evidence_type)
+    contract_checks = REQUIRED_EVIDENCE_CHECKS.get(evidence_type)
+    if contract_fields is None or contract_checks is None:
+        return False, f"{label} evidence_type has no validation contract."
+    if required_checks and set(required_checks) != set(contract_checks):
+        return False, f"{label} evidence validator check contract is inconsistent."
+    if "reviewed_by" not in payload or "reviewed_at" not in payload:
         return False, f"{label} evidence requires reviewed_by and reviewed_at."
-    if not isinstance(payload["reviewed_by"], str) or "\n" in payload["reviewed_by"]:
-        return False, f"{label} evidence reviewed_by must be a single-line string."
-    if not isinstance(payload["reviewed_at"], str):
-        return False, f"{label} evidence reviewed_at must be an ISO-8601 string."
+    if not _is_nonblank_string(payload["reviewed_by"]):
+        return False, f"{label} evidence reviewed_by must be a non-empty single-line string."
+    if not _is_nonblank_string(payload["reviewed_at"]):
+        return False, f"{label} evidence reviewed_at must be a non-empty ISO-8601 string."
     try:
         reviewed_at = datetime.fromisoformat(payload["reviewed_at"].replace("Z", "+00:00"))
     except ValueError:
@@ -262,13 +491,23 @@ def _reviewed_evidence(
         return False, f"{label} evidence reviewed_at is in the future."
     if age > timedelta(days=EVIDENCE_MAX_AGE_DAYS):
         return False, f"{label} evidence is stale; review it again within {EVIDENCE_MAX_AGE_DAYS} days."
-    if not isinstance(payload.get("source"), str) or not payload["source"].strip():
+    if not _is_nonblank_string(payload.get("source")):
         return False, f"{label} evidence requires a non-empty source."
-    missing_fields = [field for field in required_fields if field not in payload or payload[field] in (None, "", [])]
+    all_required_fields = tuple(dict.fromkeys((*contract_fields, *required_fields)))
+    missing_fields = [field for field in all_required_fields if field not in payload]
     if missing_fields:
         return False, f"{label} evidence is missing required fields: {', '.join(missing_fields)}."
+    invalid_fields = [
+        field for field in all_required_fields if not _required_field_is_valid(field, payload[field])
+    ]
+    if invalid_fields:
+        return False, f"{label} evidence has invalid required fields: {', '.join(invalid_fields)}."
+    for field in _STRING_FIELDS:
+        if field in payload and not _is_nonblank_string(payload[field]):
+            return False, f"{label} evidence field {field} must be a non-empty single-line string."
     for field, expected in (expected_fields or {}).items():
-        if payload.get(field) != expected:
+        actual = payload.get(field)
+        if type(actual) is not type(expected) or actual != expected:
             return False, f"{label} evidence field {field} must equal {expected!r}."
     for field in ("source_revision", "target_commit"):
         if field in payload and (not isinstance(payload[field], str) or not _COMMIT_RE.fullmatch(payload[field])):
@@ -285,24 +524,31 @@ def _reviewed_evidence(
         not isinstance(payload["report_hash"], str) or not _HASH_RE.fullmatch(payload["report_hash"])
     ):
         return False, f"{label} evidence report_hash must be a 64-character SHA-256 value."
-    if "run_id" in payload and (not isinstance(payload["run_id"], int) or payload["run_id"] <= 0):
+    if "run_id" in payload and (type(payload["run_id"]) is not int or payload["run_id"] <= 0):
         return False, f"{label} evidence run_id must be a positive integer."
-    if "assets" in payload and (not isinstance(payload["assets"], list) or not payload["assets"]):
-        return False, f"{label} evidence assets must be a non-empty list."
-    if "targets" in payload and (not isinstance(payload["targets"], list) or not payload["targets"]):
-        return False, f"{label} evidence targets must be a non-empty list."
+    for field in ("assets", "targets"):
+        if field in payload and not _required_field_is_valid(field, payload[field]):
+            return False, f"{label} evidence {field} must be a non-empty list of unique non-empty strings."
+    if "live_action" in payload and type(payload["live_action"]) is not bool:
+        return False, f"{label} evidence live_action must be a boolean."
     if evidence_type == "funded-polymarket" and payload.get("live_action") is not True:
         return False, "funded Polymarket evidence requires live_action=true."
     checks = payload.get("checks")
     if not isinstance(checks, list) or not checks:
         return False, f"{label} evidence requires a non-empty checks list."
     names = [check.get("name") for check in checks if isinstance(check, dict)]
-    if len(names) != len(checks) or any(not isinstance(name, str) or not name.strip() for name in names):
+    if len(names) != len(checks) or any(not _is_nonblank_string(name) for name in names):
         return False, f"{label} evidence checks require non-empty names."
     if len(set(names)) != len(names):
         return False, f"{label} evidence checks must have unique names."
     if any(not isinstance(check, dict) or check.get("status") not in {"pass", "ok"} for check in checks):
         return False, f"{label} evidence contains a failed or malformed check."
+    missing_checks = [name for name in contract_checks if name not in names]
+    if missing_checks:
+        return False, f"{label} evidence is missing required checks: {', '.join(missing_checks)}."
+    unknown_checks = [name for name in names if name not in contract_checks]
+    if unknown_checks:
+        return False, f"{label} evidence contains unknown checks: {', '.join(unknown_checks)}."
     return True, f"Reviewed {label} evidence accepted."
 
 
@@ -340,10 +586,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
-    local_result = _run_local_gates(args.full_local) if args.run_local else {"status": "not_run"}
+    repository_clean_initial = _repository_is_clean()
+    repository_revision_initial = _repository_revision() if repository_clean_initial else ""
+    local_result = (
+        _run_local_gates(args.full_local)
+        if args.run_local
+        else {"status": "not_run", "profile": "full" if args.full_local else "core"}
+    )
     public_result = _run_public_live() if args.run_public_live else {"status": "not_run"}
     project_version = _project_version()
-    repository_revision = _repository_revision()
 
     architecture_ok = _paths_exist(REQUIRED_ARCHITECTURE_FILES) and _contains(
         "README.md", ("capability", "Polymarket", "credential_live_verified")
@@ -358,11 +609,24 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     local_pass = local_result.get("status") == "pass"
+    full_local_pass = local_pass and args.full_local
     tests = _category(
         "tests_correctness",
-        18 if local_pass else 0,
-        "The requested local verification command passed." if local_pass else "Run the local verification command successfully.",
-        [] if local_pass else ["python verify.py --skip-pip-check"],
+        18 if full_local_pass else 17 if local_pass else 0,
+        (
+            "The full local verification profile, frontend build, and browser smoke passed."
+            if full_local_pass
+            else "The core local verification profile passed; full browser/build coverage was not requested."
+            if local_pass
+            else "Run the local verification command successfully."
+        ),
+        (
+            []
+            if full_local_pass
+            else ["Run the scorer with --full-local before claiming a 100/100 ready result."]
+            if local_pass
+            else ["python verify.py --skip-pip-check"]
+        ),
     )
     security_ok = _paths_exist(REQUIRED_SECURITY_FILES) and local_pass
     security = _category(
@@ -391,6 +655,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "release-environment",
         evidence_type="release-environment",
         required_fields=("source",),
+        required_checks=REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
     )
     release_history_ok, release_history_detail = _reviewed_evidence(
         args.release_history_evidence,
@@ -399,7 +664,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         required_fields=("scope", "tag", "target_commit"),
         expected_fields={"tag": f"v{project_version}"},
         revision_field="target_commit",
-        expected_revision=repository_revision,
+        expected_revision=repository_revision_initial,
     )
     release_ok, release_detail = _reviewed_evidence(
         args.release_evidence,
@@ -408,7 +673,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         required_fields=("scope", "tag", "target_commit", "assets"),
         expected_fields={"tag": f"v{project_version}"},
         revision_field="target_commit",
-        expected_revision=repository_revision,
+        expected_revision=repository_revision_initial,
     )
     ci_cd = _category(
         "ci_cd_release",
@@ -442,7 +707,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         required_fields=("scope", "environment", "expected_version", "source_revision"),
         expected_fields={"expected_version": project_version},
         revision_field="source_revision",
-        expected_revision=repository_revision,
+        expected_revision=repository_revision_initial,
     )
     operations = _category(
         "operations_recovery",
@@ -465,7 +730,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         evidence_type="platform-ci",
         required_fields=("scope", "run_id", "source_revision"),
         revision_field="source_revision",
-        expected_revision=repository_revision,
+        expected_revision=repository_revision_initial,
     )
     platform_evidence_ok, platform_detail = _reviewed_evidence(
         args.platform_evidence,
@@ -473,7 +738,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         evidence_type="platform",
         required_fields=("scope", "targets", "source_revision"),
         revision_field="source_revision",
-        expected_revision=repository_revision,
+        expected_revision=repository_revision_initial,
     )
     platform = _category(
         "platform_evidence",
@@ -503,7 +768,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         required_fields=("scope", "target_tier", "report_hash", "source_revision"),
         expected_fields={"target_tier": "credential_live_verified"},
         revision_field="source_revision",
-        expected_revision=repository_revision,
+        expected_revision=repository_revision_initial,
     )
     funded_ok, funded_detail = _reviewed_evidence(
         args.funded_evidence,
@@ -512,7 +777,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         required_fields=("scope", "target_tier", "report_hash", "live_action", "source_revision"),
         expected_fields={"target_tier": "funded_live_verified"},
         revision_field="source_revision",
-        expected_revision=repository_revision,
+        expected_revision=repository_revision_initial,
     )
     live = _category(
         "live_acceptance",
@@ -533,6 +798,43 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     else:
         live["missing"].append(funded_detail)
 
+    repository_clean_final = _repository_is_clean()
+    repository_revision_final = _repository_revision() if repository_clean_final else ""
+    repository_stable = (
+        repository_clean_initial
+        and repository_clean_final
+        and bool(repository_revision_initial)
+        and repository_revision_initial == repository_revision_final
+    )
+    if not repository_clean_initial:
+        repository_detail = "The initial worktree check was not clean."
+    elif not repository_revision_initial:
+        repository_detail = "The initial repository revision was unavailable."
+    elif not repository_clean_final:
+        repository_detail = "The worktree changed or became dirty while readiness evidence was evaluated."
+    elif not repository_revision_final:
+        repository_detail = "The final repository revision was unavailable."
+    elif repository_revision_initial != repository_revision_final:
+        repository_detail = "The repository revision changed while readiness evidence was evaluated."
+    else:
+        repository_detail = "The worktree stayed clean at the same revision throughout evidence evaluation."
+
+    if not repository_stable:
+        stability_reason = "the final clean/revision check did not match the initial repository identity"
+        revision_bound_awards = (
+            (release_history_ok, ci_cd, 1, "release history"),
+            (release_ok, ci_cd, 1, "release"),
+            (deployment_ok, operations, 3, "deployment"),
+            (platform_ci_ok, platform, 3, "platform CI"),
+            (platform_evidence_ok, platform, 2, "platform"),
+            (credentialed_ok, live, 1, "credentialed Polymarket"),
+            (funded_ok, live, 1, "funded Polymarket"),
+        )
+        for was_accepted, category, points, label in revision_bound_awards:
+            if was_accepted:
+                category["earned"] -= points
+                category["missing"].append(f"Reviewed {label} evidence was revoked because {stability_reason}.")
+
     categories = [architecture, tests, security, ci_cd, operations, platform, live]
     score = sum(int(item["earned"]) for item in categories)
     missing = [detail for item in categories for detail in item["missing"] if detail]
@@ -542,7 +844,19 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "status": "ready" if score == 100 else "not_ready",
         "categories": categories,
         "missing": missing,
-        "checks": {"local": local_result, "public_live": public_result},
+        "checks": {
+            "repository": {
+                "status": "pass" if repository_stable else "fail",
+                "initial_clean": repository_clean_initial,
+                "final_clean": repository_clean_final,
+                "initial_revision": repository_revision_initial,
+                "final_revision": repository_revision_final,
+                "revision": repository_revision_final if repository_stable else "",
+                "detail": repository_detail,
+            },
+            "local": local_result,
+            "public_live": public_result,
+        },
         "scope": "Repository readiness plus explicitly supplied external evidence; not a certification.",
     }
 
