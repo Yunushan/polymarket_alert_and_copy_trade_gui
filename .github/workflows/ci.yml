@@ -422,6 +422,103 @@ jobs:
       - name: Mobile web smoke
         run: python scripts/verify_mobile_web_smoke.py --target "${{ matrix.target }}"
 
+  public-polymarket-live:
+    name: Public Polymarket live / GitHub-hosted
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Verify exact clean source before probe
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Install hash-locked runtime
+        run: |
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+
+      - name: Probe reviewed public Polymarket endpoints
+        shell: bash
+        run: |
+          report_dir="${RUNNER_TEMP}/public-live"
+          report_file="${report_dir}/public-polymarket-live.json"
+          mkdir -p "${report_dir}"
+          probe_succeeded=false
+          for probe_attempt in 1 2; do
+            candidate="${report_dir}/attempt-${probe_attempt}.json"
+            if python -B scripts/verify_polymarket_live.py \
+              --public-only \
+              --timeout 15 \
+              --report-file "${candidate}" \
+              --source-repository "${GITHUB_REPOSITORY}" \
+              --source-revision "${GITHUB_SHA}" \
+              --source-run-id "${GITHUB_RUN_ID}" \
+              --source-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+              --source-workflow-ref "${GITHUB_WORKFLOW_REF}"; then
+              mv -- "${candidate}" "${report_file}"
+              probe_succeeded=true
+              break
+            fi
+            if [ "${probe_attempt}" -eq 1 ]; then
+              sleep 1
+            elif [ -f "${candidate}" ]; then
+              mv -- "${candidate}" "${report_file}"
+            else
+              printf '%s\n' '{"ok":false,"mode":"public_only","error":"probe terminated before a report was written"}' > "${report_file}"
+            fi
+          done
+          if [ "${probe_succeeded}" != true ]; then
+            exit 1
+          fi
+
+      - name: Revalidate public-only evidence before attestation
+        shell: bash
+        run: |
+          python -B scripts/verify_polymarket_live.py \
+            --validate-public-only-report '${{ runner.temp }}/public-live/public-polymarket-live.json' \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-revision "${GITHUB_SHA}" \
+            --source-run-id "${GITHUB_RUN_ID}" \
+            --source-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --source-workflow-ref "${GITHUB_WORKFLOW_REF}"
+
+      - name: Reverify exact clean source after probe
+        if: always()
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Attest exact public-live evidence file
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/public-live/public-polymarket-live.json
+
+      - name: Upload public-live evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-polymarket-live-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-live/public-polymarket-live.json
+          if-no-files-found: error
+          retention-days: 14
+
   package:
     name: Python package build
     runs-on: ubuntu-latest

@@ -87,7 +87,7 @@ class WindowsReleaseBuildTests(unittest.TestCase):
                 build_pyinstaller(work_dir, package_dir)
 
             command = runner.call_args.args[0]
-            self.assertIn(["--collect-all", "py_clob_client"], [command[index : index + 2] for index in range(len(command) - 1)])
+            self.assertIn(["--collect-all", "py_clob_client_v2"], [command[index : index + 2] for index in range(len(command) - 1)])
             self.assertIn(["--collect-all", "opinion_clob_sdk"], [command[index : index + 2] for index in range(len(command) - 1)])
             self.assertEqual((package_dir / f"{APP_NAME}.exe").read_bytes(), b"frozen-app")
 

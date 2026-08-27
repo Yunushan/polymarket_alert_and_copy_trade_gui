@@ -25,6 +25,23 @@ class ProductionOperationsTests(unittest.TestCase):
             "RestrictRealtime=true",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
             "ReadWritePaths=/var/lib/market-sentinel",
+            "EnvironmentFile=/etc/market-sentinel/market-sentinel.env",
+            (
+                'ExecStartPre=/usr/bin/test "${POLYMARKET_ANALYTICS_CACHE_PATH}" = '
+                "/var/lib/market-sentinel/polymarket_analytics_cache.json"
+            ),
+            (
+                'ExecStartPre=/usr/bin/test "${POLYMARKET_LIVE_VALIDATION_REPORTS_PATH}" = '
+                "/var/lib/market-sentinel/polymarket_live_validation_reports.json"
+            ),
+            (
+                'ExecStartPre=/usr/bin/test "${POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH}" = '
+                "/var/lib/market-sentinel/polymarket_live_validation_decisions.json"
+            ),
+            (
+                'ExecStartPre=/usr/bin/test "${POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH}" = '
+                "/var/lib/market-sentinel/polymarket_live_validation_promotion_proposal_snapshots.json"
+            ),
             "ExecStartPre=/opt/market-sentinel/.venv/bin/python -m market_sentinel_cli doctor --strict --compact",
             "--config /var/lib/market-sentinel/config.json",
             "--frontend-dir /opt/market-sentinel/frontend/dist",
@@ -34,6 +51,7 @@ class ProductionOperationsTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, unit)
+        self.assertNotIn("EnvironmentFile=-/etc/market-sentinel/market-sentinel.env", unit)
 
     def test_proxy_and_governance_artifacts_require_authenticated_tls_access(self) -> None:
         proxy = (ROOT / "deploy" / "caddy" / "Caddyfile.example").read_text(encoding="utf-8")
@@ -60,6 +78,47 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Release` workflow", repository_settings)
         self.assertIn("MARKET_SENTINEL_ALLOWED_ORIGINS", service_environment)
         self.assertIn("* @Yunushan", codeowners)
+
+    def test_service_environment_places_every_durable_store_under_the_backed_up_state_root(self) -> None:
+        service_environment = (ROOT / "deploy" / "systemd" / "market-sentinel.env.example").read_text(
+            encoding="utf-8"
+        )
+        web_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-web.service").read_text(
+            encoding="utf-8"
+        )
+        health_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-health.service").read_text(
+            encoding="utf-8"
+        )
+        backup_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-backup.service").read_text(
+            encoding="utf-8"
+        )
+        expected = {
+            "POLYMARKET_ANALYTICS_CACHE_PATH": "polymarket_analytics_cache.json",
+            "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": "polymarket_live_validation_reports.json",
+            "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": "polymarket_live_validation_decisions.json",
+            "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": (
+                "polymarket_live_validation_promotion_proposal_snapshots.json"
+            ),
+        }
+        assignments = {
+            name: value
+            for line in service_environment.splitlines()
+            if line and not line.startswith("#") and "=" in line
+            for name, value in [line.split("=", 1)]
+        }
+        state_root = Path("/var/lib/market-sentinel")
+
+        for name, filename in expected.items():
+            with self.subTest(name=name):
+                expected_path = state_root / filename
+                self.assertEqual(assignments.get(name), str(expected_path).replace("\\", "/"))
+                self.assertEqual(service_environment.count(f"{name}="), 1)
+                self.assertTrue(expected_path.is_relative_to(state_root))
+        self.assertIn("EnvironmentFile=/etc/market-sentinel/market-sentinel.env", web_unit)
+        self.assertIn("EnvironmentFile=/etc/market-sentinel/market-sentinel.env", health_unit)
+        self.assertNotIn("EnvironmentFile=-/etc/market-sentinel/market-sentinel.env", web_unit)
+        self.assertNotIn("EnvironmentFile=-/etc/market-sentinel/market-sentinel.env", health_unit)
+        self.assertIn("--source /var/lib/market-sentinel", backup_unit)
 
     def test_systemd_health_timer_performs_periodic_loopback_checks(self) -> None:
         health_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-health.service").read_text(encoding="utf-8")

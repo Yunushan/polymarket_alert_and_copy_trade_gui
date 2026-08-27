@@ -6,12 +6,27 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer, ws_market, ws_sports, ws_user
+from polymarket import (
+    bridge,
+    clob_auth,
+    clob_rest,
+    data_api,
+    gamma,
+    http_client,
+    relayer,
+    ws_market,
+    ws_sports,
+    ws_transport,
+    ws_user,
+)
 from polymarket.analytics_cache import (
+    AnalyticsCacheConflictError,
+    AnalyticsCacheDurabilityError,
     POLYMARKET_MDD_AUDIT_KIND,
     _fsync_parent_directory,
     load_analytics_cache,
@@ -24,20 +39,30 @@ from polymarket.auth_readiness import build_clob_auth_readiness, validate_sdk_tr
 from polymarket.coverage import polymarket_official_api_coverage
 from polymarket.accounting import parse_accounting_snapshot_zip, reconcile_mdd_payload_with_accounting
 from polymarket.credential_runbook import build_polymarket_credential_runbook
-from polymarket.endpoints import ALL_POLYMARKET_ENDPOINTS, CLOB_ENDPOINTS
-from polymarket.http_client import PolymarketRateLimitError, PolymarketValidationError
+from polymarket.endpoints import ALL_POLYMARKET_ENDPOINTS, CLOB_ENDPOINTS, PolymarketEndpoint
+from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError, PolymarketValidationError
 from polymarket.live_verification import (
     CONFIRM_LIVE_ORDER_CANCEL,
     LiveOrderCancelRequest,
+    accepted_credential_read_checks,
+    _same_account_authenticated_read_preflight,
     build_live_validation_stage_gates,
     build_live_order_cancel_plan,
+    extract_order_id,
     run_live_order_cancel_verification,
 )
 from polymarket.live_reports import (
+    LiveValidationStoreConflictError,
+    LiveValidationStoreDurabilityError,
+    LiveValidationStoreIntegrityError,
+    LiveValidationStoreReadError,
     find_live_validation_report_duplicate,
     list_live_validation_coverage_promotion_proposal_snapshots,
     list_live_validation_reports,
+    load_live_validation_decisions,
     load_live_validation_coverage_promotion_proposal_snapshot,
+    load_live_validation_promotion_proposal_snapshots,
+    load_live_validation_reports,
     live_validation_coverage_promotion_proposal,
     live_validation_coverage_promotion_proposal_hash,
     live_validation_coverage_promotion_proposal_markdown,
@@ -53,6 +78,8 @@ from polymarket.live_reports import (
     live_validation_report_summary,
     list_live_validation_report_decisions,
     purge_live_validation_coverage_promotion_proposal_snapshots,
+    reconcile_live_validation_promotion_proposal_snapshot_idempotency,
+    reconcile_live_validation_report_idempotency,
     record_live_validation_report_decision,
     save_live_validation_decisions,
     save_live_validation_promotion_proposal_snapshots,
@@ -67,6 +94,7 @@ from polymarket.live_report_schema import (
     parse_live_validation_report_json,
     validate_live_validation_report,
 )
+from polymarket.trader import TraderConfig
 from polymarket.ws_market import build_market_subscription
 from polymarket.ws_sports import sports_ws_url
 from polymarket.ws_user import build_user_subscription, probe_user_websocket, user_ws_url
@@ -77,13 +105,107 @@ ROOT = Path(__file__).resolve().parent.parent
 LIVE_REPORT_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
 
 
+def clean_source_provenance(revision: str = "a" * 40) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "repository": "market-sentinel",
+        "repository_origin": "github.com/yunushan/market-sentinel",
+        "source_revision": revision,
+        "initial_revision": revision,
+        "final_revision": revision,
+        "initial_clean": True,
+        "final_clean": True,
+        "stable": True,
+    }
+
+
+def successful_live_public_checks() -> dict[str, dict[str, object]]:
+    return {
+        "clob_time": {"status": "ok", "semantic_check": "current_unix_time"},
+        "gamma_markets": {"status": "ok", "semantic_check": "market_identity"},
+        "data_leaderboard": {"status": "ok", "semantic_check": "leaderboard_identity"},
+        "bridge_supported_assets": {"status": "ok", "semantic_check": "supported_asset_identity"},
+    }
+
+
+def accepted_live_authenticated_reads() -> dict[str, dict[str, object]]:
+    return {
+        "clob_l2_orders": {
+            "status": "ok",
+            "detail": "Authenticated CLOB order list responded.",
+            "sample_type": "list",
+            "semantic_check": "authenticated_order_collection",
+            "records_observed": 0,
+        }
+    }
+
+
+def funded_live_safety_evidence(revision: str = "a" * 40) -> dict[str, object]:
+    return {
+        "account_authenticated_read_preflight": {
+            "status": "pass",
+            "same_trading_client": True,
+            "account_identity_present": True,
+            "sample_type": "list",
+            "records_observed": 0,
+        },
+        "account_preflight": {
+            "status": "pass",
+            "sufficient_balance": True,
+            "sufficient_allowance": True,
+        },
+        "execution_guards": {
+            "status": "pass",
+            "post_only": True,
+            "time_in_force": "GTC",
+            "maker_price_verified": True,
+        },
+        "geoblock_preflight": {"status": "pass", "blocked": False},
+        "source_revision_gate": {
+            "status": "pass",
+            "clean": True,
+            "matches_initial_revision": True,
+            "source_revision": revision,
+            "repository_origin": "github.com/yunushan/market-sentinel",
+        },
+    }
+
+
+class LiveHarnessTraderSupport:
+    def get_trading_account_address(self) -> str:
+        return "0x" + "1" * 40
+
+    def get_orders(self):
+        return []
+
+    def get_trading_balance_allowance(self, **_kwargs):
+        return {"balance": "1000000", "allowances": {"exchange": "1000000"}}
+
+
+def allowed_geoblock() -> dict[str, object]:
+    return {"blocked": False, "country": "US", "region": "NY"}
+
+
+CLOB_ORDER_ID = "0x" + "1" * 64
+OTHER_CLOB_ORDER_ID = "0x" + "2" * 64
+
+
 class FakeResponse:
-    def __init__(self, payload, status_code: int = 200, *, headers=None, content: bytes = b"", text: str = "") -> None:
+    def __init__(
+        self,
+        payload,
+        status_code: int = 200,
+        *,
+        headers=None,
+        content: bytes | None = None,
+        text: str = "",
+    ) -> None:
         self._payload = payload
         self.status_code = status_code
         self.headers = headers or {}
-        self.content = content
+        self.content = content if content is not None else (text.encode("utf-8") if text else json.dumps(payload).encode())
         self.text = text
+        self.closed = False
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -91,6 +213,13 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+    def iter_content(self, chunk_size: int):
+        for offset in range(0, len(self.content), chunk_size):
+            yield self.content[offset : offset + chunk_size]
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def request_url(mock_request) -> str:
@@ -156,6 +285,121 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "{ not valid json")
 
+    def test_analytics_cache_rejects_stale_direct_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "analytics-cache.json"
+            save_analytics_cache({"entries": {}}, cache_path)
+            first_writer = load_analytics_cache(cache_path)
+            stale_writer = load_analytics_cache(cache_path)
+
+            first_writer["entries"]["first"] = {"kind": "test"}
+            save_analytics_cache(first_writer, cache_path)
+            stale_writer["entries"]["stale"] = {"kind": "test"}
+
+            with self.assertRaises(AnalyticsCacheConflictError):
+                save_analytics_cache(stale_writer, cache_path)
+
+            self.assertEqual(set(load_analytics_cache(cache_path)["entries"]), {"first"})
+
+    def test_analytics_cache_post_replace_failure_is_explicit_and_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "analytics-cache.json"
+            cache = {"entries": {"committed": {"kind": "test"}}}
+
+            with (
+                patch("polymarket.analytics_cache._fsync_parent_directory", side_effect=OSError("sync failed")),
+                self.assertRaises(AnalyticsCacheDurabilityError) as raised,
+            ):
+                save_analytics_cache(cache, cache_path)
+
+            self.assertTrue(raised.exception.committed)
+            self.assertEqual(raised.exception.path, cache_path)
+            self.assertIn("committed", load_analytics_cache(cache_path)["entries"])
+
+            # Even a plain mapping has an idempotent exact-byte retry path;
+            # it cannot silently overwrite a different intervening revision.
+            save_analytics_cache(cache, cache_path)
+            self.assertEqual(set(load_analytics_cache(cache_path)["entries"]), {"committed"})
+
+    def test_analytics_cache_serializes_concurrent_thread_writers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "analytics-cache.json"
+            barrier = threading.Barrier(8)
+            errors = []
+
+            def store(index: int) -> None:
+                try:
+                    barrier.wait(timeout=10)
+                    store_analytics_artifact(
+                        "thread-test",
+                        {"writer": index},
+                        {"writer": index},
+                        path=cache_path,
+                    )
+                except BaseException as error:  # pragma: no cover - asserted below
+                    errors.append(error)
+
+            threads = [threading.Thread(target=store, args=(index,)) for index in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            entries = load_analytics_cache(cache_path)["entries"]
+            self.assertEqual(len(entries), len(threads))
+            self.assertEqual({entry["payload"]["writer"] for entry in entries.values()}, set(range(8)))
+
+    def test_analytics_cache_serializes_concurrent_process_writers(self) -> None:
+        worker_script = """
+import sys
+import time
+from pathlib import Path
+
+from polymarket.analytics_cache import store_analytics_artifact
+
+target = Path(sys.argv[1])
+start_flag = Path(sys.argv[2])
+writer = int(sys.argv[3])
+while not start_flag.exists():
+    time.sleep(0.005)
+store_analytics_artifact(
+    "process-test",
+    {"writer": writer},
+    {"writer": writer},
+    path=target,
+)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_path = root / "analytics-cache.json"
+            start_flag = root / "start"
+            processes = [
+                subprocess.Popen(
+                    [sys.executable, "-c", worker_script, str(cache_path), str(start_flag), str(index)],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for index in range(4)
+            ]
+            try:
+                start_flag.touch()
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=60)
+                    self.assertEqual(process.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=10)
+
+            entries = load_analytics_cache(cache_path)["entries"]
+            self.assertEqual(len(entries), len(processes))
+            self.assertEqual({entry["payload"]["writer"] for entry in entries.values()}, set(range(4)))
+
     def test_analytics_cache_parent_directory_is_synced_on_posix(self) -> None:
         path = Path("cache") / "analytics-cache.json"
         with (
@@ -172,24 +416,458 @@ class PolymarketApiWrapperTests(unittest.TestCase):
 
     def test_live_safety_stores_use_secure_atomic_artifact_writes(self) -> None:
         writers = (
-            ("reports", save_live_validation_reports),
-            ("decisions", save_live_validation_decisions),
-            ("snapshots", save_live_validation_promotion_proposal_snapshots),
+            ("reports", "reports", save_live_validation_reports),
+            ("decisions", "decisions", save_live_validation_decisions),
+            ("snapshots", "snapshots", save_live_validation_promotion_proposal_snapshots),
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name, writer in writers:
+            for name, collection_key, writer in writers:
                 with self.subTest(store=name):
                     target = root / f"{name}.json"
                     predictable_temporary = target.with_name(f"{target.name}.tmp")
                     predictable_temporary.write_text("do not overwrite", encoding="utf-8")
                     with patch("polymarket.live_reports._fsync_parent_directory") as sync_parent:
-                        self.assertEqual(writer({"entries": {"one": {"status": "ok"}}}, target), target)
+                        self.assertEqual(writer({collection_key: {"one": {"status": "ok"}}}, target), target)
 
-                    self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["entries"]["one"]["status"], "ok")
+                    self.assertEqual(
+                        json.loads(target.read_text(encoding="utf-8"))[collection_key]["one"]["status"],
+                        "ok",
+                    )
                     self.assertEqual(predictable_temporary.read_text(encoding="utf-8"), "do not overwrite")
                     self.assertFalse(list(root.glob(f".{target.name}.*.tmp")))
                     sync_parent.assert_called_once_with(target)
+
+    def test_live_safety_stores_fail_closed_and_preserve_corrupt_json(self) -> None:
+        loaders_and_writers = (
+            ("reports", "reports", load_live_validation_reports, save_live_validation_reports),
+            ("decisions", "decisions", load_live_validation_decisions, save_live_validation_decisions),
+            (
+                "snapshots",
+                "snapshots",
+                load_live_validation_promotion_proposal_snapshots,
+                save_live_validation_promotion_proposal_snapshots,
+            ),
+        )
+        corrupt_payload = b'{"evidence": "must survive", broken'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, collection_key, loader, writer in loaders_and_writers:
+                with self.subTest(store=name):
+                    target = root / f"{name}.json"
+                    target.write_bytes(corrupt_payload)
+
+                    with self.assertRaises(LiveValidationStoreReadError) as load_error:
+                        loader(target)
+                    self.assertEqual(load_error.exception.path, target)
+                    self.assertNotIn("must survive", str(load_error.exception))
+
+                    with self.assertRaises(LiveValidationStoreReadError):
+                        writer({collection_key: {"replacement": True}}, target)
+                    self.assertEqual(target.read_bytes(), corrupt_payload)
+                    self.assertFalse(list(root.glob(f".{target.name}.*.tmp")))
+
+            report_target = root / "report-mutation.json"
+            report_target.write_bytes(corrupt_payload)
+            valid_report = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+            with self.assertRaises(LiveValidationStoreReadError):
+                store_live_validation_report(valid_report, path=report_target)
+            self.assertEqual(report_target.read_bytes(), corrupt_payload)
+
+    def test_live_safety_stores_reject_stale_direct_writers(self) -> None:
+        stores = (
+            ("reports", "reports", load_live_validation_reports, save_live_validation_reports),
+            ("decisions", "decisions", load_live_validation_decisions, save_live_validation_decisions),
+            (
+                "snapshots",
+                "snapshots",
+                load_live_validation_promotion_proposal_snapshots,
+                save_live_validation_promotion_proposal_snapshots,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, collection_key, loader, writer in stores:
+                with self.subTest(store=name):
+                    target = root / f"{name}.json"
+                    initial = loader(target)
+                    initial[collection_key]["initial"] = {"status": "ok"}
+                    writer(initial, target)
+
+                    stale = loader(target)
+                    fresh = loader(target)
+                    fresh[collection_key]["fresh"] = {"status": "committed"}
+                    writer(fresh, target)
+                    stale[collection_key]["stale"] = {"status": "must-not-overwrite"}
+
+                    with self.assertRaises(LiveValidationStoreConflictError):
+                        writer(stale, target)
+
+                    persisted = loader(target)[collection_key]
+                    self.assertIn("fresh", persisted)
+                    self.assertNotIn("stale", persisted)
+
+    def test_live_safety_store_exact_bytes_retry_after_uncertain_directory_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "reports.json"
+            plain_snapshot = {"reports": {"one": {"status": "committed"}}}
+            with (
+                patch("polymarket.live_reports._fsync_parent_directory", side_effect=OSError("sync failed")),
+                self.assertRaises(LiveValidationStoreDurabilityError) as raised,
+            ):
+                save_live_validation_reports(plain_snapshot, target)
+
+            self.assertTrue(raised.exception.committed)
+            self.assertEqual(load_live_validation_reports(target)["reports"]["one"]["status"], "committed")
+            with patch("polymarket.live_reports._fsync_parent_directory") as sync_parent:
+                self.assertEqual(save_live_validation_reports(plain_snapshot, target), target)
+            sync_parent.assert_called_once_with(target)
+
+    def test_live_report_idempotency_reconciles_uncertain_commit_and_binds_request(self) -> None:
+        valid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        raw_idempotency_key = "report-import-2026-08-26T12:00:00Z"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "reports.json"
+            with (
+                patch("polymarket.live_reports._fsync_parent_directory", side_effect=OSError("sync failed")),
+                self.assertRaises(LiveValidationStoreDurabilityError) as raised,
+            ):
+                store_live_validation_report(
+                    valid,
+                    source="durability_test",
+                    label="committed once",
+                    path=target,
+                    idempotency_key=raw_idempotency_key,
+                )
+
+            self.assertTrue(raised.exception.committed)
+            self.assertTrue(raised.exception.operation_key)
+            self.assertTrue(raised.exception.idempotency_key_hash)
+            self.assertNotIn(raw_idempotency_key, str(raised.exception))
+            self.assertNotIn(raw_idempotency_key, target.read_text(encoding="utf-8"))
+
+            with patch("polymarket.live_reports._fsync_parent_directory") as sync_parent:
+                replay = store_live_validation_report(
+                    valid,
+                    source="durability_test",
+                    label="committed once",
+                    path=target,
+                    idempotency_key=raw_idempotency_key,
+                )
+            sync_parent.assert_called_once_with(target)
+            self.assertFalse(replay["stored"])
+            self.assertTrue(replay["idempotent_replay"])
+            self.assertEqual(list_live_validation_reports(path=target)["counts"]["entries"], 1)
+
+            with self.assertRaisesRegex(ValueError, "different operation request"):
+                store_live_validation_report(
+                    valid,
+                    source="durability_test",
+                    label="different request",
+                    path=target,
+                    idempotency_key=raw_idempotency_key,
+                )
+            with self.assertRaisesRegex(ValueError, "visible ASCII"):
+                store_live_validation_report(valid, path=target, idempotency_key="contains a space")
+            for malformed_key in (" leading", "trailing "):
+                with self.subTest(idempotency_key=malformed_key):
+                    with self.assertRaisesRegex(ValueError, "visible ASCII"):
+                        store_live_validation_report(valid, path=target, idempotency_key=malformed_key)
+
+            malformed_store = load_live_validation_reports(target)
+            original_entry = next(iter(malformed_store["reports"].values()))
+            ambiguous_entry = json.loads(json.dumps(original_entry))
+            ambiguous_entry["key"] = "ambiguous-copy"
+            malformed_store["reports"]["ambiguous-copy"] = ambiguous_entry
+            save_live_validation_reports(malformed_store, target)
+            bytes_before_rejection = target.read_bytes()
+            with self.assertRaisesRegex(LiveValidationStoreIntegrityError, "ambiguous across multiple records"):
+                store_live_validation_report(
+                    valid,
+                    source="durability_test",
+                    label="committed once",
+                    path=target,
+                    idempotency_key=raw_idempotency_key,
+                )
+            self.assertEqual(target.read_bytes(), bytes_before_rejection)
+
+    def test_duplicate_report_idempotency_preserves_outcome_and_single_audit(self) -> None:
+        valid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "reports.json"
+            stored = store_live_validation_report(valid, path=target, label="original")
+            duplicate_args = {
+                "report": valid,
+                "source": "retry_test",
+                "label": "duplicate import",
+                "path": target,
+                "idempotency_key": "duplicate-import-1",
+            }
+            with (
+                patch("polymarket.live_reports._fsync_parent_directory", side_effect=OSError("sync failed")),
+                self.assertRaises(LiveValidationStoreDurabilityError),
+            ):
+                store_live_validation_report(**duplicate_args)
+
+            committed_entry = load_live_validation_reports(target)["reports"][stored["key"]]
+            self.assertEqual(committed_entry["duplicate_import_count"], 1)
+            replay = store_live_validation_report(**duplicate_args)
+            self.assertTrue(replay["idempotent_replay"])
+            self.assertTrue(replay["duplicate"])
+            self.assertEqual(replay["duplicate_policy"], "skip")
+            self.assertEqual(replay["duplicate_of"], stored["key"])
+            persisted_entry = load_live_validation_reports(target)["reports"][stored["key"]]
+            self.assertEqual(persisted_entry["duplicate_import_count"], 1)
+
+    def test_caller_bound_report_idempotency_ignores_regenerated_payload_drift(self) -> None:
+        valid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        regenerated = json.loads(json.dumps(valid))
+        regenerated["generated_at"] = float(valid["generated_at"]) + 60.0
+        binding = {
+            "mode": "generated",
+            "source": "react_generated",
+            "label": "operator probe",
+            "duplicate_policy": "skip",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "reports.json"
+            first = store_live_validation_report(
+                valid,
+                source="react_generated",
+                label="operator probe",
+                path=target,
+                idempotency_key="generated-report-1",
+                idempotency_request=binding,
+            )
+            preflight = reconcile_live_validation_report_idempotency(
+                idempotency_key="generated-report-1",
+                idempotency_request=binding,
+                path=target,
+            )
+            self.assertIsNotNone(preflight)
+            self.assertTrue(preflight["idempotent_replay"])
+            self.assertEqual(preflight["key"], first["key"])
+            replay = store_live_validation_report(
+                regenerated,
+                source="react_generated",
+                label="operator probe",
+                path=target,
+                idempotency_key="generated-report-1",
+                idempotency_request=binding,
+            )
+            self.assertTrue(replay["idempotent_replay"])
+            self.assertEqual(replay["key"], first["key"])
+            self.assertEqual(list_live_validation_reports(path=target)["counts"]["entries"], 1)
+
+    def test_malformed_idempotency_bindings_fail_closed_without_mutation(self) -> None:
+        valid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            malformed_list_path = root / "malformed-list.json"
+            first = store_live_validation_report(valid, path=malformed_list_path)
+            malformed_list = load_live_validation_reports(malformed_list_path)
+            malformed_list["reports"][first["key"]]["idempotency_key_hashes"] = "not-a-list"
+            save_live_validation_reports(malformed_list, malformed_list_path)
+            bytes_before = malformed_list_path.read_bytes()
+            with self.assertRaisesRegex(LiveValidationStoreIntegrityError, "key bindings are malformed"):
+                store_live_validation_report(
+                    valid,
+                    path=malformed_list_path,
+                    idempotency_key="new-duplicate-binding",
+                )
+            self.assertEqual(malformed_list_path.read_bytes(), bytes_before)
+
+            contradictory_path = root / "contradictory.json"
+            bound = store_live_validation_report(
+                valid,
+                path=contradictory_path,
+                idempotency_key="bound-request",
+            )
+            contradictory = load_live_validation_reports(contradictory_path)
+            contradictory["reports"][bound["key"]]["idempotency_request_hash"] = "0" * 64
+            save_live_validation_reports(contradictory, contradictory_path)
+            bytes_before = contradictory_path.read_bytes()
+            with self.assertRaisesRegex(LiveValidationStoreIntegrityError, "contradict each other"):
+                store_live_validation_report(
+                    valid,
+                    path=contradictory_path,
+                    idempotency_key="bound-request",
+                )
+            self.assertEqual(contradictory_path.read_bytes(), bytes_before)
+
+    def test_live_decision_and_snapshot_idempotency_reconcile_uncertain_commits(self) -> None:
+        valid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path = root / "reports.json"
+            decision_path = root / "decisions.json"
+            snapshot_path = root / "snapshots.json"
+            stored = store_live_validation_report(valid, path=report_path, label="decision source")
+            bundle = live_validation_report_review_bundle(stored["key"], path=report_path)
+            self.assertIsNotNone(bundle)
+
+            decision_args = {
+                "report_key": stored["key"],
+                "payload_hash": stored["payload_hash"],
+                "target_tier": "public_live_verified",
+                "decision": "rejected",
+                "reviewer_note": "External proof is still missing.",
+                "review_bundle_hash": bundle["review_bundle_hash"],
+                "reviewer": "production-operator",
+                "report_store_path": report_path,
+                "decision_path": decision_path,
+                "idempotency_key": "decision-2026-08-26-1",
+            }
+            with (
+                patch("polymarket.live_reports._fsync_parent_directory", side_effect=OSError("sync failed")),
+                self.assertRaises(LiveValidationStoreDurabilityError) as decision_error,
+            ):
+                record_live_validation_report_decision(**decision_args)
+            self.assertTrue(decision_error.exception.operation_key)
+            store_live_validation_report(
+                valid,
+                path=report_path,
+                label="later duplicate changes the review bundle",
+            )
+            with patch("polymarket.live_reports._fsync_parent_directory") as sync_parent:
+                decision_replay = record_live_validation_report_decision(**decision_args)
+            sync_parent.assert_called_once_with(decision_path)
+            self.assertTrue(decision_replay["idempotent_replay"])
+            self.assertEqual(len(load_live_validation_decisions(decision_path)["decisions"]), 1)
+
+            proposal = live_validation_coverage_promotion_proposal(
+                report_store_path=report_path,
+                decision_path=decision_path,
+            )
+            snapshot_args = {
+                "proposal": proposal,
+                "report_store_path": report_path,
+                "decision_path": decision_path,
+                "path": snapshot_path,
+                "source": "durability_test",
+                "label": "promotion snapshot",
+                "idempotency_key": "snapshot-2026-08-26-1",
+                "idempotency_request": {
+                    "target_tier": "",
+                    "source": "durability_test",
+                    "label": "promotion snapshot",
+                },
+            }
+            with (
+                patch("polymarket.live_reports._fsync_parent_directory", side_effect=OSError("sync failed")),
+                self.assertRaises(LiveValidationStoreDurabilityError) as snapshot_error,
+            ):
+                store_live_validation_coverage_promotion_proposal_snapshot(**snapshot_args)
+            self.assertTrue(snapshot_error.exception.operation_key)
+            with patch("polymarket.live_reports._fsync_parent_directory") as sync_parent:
+                snapshot_replay = store_live_validation_coverage_promotion_proposal_snapshot(**snapshot_args)
+            sync_parent.assert_called_once_with(snapshot_path)
+            self.assertTrue(snapshot_replay["idempotent_replay"])
+            self.assertEqual(
+                len(load_live_validation_promotion_proposal_snapshots(snapshot_path)["snapshots"]),
+                1,
+            )
+            snapshot_preflight = reconcile_live_validation_promotion_proposal_snapshot_idempotency(
+                idempotency_key=snapshot_args["idempotency_key"],
+                idempotency_request=snapshot_args["idempotency_request"],
+                report_store_path=report_path,
+                decision_path=decision_path,
+                path=snapshot_path,
+            )
+            self.assertIsNotNone(snapshot_preflight)
+            self.assertEqual(snapshot_preflight["key"], snapshot_replay["key"])
+
+            regenerated_proposal = json.loads(json.dumps(proposal))
+            regenerated_proposal.pop("proposal_hash", None)
+            regenerated_proposal["generated_at"] = int(regenerated_proposal.get("generated_at") or 0) + 60
+            regenerated_args = dict(snapshot_args)
+            regenerated_args["proposal"] = regenerated_proposal
+            regenerated_replay = store_live_validation_coverage_promotion_proposal_snapshot(**regenerated_args)
+            self.assertTrue(regenerated_replay["idempotent_replay"])
+            self.assertEqual(regenerated_replay["key"], snapshot_replay["key"])
+
+    def test_live_decision_keys_do_not_overwrite_same_clock_audit_entries(self) -> None:
+        valid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path = root / "reports.json"
+            decision_path = root / "decisions.json"
+            stored = store_live_validation_report(valid, path=report_path)
+            bundle = live_validation_report_review_bundle(stored["key"], path=report_path)
+            decision_args = {
+                "report_key": stored["key"],
+                "payload_hash": stored["payload_hash"],
+                "target_tier": "public_live_verified",
+                "decision": "rejected",
+                "reviewer_note": "Keep both operator audit events.",
+                "review_bundle_hash": bundle["review_bundle_hash"],
+                "report_store_path": report_path,
+                "decision_path": decision_path,
+            }
+            with (
+                patch("polymarket.live_reports._now", return_value=1_780_000_000),
+                patch("polymarket.live_reports.time.time_ns", return_value=123_456_789),
+            ):
+                first = record_live_validation_report_decision(**decision_args)
+                second = record_live_validation_report_decision(**decision_args)
+
+            self.assertNotEqual(first["key"], second["key"])
+            self.assertEqual(len(load_live_validation_decisions(decision_path)["decisions"]), 2)
+
+    def test_live_report_store_serializes_concurrent_process_writers(self) -> None:
+        worker_script = """
+import json
+import sys
+import time
+from pathlib import Path
+
+from polymarket.live_reports import store_live_validation_report
+
+target = Path(sys.argv[1])
+fixture = Path(sys.argv[2])
+start_flag = Path(sys.argv[3])
+label = sys.argv[4]
+while not start_flag.exists():
+    time.sleep(0.005)
+payload = json.loads(fixture.read_text(encoding="utf-8"))
+store_live_validation_report(
+    payload,
+    source="concurrent_process_test",
+    label=label,
+    path=target,
+    allow_duplicate=True,
+)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "reports.json"
+            start_flag = root / "start"
+            fixture = LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json"
+            processes = [
+                subprocess.Popen(
+                    [sys.executable, "-c", worker_script, str(target), str(fixture), str(start_flag), f"writer-{index}"],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for index in range(4)
+            ]
+            try:
+                start_flag.touch()
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=60)
+                    self.assertEqual(process.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=10)
+
+            listing = list_live_validation_reports(path=target)
+            self.assertEqual(listing["counts"]["entries"], len(processes))
+            self.assertEqual({entry["label"] for entry in listing["entries"]}, {f"writer-{index}" for index in range(4)})
 
     def test_analytics_cache_does_not_quarantine_a_directory_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,6 +924,42 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             ),
             (0.48, 0.52),
         )
+        self.assertEqual(
+            clob_rest.best_bid_ask_from_book(
+                {
+                    "bids": [{"price": "0.10"}, {"price": "0.47"}, {"price": "nan"}],
+                    "asks": [{"price": "0.90"}, {"price": "0.53"}, {"price": "inf"}],
+                }
+            ),
+            (0.47, 0.53),
+        )
+
+    def test_live_order_ids_require_supported_documented_hash_shapes(self) -> None:
+        uppercase_hash = "0x" + "A" * 64
+        self.assertEqual(extract_order_id({"orderID": uppercase_hash}), "0x" + "a" * 64)
+        self.assertEqual(extract_order_id({"orderID": "0x" + "b" * 40}), "0x" + "b" * 40)
+        for invalid in ("order-1", "1" * 64, "0x" + "g" * 64, "0x" + "1" * 63):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(extract_order_id({"orderID": invalid}), "")
+
+    def test_same_client_order_read_requires_a_success_list_schema(self) -> None:
+        class Reader:
+            def get_trading_account_address(self):
+                return "0x" + "1" * 40
+
+            def get_orders(self):
+                return {"error": "unauthorized"}
+
+        with self.assertRaisesRegex(ValueError, "documented list shape"):
+            _same_account_authenticated_read_preflight(Reader())
+
+        Reader.get_orders = lambda self: [{"orderID": "bad-id"}]
+        with self.assertRaisesRegex(ValueError, "invalid order record"):
+            _same_account_authenticated_read_preflight(Reader())
+
+        Reader.get_orders = lambda self: [{"orderID": CLOB_ORDER_ID}]
+        preflight, _ = _same_account_authenticated_read_preflight(Reader())
+        self.assertEqual(preflight["records_observed"], 1)
 
     def test_get_midpoint_accepts_dict_payload(self) -> None:
         with patch(HTTP_REQUEST, return_value=FakeResponse({"midpoint": "0.42"})) as mock_get:
@@ -491,17 +1205,16 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertIn("/withdraw", request_url(mock_post))
 
     def test_relayer_and_clob_auth_wrappers_require_explicit_credentials(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(RuntimeError, "CLOB V2"):
             relayer.submit_transaction({"from": "0xabc"}, {})
 
         relayer_headers = {"RELAYER_API_KEY": "key", "RELAYER_API_KEY_ADDRESS": "0xabc"}
-        with patch(HTTP_REQUEST, return_value=FakeResponse({"transactionID": "tx"})) as mock_post:
-            result = relayer.submit_transaction({"from": "0xabc"}, relayer_headers)
-        self.assertEqual(result, {"transactionID": "tx"})
-        self.assertIn("/submit", request_url(mock_post))
-        self.assertEqual(mock_post.call_args.kwargs["headers"]["RELAYER_API_KEY"], "key")
-        self.assertEqual(mock_post.call_args.kwargs["headers"]["RELAYER_API_KEY_ADDRESS"], "0xabc")
-        self.assertEqual(mock_post.call_args.kwargs["headers"]["Content-Type"], "application/json")
+        with (
+            patch(HTTP_REQUEST) as mock_post,
+            self.assertRaisesRegex(RuntimeError, "CLOB V2"),
+        ):
+            relayer.submit_transaction({"from": "0xabc"}, relayer_headers)
+        mock_post.assert_not_called()
 
         with self.assertRaises(ValueError):
             clob_auth.get_orders({})
@@ -529,10 +1242,10 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         with self.assertRaises(PolymarketValidationError):
             clob_rest.get_batch_price_history([str(i) for i in range(21)])
 
-        with self.assertRaises(PolymarketValidationError):
+        with self.assertRaisesRegex(RuntimeError, "CLOB V2"):
             clob_auth.post_orders(({"order": i} for i in range(16)), L2_HEADERS)
 
-        with self.assertRaises(PolymarketValidationError):
+        with self.assertRaisesRegex(RuntimeError, "CLOB V2"):
             clob_auth.cancel_orders((str(i) for i in range(3001)), L2_HEADERS)
 
     def test_shared_client_retries_transient_public_reads_and_raises_rate_limit(self) -> None:
@@ -552,12 +1265,16 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         mock_sleep.assert_called_once()
 
     def test_shared_client_sets_identifying_json_headers_by_default(self) -> None:
-        with patch(HTTP_REQUEST, return_value=FakeResponse({"time": 123})) as mock_request:
+        response = FakeResponse({"time": 123})
+        with patch(HTTP_REQUEST, return_value=response) as mock_request:
             self.assertEqual(clob_rest.get_server_time(timeout=1), {"time": 123})
 
         headers = mock_request.call_args.kwargs["headers"]
         self.assertEqual(headers["User-Agent"], "market-sentinel/1.0")
         self.assertEqual(headers["Accept"], "application/json")
+        self.assertFalse(mock_request.call_args.kwargs["allow_redirects"])
+        self.assertTrue(mock_request.call_args.kwargs["stream"])
+        self.assertTrue(response.closed)
 
         with (
             patch("polymarket.http_client.time.sleep"),
@@ -572,6 +1289,25 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             with self.assertRaises(PolymarketRateLimitError) as ctx:
                 clob_rest.get_server_time(timeout=1)
         self.assertEqual(ctx.exception.status_code, 429)
+
+    def test_shared_client_rejects_redirects_private_urls_and_oversized_bodies(self) -> None:
+        redirect = FakeResponse({}, status_code=302, headers={"Location": "https://example.test/next"})
+        with patch(HTTP_REQUEST, return_value=redirect):
+            with self.assertRaisesRegex(PolymarketHTTPError, "redirects are disabled"):
+                clob_rest.get_server_time(timeout=1)
+        self.assertTrue(redirect.closed)
+
+        private_endpoint = PolymarketEndpoint("fixture", "GET", "/data", "https://127.0.0.1")
+        with patch(HTTP_REQUEST) as request:
+            with self.assertRaises(PolymarketValidationError):
+                http_client.request_json(private_endpoint)
+        request.assert_not_called()
+
+        oversized = FakeResponse({}, content=b"123456789")
+        with patch.object(http_client, "MAX_RESPONSE_BYTES", 8), patch(HTTP_REQUEST, return_value=oversized):
+            with self.assertRaisesRegex(PolymarketHTTPError, "response limit"):
+                clob_rest.get_server_time(timeout=1)
+        self.assertTrue(oversized.closed)
 
     def test_clob_auth_readiness_distinguishes_sdk_l1_and_l2_auth(self) -> None:
         env = {
@@ -640,6 +1376,9 @@ class PolymarketApiWrapperTests(unittest.TestCase):
                 size="1",
                 allow_token_ids=["token-1"],
                 private_key="0x" + "1" * 64,
+                api_key="explicit-api-key",
+                api_secret="explicit-api-secret",
+                api_passphrase="explicit-api-passphrase",
                 cancel_immediately=True,
             )
         )
@@ -647,8 +1386,37 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(plan["status"], "dry_run")
         self.assertFalse(plan["live_action"])
         self.assertEqual(plan["redacted_credentials"]["private_key"], "***")
+        self.assertEqual(plan["redacted_credentials"]["explicit_api_credentials"], "***")
         self.assertNotIn("1" * 64, str(plan))
-        self.assertIn("Place one GTC limit order", " ".join(plan["transcript"]))
+        self.assertNotIn("explicit-api-key", str(plan))
+        self.assertNotIn("explicit-api-secret", str(plan))
+        self.assertNotIn("explicit-api-passphrase", str(plan))
+        self.assertFalse(plan["execution_supported"])
+        self.assertIn("CLOB V2", " ".join(plan["transcript"]))
+
+    def test_live_order_cancel_harness_fails_closed_before_any_transport_for_v2_migration(self) -> None:
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=lambda _cfg: self.fail("legacy trader must never be created"),
+            orderbook_getter=lambda _token: self.fail("orderbook preflight must not imply executable support"),
+            geoblock_checker=lambda: self.fail("geoblock must not be reached"),
+            recovery_writer=lambda _payload: self.fail("journal must not be touched"),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["live_action"])
+        self.assertFalse(result["execution_supported"])
+        self.assertIn("CLOB V2", " ".join(result["blockers"]))
 
     def test_live_order_cancel_harness_blocks_missing_allow_list_confirmation_and_caps(self) -> None:
         plan = build_live_order_cancel_plan(
@@ -669,22 +1437,107 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertIn("Missing token allow-list", blockers)
         self.assertIn("confirm-live-order-cancel", blockers)
 
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
     def test_live_order_cancel_harness_executes_place_cancel_and_post_cancel_verification(self) -> None:
-        class FakeTrader:
-            def __init__(self, _cfg):
+        placed_calls: list[dict[str, object]] = []
+        journal_entries: list[dict[str, object]] = []
+        trader_configs: list[TraderConfig] = []
+
+        class FakeTrader(LiveHarnessTraderSupport):
+            def __init__(self, cfg):
                 self.calls = []
+                trader_configs.append(cfg)
 
             def place_limit_order(self, **kwargs):
                 self.calls.append(("place", kwargs))
-                return {"orderID": "order-1", "status": "live", "api_key": "secret"}
+                placed_calls.append(dict(kwargs))
+                return {
+                    "orderID": CLOB_ORDER_ID,
+                    "status": "live",
+                    "api_key": "placed-api-secret",
+                    "message": "placed-generic-secret",
+                }
 
             def cancel_order(self, order_id):
                 self.calls.append(("cancel", order_id))
-                return {"canceled": [order_id], "not_canceled": {}}
+                return {
+                    "canceled": [order_id],
+                    "not_canceled": {},
+                    "detail": "cancel-generic-secret",
+                }
 
             def get_order(self, order_id):
                 self.calls.append(("get", order_id))
-                return {"id": order_id, "status": "ORDER_STATUS_CANCELED"}
+                return {
+                    "id": order_id,
+                    "status": "ORDER_STATUS_CANCELED",
+                    "size_matched": "0",
+                    "associate_trades": [],
+                    "message": "post-cancel-generic-secret",
+                }
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                api_key="explicit-api-key",
+                api_secret="explicit-api-secret",
+                api_passphrase="explicit-api-passphrase",
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=FakeTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda payload: journal_entries.append(dict(payload)),
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["live_action"])
+        self.assertTrue(result["audit"]["post_cancel_verified"])
+        self.assertFalse(result["manual_reconciliation_required"])
+        self.assertEqual(
+            set(result["audit"]["placed"]),
+            {"orderID", "order_id_present", "response_received"},
+        )
+        self.assertNotIn("api_key", result["audit"]["placed"])
+        self.assertNotIn("placed-api-secret", str(result))
+        self.assertNotIn("placed-generic-secret", str(result))
+        self.assertNotIn("cancel-generic-secret", str(result))
+        self.assertNotIn("post-cancel-generic-secret", str(result))
+        self.assertTrue(placed_calls[0]["post_only"])
+        self.assertEqual(placed_calls[0]["tif"], "GTC")
+        self.assertEqual(trader_configs[0].api_key, "explicit-api-key")
+        self.assertEqual(trader_configs[0].api_secret, "explicit-api-secret")
+        self.assertEqual(trader_configs[0].api_passphrase, "explicit-api-passphrase")
+        self.assertNotIn("explicit-api-secret", str(result))
+        self.assertTrue(result["account_preflight"]["sufficient_allowance"])
+        self.assertEqual(
+            [entry["stage"] for entry in journal_entries],
+            ["placement_pending", "order_placed_reconcile_required", "cancel_verified"],
+        )
+        self.assertTrue(result["audit"]["recovery_journal"]["resolved"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_does_not_capture_unsafe_order_identifiers(self) -> None:
+        class UnsafeIdentifierTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {
+                    "orderID": "unsafe order id with secret material",
+                    "message": "generic-upstream-secret",
+                    "nested": [{"detail": "nested-upstream-secret"}],
+                }
+
+            def cancel_order(self, _order_id):
+                raise AssertionError("an unsafe order identifier must never be sent back to the venue")
 
         result = run_live_order_cancel_verification(
             LiveOrderCancelRequest(
@@ -698,15 +1551,152 @@ class PolymarketApiWrapperTests(unittest.TestCase):
                 cancel_immediately=True,
                 confirmation=CONFIRM_LIVE_ORDER_CANCEL,
             ),
-            trader_factory=FakeTrader,
+            trader_factory=UnsafeIdentifierTrader,
             orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
         )
 
-        self.assertEqual(result["status"], "ok")
-        self.assertTrue(result["live_action"])
-        self.assertTrue(result["audit"]["post_cancel_verified"])
-        self.assertEqual(result["audit"]["placed"]["api_key"], "***")
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertEqual(result["audit"]["order_id"], "")
+        self.assertEqual(
+            result["audit"]["placed"],
+            {"orderID": "", "order_id_present": False, "response_received": True},
+        )
+        self.assertNotIn("generic-upstream-secret", str(result))
+        self.assertNotIn("nested-upstream-secret", str(result))
+        self.assertNotIn("unsafe order id", str(result))
 
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_preserves_order_identity_when_cancel_fails(self) -> None:
+        class CancelFailureTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live", "api_key": "secret"}
+
+            def cancel_order(self, _order_id):
+                raise RuntimeError("secret-bearing upstream error")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=CancelFailureTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertEqual(result["audit"]["order_id"], CLOB_ORDER_ID)
+        self.assertEqual(result["audit"]["cancel_error"], {"type": "RuntimeError"})
+        self.assertNotIn("api_key", result["audit"]["placed"])
+        self.assertNotIn("secret-bearing", str(result))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_preserves_cancel_ack_when_post_read_fails(self) -> None:
+        class PostReadFailureTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, order_id):
+                return {"canceled": [order_id]}
+
+            def get_order(self, _order_id):
+                raise TimeoutError("upstream token must not be copied")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=PostReadFailureTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertEqual(result["audit"]["order_id"], CLOB_ORDER_ID)
+        self.assertEqual(result["audit"]["cancel"]["canceled"], [CLOB_ORDER_ID])
+        self.assertTrue(result["audit"]["cancel"]["order_acknowledged"])
+        self.assertEqual(result["audit"]["post_cancel_error"], {"type": "TimeoutError"})
+        self.assertNotIn("upstream token", str(result))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_rejects_ambiguous_terminal_states_and_generic_ack(self) -> None:
+        class AmbiguousTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg, cancel_payload, post_cancel_payload):
+                self.cancel_payload = cancel_payload
+                self.post_cancel_payload = post_cancel_payload
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, _order_id):
+                return self.cancel_payload
+
+            def get_order(self, _order_id):
+                return self.post_cancel_payload
+
+        cases = (
+            ({"success": True}, {"id": CLOB_ORDER_ID, "status": "ORDER_STATUS_CANCELED"}),
+            ({"canceled": [CLOB_ORDER_ID]}, {"id": CLOB_ORDER_ID, "status": "DONE", "open": False}),
+            ({"canceled": [CLOB_ORDER_ID]}, {"id": OTHER_CLOB_ORDER_ID, "status": "ORDER_STATUS_CANCELED"}),
+        )
+        for cancel_response, post_cancel_response in cases:
+            with self.subTest(cancel=cancel_response, post_cancel=post_cancel_response):
+                result = run_live_order_cancel_verification(
+                    LiveOrderCancelRequest(
+                        token_id="token-1",
+                        side="BUY",
+                        price="0.01",
+                        size="1",
+                        allow_token_ids=["token-1"],
+                        private_key="0x" + "1" * 64,
+                        execute=True,
+                        cancel_immediately=True,
+                        confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+                    ),
+                    trader_factory=lambda cfg, cancel=cancel_response, post=post_cancel_response: AmbiguousTrader(
+                        cfg, cancel, post
+                    ),
+                    orderbook_getter=lambda _token_id: {
+                        "bids": [{"price": "0.02"}],
+                        "asks": [{"price": "0.04"}],
+                    },
+                    geoblock_checker=allowed_geoblock,
+                    recovery_writer=lambda _payload: None,
+                )
+
+                self.assertEqual(result["status"], "failed")
+                self.assertFalse(result["audit"]["post_cancel_verified"])
+                self.assertTrue(result["manual_reconciliation_required"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
     def test_live_order_cancel_harness_blocks_market_taking_price_before_execution(self) -> None:
         class UnexpectedTrader:
             def __init__(self, _cfg):
@@ -726,10 +1716,198 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             ),
             trader_factory=UnexpectedTrader,
             orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
         )
 
         self.assertEqual(result["status"], "blocked")
         self.assertIn("best ask", " ".join(result["blockers"]))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_blocks_one_base_unit_below_required_allowance(self) -> None:
+        class InsufficientAllowanceTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def get_trading_balance_allowance(self, **_kwargs):
+                return {"balance": "10000", "allowances": {"exchange": "9999"}}
+
+            def place_limit_order(self, **_kwargs):
+                raise AssertionError("placement must not run with insufficient allowance")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=InsufficientAllowanceTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda _payload: None,
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["account_preflight"]["required_base_units"], 10000)
+        self.assertTrue(result["account_preflight"]["sufficient_balance"])
+        self.assertFalse(result["account_preflight"]["sufficient_allowance"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_blocks_funded_execution_without_recovery_writer(self) -> None:
+        class UnexpectedTrader:
+            def __init__(self, _cfg):
+                raise AssertionError("trader must not be created without a recovery writer")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=UnexpectedTrader,
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["live_action"])
+        self.assertIn("recovery journal writer", " ".join(result["blockers"]))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_blocks_geographically_ineligible_execution(self) -> None:
+        class UnexpectedTrader:
+            def __init__(self, _cfg):
+                raise AssertionError("trader must not be created when geoblocked")
+
+        journal_entries: list[dict[str, object]] = []
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=UnexpectedTrader,
+            geoblock_checker=lambda: {"blocked": True, "country": "XX"},
+            recovery_writer=lambda payload: journal_entries.append(dict(payload)),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["live_action"])
+        self.assertEqual(journal_entries, [])
+        self.assertIn("blocked=false", " ".join(result["blockers"]))
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_rejects_partial_fill_after_cancel(self) -> None:
+        class PartiallyFilledTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, order_id):
+                return {"canceled": [order_id], "not_canceled": {}}
+
+            def get_order(self, order_id):
+                return {
+                    "id": order_id,
+                    "status": "ORDER_STATUS_CANCELED",
+                    "size_matched": "0.5",
+                    "associate_trades": ["trade-1"],
+                }
+
+        journal_entries: list[dict[str, object]] = []
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=PartiallyFilledTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=lambda payload: journal_entries.append(dict(payload)),
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertFalse(result["audit"]["zero_fill_evidence"]["verified"])
+        self.assertEqual(journal_entries[-1]["stage"], "cancel_incomplete")
+        self.assertFalse(journal_entries[-1]["resolved"])
+
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
+    def test_live_order_cancel_harness_fails_when_final_recovery_resolution_write_fails(self) -> None:
+        class SuccessfulTrader(LiveHarnessTraderSupport):
+            def __init__(self, _cfg):
+                pass
+
+            def place_limit_order(self, **_kwargs):
+                return {"orderID": CLOB_ORDER_ID, "status": "live"}
+
+            def cancel_order(self, order_id):
+                return {"canceled": [order_id], "not_canceled": {}}
+
+            def get_order(self, order_id):
+                return {
+                    "id": order_id,
+                    "status": "ORDER_STATUS_CANCELED",
+                    "size_matched": "0",
+                    "associate_trades": [],
+                }
+
+        journal_entries: list[dict[str, object]] = []
+
+        def write_recovery(payload):
+            journal_entries.append(dict(payload))
+            if payload["stage"] == "cancel_verified":
+                raise OSError("durability failure")
+
+        result = run_live_order_cancel_verification(
+            LiveOrderCancelRequest(
+                token_id="token-1",
+                side="BUY",
+                price="0.01",
+                size="1",
+                allow_token_ids=["token-1"],
+                private_key="0x" + "1" * 64,
+                execute=True,
+                cancel_immediately=True,
+                confirmation=CONFIRM_LIVE_ORDER_CANCEL,
+            ),
+            trader_factory=SuccessfulTrader,
+            orderbook_getter=lambda _token_id: {"bids": [{"price": "0.02"}], "asks": [{"price": "0.04"}]},
+            geoblock_checker=allowed_geoblock,
+            recovery_writer=write_recovery,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["manual_reconciliation_required"])
+        self.assertTrue(result["audit"]["post_cancel_verified"])
+        self.assertEqual(result["audit"]["recovery_journal_error"], {"type": "OSError"})
+        self.assertEqual(result["audit"]["recovery_journal"]["status"], "unresolved")
+        self.assertFalse(result["audit"]["recovery_journal"]["resolved"])
 
     def test_live_validation_stage_gates_require_authenticated_read_before_funded(self) -> None:
         report = {
@@ -747,11 +1925,26 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertFalse(gates["safe_to_attempt_funded_order"])
         self.assertIn("authenticated read", gates["next_step"])
 
-        report["authenticated_read_checks"]["clob_l2_orders"] = {"status": "ok"}
+        report["authenticated_read_checks"] = {
+            "py_clob_client_credentials": {"status": "ok", "detail": "credentials derived"}
+        }
+        gates = build_live_validation_stage_gates(report)
+
+        self.assertFalse(gates["credentialed_read_ok"])
+        self.assertEqual(gates["accepted_credential_read_checks"], [])
+        self.assertEqual(accepted_credential_read_checks(report["authenticated_read_checks"]), [])
+
+        report["authenticated_read_checks"]["clob_l2_orders"] = {
+            "status": "ok",
+            "semantic_check": "authenticated_order_collection",
+            "records_observed": 0,
+        }
         gates = build_live_validation_stage_gates(report)
 
         self.assertTrue(gates["credentialed_read_ok"])
-        self.assertTrue(gates["safe_to_attempt_funded_order"])
+        self.assertFalse(gates["safe_to_attempt_funded_order"])
+        self.assertIn("CLOB V2", gates["next_step"])
+        self.assertEqual(gates["accepted_credential_read_checks"], ["clob_l2_orders"])
 
     def test_live_report_promotion_requires_concrete_authenticated_read_evidence(self) -> None:
         claimed_report = {
@@ -773,25 +1966,52 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertIn("no accepted authenticated-read evidence", " ".join(promotion["blocked_reasons"]))
 
         verified_report = {
+            "ok": True,
             "mode": "strict_cli",
-            "authenticated_read_checks": {
-                "clob_l2_orders": {
-                    "status": "ok",
-                    "detail": "Authenticated CLOB order list responded.",
-                    "sample_type": "dict",
-                }
-            },
+            "source_provenance": clean_source_provenance(),
+            "public_checks": successful_live_public_checks(),
+            "authenticated_read_checks": accepted_live_authenticated_reads(),
             "funded_live_order_check": {"status": "blocked"},
         }
         verified = live_validation_report_summary(verified_report)
 
-        self.assertEqual(verified["credential_live_verified"], "yes")
+        self.assertEqual(verified["credential_live_verified"], "candidate_only")
+        self.assertFalse(verified["verification_promotion"]["attested_workflow_verified"])
         self.assertTrue(verified["can_promote_credential_live_verified"])
         self.assertEqual(
             verified["verification_promotion"]["credential_evidence"][0]["check"],
             "clob_l2_orders",
         )
 
+        dirty_report = json.loads(json.dumps(verified_report))
+        dirty_report["source_provenance"].update(
+            {"source_revision": "", "initial_clean": False, "final_clean": False, "stable": False}
+        )
+        dirty = live_validation_report_promotion(dirty_report)
+
+        self.assertEqual(dirty["credential_live_verified"], "blocked")
+        self.assertFalse(dirty["source_provenance_verified"])
+        self.assertIn("clean initial/final source revisions", " ".join(dirty["blocked_reasons"]))
+
+        invalid_public = json.loads(json.dumps(verified_report))
+        invalid_public["public_checks"]["clob_time"]["semantic_check"] = "mere_http_200"
+        self.assertFalse(
+            live_validation_report_promotion(invalid_public)["can_promote_credential_live_verified"]
+        )
+
+        for field, bad_value in (
+            ("semantic_check", "generic_collection"),
+            ("records_observed", -1),
+            ("records_observed", True),
+        ):
+            with self.subTest(credential_field=field, bad_value=bad_value):
+                invalid_read = json.loads(json.dumps(verified_report))
+                invalid_read["authenticated_read_checks"]["clob_l2_orders"][field] = bad_value
+                self.assertFalse(
+                    live_validation_report_promotion(invalid_read)["can_promote_credential_live_verified"]
+                )
+
+    @patch("polymarket.live_reports.POLYMARKET_LIVE_MUTATIONS_SUPPORTED", True)
     def test_live_report_promotion_requires_funded_order_cancel_audit_evidence(self) -> None:
         dry_run_report = {
             "mode": "strict_cli",
@@ -808,24 +2028,108 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertFalse(dry_run["can_promote_funded_live_verified"])
 
         funded_report = {
+            "ok": True,
             "mode": "strict_cli",
+            "source_provenance": clean_source_provenance(),
+            "public_checks": successful_live_public_checks(),
+            "authenticated_read_checks": accepted_live_authenticated_reads(),
             "funded_live_order_check": {
                 "status": "ok",
                 "live_action": True,
+                "manual_reconciliation_required": False,
+                **funded_live_safety_evidence(),
                 "audit": {
-                    "order_id": "order-1",
-                    "placed": {"status": "live"},
-                    "cancel": {"canceled": ["order-1"]},
-                    "post_cancel_order": {"status": "ORDER_STATUS_CANCELED"},
+                    "order_id": CLOB_ORDER_ID,
+                    "placed": {"orderID": CLOB_ORDER_ID, "status": "live"},
+                    "cancel": {"canceled": [CLOB_ORDER_ID]},
+                    "post_cancel_order": {
+                        "id": CLOB_ORDER_ID,
+                        "status": "ORDER_STATUS_CANCELED",
+                        "size_matched": "0",
+                        "associate_trades": [],
+                    },
+                    "zero_fill_evidence": {
+                        "verified": True,
+                        "order_identity_matches": True,
+                        "size_matched_zero": True,
+                        "associated_trades_empty": True,
+                    },
+                    "recovery_journal": {
+                        "status": "resolved",
+                        "stage": "cancel_verified",
+                        "resolved": True,
+                    },
                     "post_cancel_verified": True,
                 },
             },
         }
         funded = live_validation_report_summary(funded_report)
 
-        self.assertEqual(funded["funded_live_verified"], "yes")
+        self.assertEqual(funded["funded_live_verified"], "candidate_only")
+        self.assertEqual(funded["verification_promotion"]["evidence_trust"], "local_unattested_candidate")
         self.assertTrue(funded["can_promote_funded_live_verified"])
-        self.assertEqual(funded["verification_promotion"]["funded_evidence"][0]["check"], "funded_order_cancel")
+        self.assertTrue(funded["verification_promotion"]["funded_evidence"])
+
+        no_same_run_read = json.loads(json.dumps(funded_report))
+        no_same_run_read.pop("authenticated_read_checks")
+        rejected_missing_read = live_validation_report_promotion(no_same_run_read)
+        self.assertEqual(rejected_missing_read["funded_live_verified"], "blocked")
+        self.assertFalse(rejected_missing_read["can_promote_funded_live_verified"])
+        self.assertIn("authenticated-read evidence", " ".join(rejected_missing_read["blocked_reasons"]))
+
+        for cancel_payload, post_cancel_payload in (
+            ({"success": True}, {"id": CLOB_ORDER_ID, "status": "ORDER_STATUS_CANCELED"}),
+            ({"canceled": [CLOB_ORDER_ID]}, {"id": CLOB_ORDER_ID, "status": "DONE", "open": False}),
+        ):
+            with self.subTest(cancel=cancel_payload, post_cancel=post_cancel_payload):
+                ambiguous = json.loads(json.dumps(funded_report))
+                ambiguous["funded_live_order_check"]["audit"]["cancel"] = cancel_payload
+                ambiguous["funded_live_order_check"]["audit"]["post_cancel_order"] = post_cancel_payload
+                rejected = live_validation_report_promotion(ambiguous)
+                self.assertEqual(rejected["funded_live_verified"], "blocked")
+                self.assertFalse(rejected["can_promote_funded_live_verified"])
+
+        safety_mutations = (
+            (("account_authenticated_read_preflight", "same_trading_client"), False),
+            (("account_authenticated_read_preflight", "account_identity_present"), False),
+            (("account_preflight", "sufficient_balance"), False),
+            (("account_preflight", "sufficient_allowance"), False),
+            (("execution_guards", "post_only"), False),
+            (("execution_guards", "time_in_force"), "FOK"),
+            (("execution_guards", "maker_price_verified"), False),
+            (("geoblock_preflight", "blocked"), True),
+            (("source_revision_gate", "clean"), False),
+            (("source_revision_gate", "matches_initial_revision"), False),
+            (("source_revision_gate", "source_revision"), "b" * 40),
+            (("source_revision_gate", "repository_origin"), "github.com/example/fork"),
+            (("audit", "recovery_journal", "resolved"), False),
+            (("audit", "recovery_journal", "stage"), "cancel_incomplete"),
+            (("audit", "post_cancel_order", "size_matched"), "0.1"),
+            (("audit", "post_cancel_order", "associate_trades"), ["trade-1"]),
+            (("audit", "placed", "orderID"), OTHER_CLOB_ORDER_ID),
+        )
+        for path, bad_value in safety_mutations:
+            with self.subTest(funded_field=".".join(path), bad_value=bad_value):
+                invalid = json.loads(json.dumps(funded_report))
+                target = invalid["funded_live_order_check"]
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = bad_value
+                rejected = live_validation_report_promotion(invalid)
+                self.assertEqual(rejected["funded_live_verified"], "blocked")
+                self.assertFalse(rejected["can_promote_funded_live_verified"])
+
+    def test_live_report_promotion_blocks_funded_candidate_until_v2_is_supported(self) -> None:
+        report = json.loads(
+            (LIVE_REPORT_FIXTURE_ROOT / "valid_funded_audit.json").read_text(encoding="utf-8")
+        )
+
+        promotion = live_validation_report_promotion(report)
+
+        self.assertEqual(promotion["funded_live_verified"], "blocked")
+        self.assertFalse(promotion["can_promote_funded_live_verified"])
+        self.assertEqual(promotion["funded_evidence"], [])
+        self.assertIn("CLOB V2", " ".join(promotion["blocked_reasons"]))
 
     def test_live_report_promotion_blocks_local_runbook_and_browser_smoke_reports(self) -> None:
         for mode in ("local_readiness_only", "credential_runbook_no_funded_actions", "browser_smoke", "browser_smoke_seed"):
@@ -856,8 +2160,11 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             path = Path(tmp) / "reports.json"
             store_live_validation_report(
                 {
+                    "ok": True,
                     "mode": "strict_cli",
-                    "authenticated_read_checks": {"user_websocket_connect": {"status": "ok", "detail": "connected"}},
+                    "source_provenance": clean_source_provenance(),
+                    "public_checks": successful_live_public_checks(),
+                    "authenticated_read_checks": accepted_live_authenticated_reads(),
                     "funded_live_order_check": {"status": "dry_run", "live_action": False},
                     "stage_gates": {
                         "credentialed_read_ok": True,
@@ -902,7 +2209,8 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             inventory = live_validation_report_promotion_inventory(path=path)
 
         self.assertFalse(inventory["static_coverage_mutated"])
-        self.assertEqual(inventory["credential_live_verified"], "yes")
+        self.assertEqual(inventory["credential_live_verified"], "candidate_only")
+        self.assertFalse(inventory["attested_workflow_verified"])
         self.assertEqual(inventory["funded_live_verified"], "blocked")
         self.assertEqual(inventory["counts"]["credential_candidates"], 1)
         self.assertEqual(inventory["counts"]["funded_candidates"], 0)
@@ -940,8 +2248,8 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_browser_smoke.json").read_text(encoding="utf-8"))
         )
 
-        self.assertEqual(credentialed["credential_live_verified"], "yes")
-        self.assertEqual(funded["funded_live_verified"], "yes")
+        self.assertEqual(credentialed["credential_live_verified"], "candidate_only")
+        self.assertEqual(funded["funded_live_verified"], "blocked")
         self.assertEqual(dry_run["funded_live_verified"], "blocked")
         self.assertEqual(runbook["credential_live_verified"], "blocked")
         self.assertEqual(browser["credential_live_verified"], "blocked")
@@ -1495,8 +2803,8 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         credentialed = result["entries"][0]
         funded = result["entries"][1]
         invalid = result["entries"][2]
-        self.assertEqual(credentialed["summary"]["credential_live_verified"], "yes")
-        self.assertEqual(funded["summary"]["funded_live_verified"], "yes")
+        self.assertEqual(credentialed["summary"]["credential_live_verified"], "candidate_only")
+        self.assertEqual(funded["summary"]["funded_live_verified"], "blocked")
         self.assertFalse(invalid["schema_validation"]["ok"])
         self.assertIn("non-empty string mode", " ".join(invalid["schema_validation"]["errors"]))
         for entry in result["entries"]:
@@ -1663,12 +2971,22 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(sports_ws_url(), "wss://sports-api.polymarket.com/ws")
 
     def test_user_websocket_probe_sends_subscription_and_redacts_result(self) -> None:
+        call_order = []
+
         class FakeConnection:
             def __init__(self) -> None:
                 self.sent = []
                 self.closed = False
 
+            def getstatus(self) -> int:
+                call_order.append("status")
+                return 101
+
+            def settimeout(self, timeout: float) -> None:
+                self.read_timeout = timeout
+
             def send(self, message: str) -> None:
+                call_order.append("send")
                 self.sent.append(message)
 
             def recv(self) -> str:
@@ -1679,9 +2997,9 @@ class PolymarketApiWrapperTests(unittest.TestCase):
 
         connections = []
 
-        def factory(url, timeout):
+        def factory(url, *, timeout, redirect_limit):
             conn = FakeConnection()
-            connections.append((url, timeout, conn))
+            connections.append((url, timeout, redirect_limit, conn))
             return conn
 
         result = probe_user_websocket(
@@ -1692,11 +3010,14 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         )
 
         self.assertEqual(connections[0][0], user_ws_url())
-        self.assertEqual(connections[0][1], 4)
+        self.assertEqual(connections[0][1], 4.0)
+        self.assertEqual(connections[0][2], 0)
+        self.assertEqual(connections[0][3].read_timeout, 4.0)
         self.assertTrue(result["connected"])
         self.assertTrue(result["subscription_sent"])
-        self.assertTrue(connections[0][2].closed)
-        subscription = json.loads(connections[0][2].sent[0])
+        self.assertTrue(connections[0][3].closed)
+        self.assertEqual(call_order[0], "status")
+        subscription = json.loads(connections[0][3].sent[0])
         self.assertEqual(subscription["markets"], ["condition-1"])
         self.assertEqual(subscription["auth"]["secret"], "secret-value")
         self.assertNotIn("secret-value", str(result))
@@ -1705,6 +3026,12 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         class SilentConnection:
             def __init__(self) -> None:
                 self.closed = False
+
+            def getstatus(self) -> int:
+                return 101
+
+            def settimeout(self, _timeout: float) -> None:
+                return None
 
             def send(self, message: str) -> None:
                 return None
@@ -1727,40 +3054,87 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(result["message_sample_type"], "")
         self.assertTrue(connection.closed)
 
-    def test_market_websocket_dispatches_valid_messages_and_queues_subscription_changes(self) -> None:
-        events = []
-        created = []
-
-        class FakeThread:
-            def __init__(self, *args, **kwargs) -> None:
-                return None
-
-            def start(self) -> None:
-                return None
-
-        class FakeWebSocketApp:
-            def __init__(self, url, *, on_open, on_message, on_error, on_close) -> None:
-                self.url = url
+    def test_user_websocket_probe_rejects_redirect_before_forwarding_auth(self) -> None:
+        class RedirectConnection:
+            def __init__(self) -> None:
                 self.sent = []
-                self._on_open = on_open
-                self._on_message = on_message
-                self._on_error = on_error
-                self._on_close = on_close
-                created.append(self)
+                self.closed = False
+
+            def getstatus(self) -> int:
+                return 302
 
             def send(self, message: str) -> None:
                 self.sent.append(message)
 
             def close(self) -> None:
-                return None
+                self.closed = True
 
-            def run_forever(self) -> None:
-                self._on_open(self)
-                self._on_message(self, "PING")
-                self._on_message(self, '{"event":"book"}')
-                self._on_message(self, "not-json")
-                self._on_error(self, RuntimeError("test error"))
-                self._on_close(self, 1000, "normal")
+        connection = RedirectConnection()
+        factory_calls = []
+
+        def factory(url, *, timeout, redirect_limit):
+            factory_calls.append((url, timeout, redirect_limit))
+            return connection
+
+        with self.assertRaisesRegex(
+            ws_transport.WebSocketTransportError,
+            "HTTP 302",
+        ):
+            probe_user_websocket(
+                {
+                    "apiKey": "key",
+                    "secret": "must-not-be-forwarded",
+                    "passphrase": "pass",
+                },
+                ["condition-1"],
+                connection_factory=factory,
+            )
+
+        self.assertEqual(factory_calls[0][2], 0)
+        self.assertEqual(connection.sent, [])
+        self.assertTrue(connection.closed)
+
+    def test_market_websocket_dispatches_and_syncs_canonical_subscriptions(self) -> None:
+        events = []
+        created = []
+        connected_states = []
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.sent = []
+                self.closed = False
+                self.read_timeout = None
+                self.recv_count = 0
+
+            def getstatus(self) -> int:
+                return 101
+
+            def settimeout(self, timeout: float) -> None:
+                self.read_timeout = timeout
+
+            def send(self, message: str) -> None:
+                self.sent.append(message)
+
+            def recv(self) -> str:
+                self.recv_count += 1
+                if self.recv_count == 1:
+                    connected_states.append(client.is_connected)
+                    client.subscribe(["asset-2"])
+                    client.unsubscribe(["asset-1"])
+                    return "PING"
+                if self.recv_count == 2:
+                    return '{"event":"book"}'
+                if self.recv_count == 3:
+                    return "not-json"
+                return ""
+
+            def close(self) -> None:
+                self.closed = True
+
+        def factory(url, *, timeout, redirect_limit):
+            connection = FakeConnection()
+            created.append((url, timeout, redirect_limit, connection))
+            return connection
 
         client = ws_market.MarketWSClient(
             ["asset-1"],
@@ -1768,31 +3142,43 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             custom_feature_enabled=True,
             url_base="wss://example.test/base/",
         )
-        with patch.object(ws_market, "WebSocketApp", FakeWebSocketApp), patch.object(
-            ws_market.threading, "Thread", FakeThread
-        ):
+        with patch.object(ws_market, "create_connection", factory):
             client._connect_once()
 
-        self.assertEqual(created[0].url, "wss://example.test/base/ws/market")
-        self.assertEqual(json.loads(created[0].sent[0]), {
-            "assets_ids": ["asset-1"],
-            "type": "market",
-            "custom_feature_enabled": True,
-        })
+        connection = created[0][3]
+        self.assertEqual(created[0][0], "wss://example.test/base/ws/market")
+        self.assertEqual(created[0][1], ws_transport.WEBSOCKET_CONNECT_TIMEOUT_SECONDS)
+        self.assertEqual(created[0][2], 0)
+        self.assertEqual(connection.read_timeout, ws_transport.WEBSOCKET_IO_TIMEOUT_SECONDS)
+        self.assertEqual(
+            json.loads(connection.sent[0]),
+            {
+                "assets_ids": ["asset-1"],
+                "type": "market",
+                "custom_feature_enabled": True,
+            },
+        )
+        self.assertEqual(connection.sent[1], "PING")
+        self.assertEqual(
+            json.loads(connection.sent[2]),
+            {
+                "assets_ids": ["asset-1"],
+                "operation": "unsubscribe",
+                "custom_feature_enabled": True,
+            },
+        )
+        self.assertEqual(
+            json.loads(connection.sent[3]),
+            {
+                "assets_ids": ["asset-2"],
+                "operation": "subscribe",
+                "custom_feature_enabled": True,
+            },
+        )
         self.assertEqual(events, [{"event": "book"}])
-
-        client.subscribe(["asset-2"])
-        self.assertEqual(json.loads(client._outbox.get_nowait()), {
-            "assets_ids": ["asset-2"],
-            "operation": "subscribe",
-            "custom_feature_enabled": True,
-        })
-        client.unsubscribe(["asset-1"])
-        self.assertEqual(json.loads(client._outbox.get_nowait()), {
-            "assets_ids": ["asset-1"],
-            "operation": "unsubscribe",
-            "custom_feature_enabled": True,
-        })
+        self.assertEqual(connected_states, [True])
+        self.assertFalse(client.is_connected)
+        self.assertTrue(connection.closed)
         self.assertEqual(client._token_ids, {"asset-2"})
 
     def test_user_and_sports_websocket_clients_dispatch_events_and_protocol_pings(self) -> None:
@@ -1800,51 +3186,54 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         sports_events = []
         user_created = []
         sports_created = []
+        user_connected_states = []
+        sports_connected_states = []
 
-        class FakeThread:
-            def __init__(self, *args, **kwargs) -> None:
-                return None
-
-            def start(self) -> None:
-                return None
-
-        class UserWebSocketApp:
-            def __init__(self, url, *, on_open, on_message) -> None:
-                self.url = url
+        class FakeConnection:
+            def __init__(self, messages, connected_states, client_getter) -> None:
+                self.messages = iter(messages)
+                self.connected_states = connected_states
+                self.client_getter = client_getter
                 self.sent = []
-                self._on_open = on_open
-                self._on_message = on_message
-                user_created.append(self)
+                self.closed = False
+                self.read_timeout = None
+                self.recv_count = 0
+
+            def getstatus(self) -> int:
+                return 101
+
+            def settimeout(self, timeout: float) -> None:
+                self.read_timeout = timeout
 
             def send(self, message: str) -> None:
                 self.sent.append(message)
 
-            def close(self) -> None:
-                return None
-
-            def run_forever(self) -> None:
-                self._on_open(self)
-                self._on_message(self, "PONG")
-                self._on_message(self, '{"event":"trade"}')
-                self._on_message(self, "not-json")
-
-        class SportsWebSocketApp:
-            def __init__(self, url, *, on_message) -> None:
-                self.url = url
-                self.sent = []
-                self._on_message = on_message
-                sports_created.append(self)
-
-            def send(self, message: str) -> None:
-                self.sent.append(message)
+            def recv(self) -> str:
+                if self.recv_count == 0:
+                    self.connected_states.append(self.client_getter().is_connected)
+                self.recv_count += 1
+                return next(self.messages)
 
             def close(self) -> None:
-                return None
+                self.closed = True
 
-            def run_forever(self) -> None:
-                self._on_message(self, "ping")
-                self._on_message(self, '{"event":"score"}')
-                self._on_message(self, "not-json")
+        def user_factory(url, *, timeout, redirect_limit):
+            connection = FakeConnection(
+                ["PONG", '{"event":"trade"}', "not-json", ""],
+                user_connected_states,
+                lambda: user,
+            )
+            user_created.append((url, timeout, redirect_limit, connection))
+            return connection
+
+        def sports_factory(url, *, timeout, redirect_limit):
+            connection = FakeConnection(
+                ["ping", '{"event":"score"}', "not-json", ""],
+                sports_connected_states,
+                lambda: sports,
+            )
+            sports_created.append((url, timeout, redirect_limit, connection))
+            return connection
 
         user = ws_user.UserWSClient(
             {"apiKey": "key", "secret": "secret", "passphrase": "pass"},
@@ -1853,18 +3242,175 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             url_base="wss://example.test/base/",
         )
         sports = ws_sports.SportsWSClient(sports_events.append, url_base="wss://sports.example.test/base/")
-        with patch.object(ws_user, "WebSocketApp", UserWebSocketApp), patch.object(
-            ws_user.threading, "Thread", FakeThread
-        ), patch.object(ws_sports, "WebSocketApp", SportsWebSocketApp):
+        with patch.object(ws_user, "create_connection", user_factory), patch.object(
+            ws_sports,
+            "create_connection",
+            sports_factory,
+        ):
             user._connect_once()
             sports._connect_once()
 
-        self.assertEqual(user_created[0].url, "wss://example.test/base/ws/user")
-        self.assertEqual(json.loads(user_created[0].sent[0])["markets"], ["condition-1"])
+        user_connection = user_created[0][3]
+        sports_connection = sports_created[0][3]
+        self.assertEqual(user_created[0][0], "wss://example.test/base/ws/user")
+        self.assertEqual(user_created[0][2], 0)
+        self.assertEqual(json.loads(user_connection.sent[0])["markets"], ["condition-1"])
+        self.assertEqual(user_connection.sent[1], "PING")
         self.assertEqual(user_events, [{"event": "trade"}])
-        self.assertEqual(sports_created[0].url, "wss://sports.example.test/base/ws")
-        self.assertEqual(sports_created[0].sent, ["pong"])
+        self.assertEqual(user_connected_states, [True])
+        self.assertFalse(user.is_connected)
+        self.assertTrue(user_connection.closed)
+        self.assertEqual(sports_created[0][0], "wss://sports.example.test/base/ws")
+        self.assertEqual(sports_created[0][2], 0)
+        self.assertEqual(sports_connection.sent, ["pong"])
         self.assertEqual(sports_events, [{"event": "score"}])
+        self.assertEqual(sports_connected_states, [True])
+        self.assertFalse(sports.is_connected)
+        self.assertTrue(sports_connection.closed)
+
+    def test_market_websocket_replays_canonical_state_after_disconnect(self) -> None:
+        client = ws_market.MarketWSClient(
+            ["asset-1"],
+            lambda _event: None,
+            url_base="wss://example.test",
+        )
+
+        class FakeConnection:
+            def __init__(self, *, mutate_state: bool) -> None:
+                self.mutate_state = mutate_state
+                self.sent = []
+                self.closed = False
+
+            def getstatus(self) -> int:
+                return 101
+
+            def settimeout(self, _timeout: float) -> None:
+                return None
+
+            def send(self, message: str) -> None:
+                self.sent.append(message)
+
+            def recv(self) -> str:
+                if self.mutate_state:
+                    self.mutate_state = False
+                    client.set_tokens(["asset-2"])
+                return ""
+
+            def close(self) -> None:
+                self.closed = True
+
+        connections = [
+            FakeConnection(mutate_state=True),
+            FakeConnection(mutate_state=False),
+        ]
+
+        def factory(_url, *, timeout, redirect_limit):
+            self.assertGreater(timeout, 0)
+            self.assertEqual(redirect_limit, 0)
+            return connections.pop(0)
+
+        first_connection, second_connection = connections
+        with patch.object(ws_market, "create_connection", factory):
+            client._connect_once()
+            client._connect_once()
+
+        self.assertEqual(json.loads(first_connection.sent[0])["assets_ids"], ["asset-1"])
+        self.assertEqual(json.loads(second_connection.sent[0])["assets_ids"], ["asset-2"])
+        self.assertTrue(first_connection.closed)
+        self.assertTrue(second_connection.closed)
+
+    def test_websocket_reconnect_backoff_grows_for_short_connections_and_resets(self) -> None:
+        client = ws_market.MarketWSClient(["asset-1"], lambda _event: None)
+        connection_durations = iter(
+            [
+                0.0,
+                0.0,
+                ws_transport.WEBSOCKET_STABLE_CONNECTION_SECONDS,
+                0.0,
+            ]
+        )
+
+        class RecordingStopEvent:
+            def __init__(self) -> None:
+                self.stopped = False
+                self.waits = []
+
+            def is_set(self) -> bool:
+                return self.stopped
+
+            def wait(self, delay: float) -> bool:
+                self.waits.append(delay)
+                if len(self.waits) == 4:
+                    self.stopped = True
+                return self.stopped
+
+        stop_event = RecordingStopEvent()
+        client._connect_once = lambda *_args: next(connection_durations)
+        client._run(0, stop_event)
+
+        self.assertEqual(
+            stop_event.waits,
+            [
+                ws_transport.WEBSOCKET_INITIAL_BACKOFF_SECONDS,
+                ws_transport.WEBSOCKET_INITIAL_BACKOFF_SECONDS * 2,
+                ws_transport.WEBSOCKET_INITIAL_BACKOFF_SECONDS,
+                ws_transport.WEBSOCKET_INITIAL_BACKOFF_SECONDS * 2,
+            ],
+        )
+
+    def test_websocket_clients_stop_join_and_restart_cleanly(self) -> None:
+        clients = (
+            ws_market.MarketWSClient(["asset-1"], lambda _event: None),
+            ws_sports.SportsWSClient(lambda _event: None),
+            ws_user.UserWSClient(
+                {"apiKey": "key", "secret": "secret", "passphrase": "pass"},
+                ["condition-1"],
+                lambda _event: None,
+            ),
+        )
+
+        for client in clients:
+            with self.subTest(client=type(client).__name__):
+                entered = threading.Event()
+
+                def block_until_stopped(
+                    _generation,
+                    stop_event,
+                    current_entered=entered,
+                ) -> float:
+                    current_entered.set()
+                    stop_event.wait()
+                    return 0.0
+
+                client._connect_once = block_until_stopped
+                client.start()
+                self.assertTrue(entered.wait(timeout=2))
+                first_thread = client._thread
+                self.assertTrue(client.is_running)
+                client.stop()
+                self.assertFalse(first_thread.is_alive())
+                self.assertFalse(client.is_running)
+                self.assertFalse(client.is_connected)
+
+                entered.clear()
+                client.start()
+                self.assertTrue(entered.wait(timeout=2))
+                self.assertIsNot(client._thread, first_thread)
+                self.assertTrue(client.is_running)
+                client.stop()
+                self.assertFalse(client._thread.is_alive())
+                self.assertFalse(client.is_connected)
+
+    def test_websocket_url_builders_reject_private_and_ambiguous_bases(self) -> None:
+        for builder in (user_ws_url, sports_ws_url):
+            with self.subTest(builder=builder.__name__):
+                with self.assertRaises(PolymarketValidationError):
+                    builder("wss://127.0.0.1")
+                with self.assertRaises(PolymarketValidationError):
+                    builder("wss://example.test/base?token=secret")
+
+        with self.assertRaises(PolymarketValidationError):
+            ws_market.MarketWSClient([], lambda _event: None, url_base="ws://127.0.0.1")
 
     def test_polymarket_official_api_coverage_manifest_uses_truthful_tiered_status(self) -> None:
         coverage = polymarket_official_api_coverage()

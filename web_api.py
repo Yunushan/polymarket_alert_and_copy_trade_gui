@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import hmac
 import hashlib
+import io
 import importlib.metadata as importlib_metadata
 import ipaddress
 import json
@@ -12,7 +13,9 @@ import os
 import posixpath
 import re
 import secrets
+import signal
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,14 +30,26 @@ try:
 except ModuleNotFoundError:  # Python 3.10 compatibility.
     import tomli as tomllib
 
-from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
+from core.models import (
+    AppConfig,
+    CopyTradeSettings,
+    MutationJournalEntry,
+    PaperTradeRecord,
+    PriceAlert,
+    UIDesign,
+    WalletWatch,
+    bounded_mutation_result,
+    MAX_MUTATION_RESULT_BYTES,
+)
+from core.config_security import assert_no_persisted_secrets, is_sensitive_display_key
 from core.deployment_identity import capture_runtime_identity
-from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
+from core.storage import ConfigConflictError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
-from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
 from market_adapters.identity import activity_identity_hint, normalize_activity_identity
+from market_adapters.outbound import is_outbound_endpoint_setting
 from market_adapters.types import (
     MarketCapabilities,
     MarketCandle,
@@ -49,10 +64,12 @@ from market_adapters.types import (
 )
 from polymarket import data_api, gamma
 from polymarket.analytics_cache import (
+    ANALYTICS_CACHE_VERSION,
     DEFAULT_ANALYTICS_CACHE_MAX_ENTRIES,
     DEFAULT_ANALYTICS_CACHE_TTL_SECONDS,
     POLYMARKET_MDD_AUDIT_KIND,
     analytics_cache_health,
+    analytics_cache_path,
     analytics_cache_summary,
     list_analytics_artifacts,
     load_analytics_artifact,
@@ -71,6 +88,11 @@ from polymarket.live_verification import (
     build_live_validation_stage_gates,
 )
 from polymarket.live_reports import (
+    LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH,
+    LIVE_VALIDATION_DECISIONS_VERSION,
+    LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_VERSION,
+    LIVE_VALIDATION_REPORTS_VERSION,
+    LiveValidationStoreDurabilityError,
     list_live_validation_report_decisions,
     list_live_validation_coverage_promotion_proposal_snapshots,
     load_live_validation_coverage_promotion_proposal_snapshot,
@@ -80,15 +102,21 @@ from polymarket.live_reports import (
     live_validation_promotion_proposal_snapshot_export_filename,
     live_validation_promotion_proposal_snapshot_diff_markdown,
     live_validation_promotion_proposal_snapshot_markdown,
+    live_validation_report_payload_hash,
     live_validation_report_review_bundle,
     live_validation_report_review_export_filename,
     live_validation_report_review_markdown,
     live_validation_report_decisions_markdown,
     live_validation_report_promotion_inventory,
     list_live_validation_reports,
+    live_validation_decisions_path,
+    live_validation_promotion_proposal_snapshots_path,
+    live_validation_reports_path,
     load_live_validation_report,
     purge_live_validation_coverage_promotion_proposal_snapshots,
     purge_live_validation_reports,
+    reconcile_live_validation_promotion_proposal_snapshot_idempotency,
+    reconcile_live_validation_report_idempotency,
     record_live_validation_report_decision,
     store_live_validation_coverage_promotion_proposal_snapshot,
     store_live_validation_report,
@@ -123,7 +151,17 @@ PROJECT_NAME = "market-sentinel"
 HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
 STATIC_FRONTEND_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_JSON_BODY_BYTES = 1_000_000
+MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_HTTP_WORKERS = 32
+MAX_HTTP_MUTATION_WORKERS = 8
+HTTP_RESERVED_READ_WORKERS = 4
 HTTP_CONNECTION_TIMEOUT_SECONDS = 15.0
+HTTP_OVERLOAD_RETRY_AFTER_SECONDS = 1
+HTTP_MUTATION_LOCK_TIMEOUT_SECONDS = 5.0
+HTTP_MUTATION_DRAIN_TIMEOUT_SECONDS = 10.0
+HTTP_RESPONSE_CHUNK_BYTES = 32 * 1024
+LOCAL_READINESS_CACHE_SECONDS = 5.0
+MAX_READINESS_JSON_STORE_BYTES = 64 * 1024 * 1024
 AUTH_FAILURE_MAX_ATTEMPTS = 10
 AUTH_FAILURE_WINDOW_SECONDS = 60.0
 MAX_TRACKED_AUTH_FAILURE_CLIENTS = 1_024
@@ -133,6 +171,21 @@ REACT_DEV_COMMAND = "run_web_gui_dev.bat"
 REACT_DEV_MANUAL_COMMAND = "python web_api.py --host 127.0.0.1 --port 8765 + cd frontend && npm run dev"
 REACT_BUILD_COMMAND = "cd frontend && npm install && npm run build"
 REACT_PROD_COMMAND = "run_web_gui_prod.bat"
+IDEMPOTENT_MUTATION_ROUTES = frozenset(
+    {
+        "/api/polymarket/live-validation/reports",
+        "/api/polymarket/live-validation/decisions",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots",
+    }
+)
+LOCAL_DURABLE_CREATE_ROUTES = frozenset(
+    {
+        "/api/alerts",
+        "/api/wallets",
+        "/api/paper/orders",
+    }
+)
+LIVE_MUTATION_RECONCILIATION_CONFIRMATION = "I_VERIFIED_VENUE_ORDER_HISTORY"
 
 
 class HttpRequestMetrics:
@@ -140,11 +193,83 @@ class HttpRequestMetrics:
 
     _METHODS = frozenset({"GET", "POST", "PATCH", "DELETE", "OPTIONS"})
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_http_workers: int = MAX_HTTP_WORKERS,
+        max_mutation_workers: int = MAX_HTTP_MUTATION_WORKERS,
+        reserved_read_workers: int = HTTP_RESERVED_READ_WORKERS,
+    ) -> None:
         self._lock = threading.Lock()
         self._started_at = time.time()
+        self._max_http_workers = max(1, int(max_http_workers))
+        self._max_mutation_workers = max(1, int(max_mutation_workers))
+        self._reserved_read_workers = max(0, int(reserved_read_workers))
         self._requests: Dict[Tuple[str, int], int] = {}
         self._duration_seconds_total = 0.0
+        self._requests_in_flight = 0
+        self._overload_rejections = 0
+        self._response_too_large = 0
+        self._mutations_in_flight = 0
+        self._mutations_active = 0
+        self._mutation_admission_rejections = 0
+        self._mutation_lock_timeouts = 0
+
+    def request_started(self) -> None:
+        with self._lock:
+            self._requests_in_flight += 1
+
+    def request_finished(self) -> None:
+        with self._lock:
+            self._requests_in_flight = max(0, self._requests_in_flight - 1)
+
+    def record_overload_rejection(self) -> None:
+        with self._lock:
+            self._overload_rejections += 1
+
+    def record_response_too_large(self) -> None:
+        with self._lock:
+            self._response_too_large += 1
+
+    def mutation_admitted(self) -> None:
+        with self._lock:
+            self._mutations_in_flight += 1
+
+    def mutation_finished(self) -> None:
+        with self._lock:
+            self._mutations_in_flight = max(0, self._mutations_in_flight - 1)
+
+    def mutation_started(self) -> None:
+        with self._lock:
+            self._mutations_active += 1
+
+    def mutation_stopped(self) -> None:
+        with self._lock:
+            self._mutations_active = max(0, self._mutations_active - 1)
+
+    def record_mutation_admission_rejection(self) -> None:
+        with self._lock:
+            self._mutation_admission_rejections += 1
+
+    def record_mutation_lock_timeout(self) -> None:
+        with self._lock:
+            self._mutation_lock_timeouts += 1
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Return a consistent bounded admission snapshot for readiness checks."""
+        with self._lock:
+            return {
+                "started_at": self._started_at,
+                "requests_in_flight": self._requests_in_flight,
+                "overload_rejections_total": self._overload_rejections,
+                "response_too_large_total": self._response_too_large,
+                "mutations_in_flight": self._mutations_in_flight,
+                "mutations_active": self._mutations_active,
+                "mutation_admission_rejections_total": self._mutation_admission_rejections,
+                "mutation_lock_timeouts_total": self._mutation_lock_timeouts,
+                "max_http_workers": self._max_http_workers,
+                "max_mutation_workers": self._max_mutation_workers,
+                "reserved_read_workers": self._reserved_read_workers,
+            }
 
     def record(self, method: str, status: int, duration_seconds: float) -> None:
         normalized_method = str(method or "OTHER").upper()
@@ -163,6 +288,16 @@ class HttpRequestMetrics:
             total = sum(self._requests.values())
             duration_seconds_total = self._duration_seconds_total
             started_at = self._started_at
+            requests_in_flight = self._requests_in_flight
+            overload_rejections = self._overload_rejections
+            response_too_large = self._response_too_large
+            mutations_in_flight = self._mutations_in_flight
+            mutations_active = self._mutations_active
+            mutation_admission_rejections = self._mutation_admission_rejections
+            mutation_lock_timeouts = self._mutation_lock_timeouts
+            max_http_workers = self._max_http_workers
+            max_mutation_workers = self._max_mutation_workers
+            reserved_read_workers = self._reserved_read_workers
         lines = [
             "# HELP market_sentinel_http_requests_total Completed HTTP requests by method and status.",
             "# TYPE market_sentinel_http_requests_total counter",
@@ -179,6 +314,36 @@ class HttpRequestMetrics:
                 "# HELP market_sentinel_http_requests_completed_total Total completed HTTP requests.",
                 "# TYPE market_sentinel_http_requests_completed_total counter",
                 f"market_sentinel_http_requests_completed_total {total}",
+                "# HELP market_sentinel_http_requests_in_flight Currently admitted HTTP request workers.",
+                "# TYPE market_sentinel_http_requests_in_flight gauge",
+                f"market_sentinel_http_requests_in_flight {requests_in_flight}",
+                "# HELP market_sentinel_http_overload_rejections_total HTTP connections rejected at the worker limit.",
+                "# TYPE market_sentinel_http_overload_rejections_total counter",
+                f"market_sentinel_http_overload_rejections_total {overload_rejections}",
+                "# HELP market_sentinel_http_response_too_large_total Responses rejected before headers because they exceeded the byte limit.",
+                "# TYPE market_sentinel_http_response_too_large_total counter",
+                f"market_sentinel_http_response_too_large_total {response_too_large}",
+                "# HELP market_sentinel_http_mutations_in_flight Mutation callers admitted for body parsing, lock wait, or execution.",
+                "# TYPE market_sentinel_http_mutations_in_flight gauge",
+                f"market_sentinel_http_mutations_in_flight {mutations_in_flight}",
+                "# HELP market_sentinel_http_mutations_active Mutations currently holding the serialization lock.",
+                "# TYPE market_sentinel_http_mutations_active gauge",
+                f"market_sentinel_http_mutations_active {mutations_active}",
+                "# HELP market_sentinel_http_mutation_admission_rejections_total Mutation requests rejected before body parsing because admission was saturated.",
+                "# TYPE market_sentinel_http_mutation_admission_rejections_total counter",
+                f"market_sentinel_http_mutation_admission_rejections_total {mutation_admission_rejections}",
+                "# HELP market_sentinel_http_mutation_lock_timeouts_total Admitted mutations rejected after a bounded serialization-lock wait.",
+                "# TYPE market_sentinel_http_mutation_lock_timeouts_total counter",
+                f"market_sentinel_http_mutation_lock_timeouts_total {mutation_lock_timeouts}",
+                "# HELP market_sentinel_http_worker_limit Maximum concurrently admitted HTTP connections.",
+                "# TYPE market_sentinel_http_worker_limit gauge",
+                f"market_sentinel_http_worker_limit {max_http_workers}",
+                "# HELP market_sentinel_http_mutation_admission_limit Maximum mutation body readers, lock waiters, and executors.",
+                "# TYPE market_sentinel_http_mutation_admission_limit gauge",
+                f"market_sentinel_http_mutation_admission_limit {max_mutation_workers}",
+                "# HELP market_sentinel_http_reserved_read_workers HTTP worker capacity unavailable to mutation admission.",
+                "# TYPE market_sentinel_http_reserved_read_workers gauge",
+                f"market_sentinel_http_reserved_read_workers {reserved_read_workers}",
                 "# HELP market_sentinel_http_server_start_time_seconds Unix time when the HTTP server started.",
                 "# TYPE market_sentinel_http_server_start_time_seconds gauge",
                 f"market_sentinel_http_server_start_time_seconds {started_at:.6f}",
@@ -270,6 +435,7 @@ API_ROUTES = {
         "/api/health",
         "/api/state",
         "/api/config",
+        "/api/mutations",
         "/api/markets",
         "/api/markets/support-matrix",
         "/api/markets/{market_id}/support",
@@ -343,6 +509,7 @@ API_ROUTES = {
         "/api/paper/marks/refresh-selected",
         "/api/paper/marks/clear",
         "/api/paper/marks/clear-selected",
+        "/api/mutations/reconcile",
         "/api/polymarket/users/mdd/cache/purge",
         "/api/polymarket/live-validation/reports",
         "/api/polymarket/live-validation/decisions",
@@ -356,19 +523,16 @@ API_ROUTES = {
         "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}",
     ],
 }
-SENSITIVE_SETTING_FRAGMENTS = (
-    "api_key",
-    "apikey",
-    "secret",
-    "token",
-    "password",
-    "private",
-    "cookie",
-    "session",
-)
 POLYMARKET_L2_HEADERS = ("POLY_ADDRESS", "POLY_API_KEY", "POLY_PASSPHRASE", "POLY_SIGNATURE", "POLY_TIMESTAMP")
 POLYMARKET_RELAYER_HEADERS = ("RELAYER_API_KEY", "RELAYER_API_KEY_ADDRESS")
 POLYMARKET_USER_WS_KEYS = ("POLY_API_KEY", "POLY_API_SECRET", "POLY_SECRET", "POLY_PASSPHRASE")
+SENSITIVE_SETTING_POLICY_LABELS = (
+    "api credentials",
+    "passwords and passphrases",
+    "private and signing keys",
+    "session cookies and credential tokens",
+    "request signatures",
+)
 LIVE_SETTING_KEYS = {
     "live_trading_enabled",
     "live_trading_confirmed",
@@ -386,20 +550,51 @@ ALERT_SOURCE_IDS = {str(option["id"]) for option in ALERT_SOURCE_OPTIONS}
 ALERT_DIRECTIONS = {"above", "below"}
 
 
-def _json_bytes(payload: Dict[str, Any]) -> bytes:
-    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+class HttpResponseTooLargeError(RuntimeError):
+    """Raised before response headers when a representation exceeds the server limit."""
+
+
+def _json_bytes(payload: Dict[str, Any], *, max_bytes: Optional[int] = None) -> bytes:
+    limit = MAX_HTTP_RESPONSE_BYTES if max_bytes is None else max(1, int(max_bytes))
+    buffer = io.BytesIO()
+    encoder = json.JSONEncoder(indent=2, sort_keys=True)
+    for text_chunk in encoder.iterencode(payload):
+        chunk = text_chunk.encode("utf-8")
+        if buffer.tell() + len(chunk) > limit:
+            raise HttpResponseTooLargeError(f"HTTP response exceeds {limit} bytes.")
+        buffer.write(chunk)
+    return buffer.getvalue()
+
+
+def _utf8_bytes(text: str, *, max_bytes: Optional[int] = None) -> bytes:
+    limit = MAX_HTTP_RESPONSE_BYTES if max_bytes is None else max(1, int(max_bytes))
+    value = str(text)
+    buffer = io.BytesIO()
+    for offset in range(0, len(value), HTTP_RESPONSE_CHUNK_BYTES):
+        chunk = value[offset : offset + HTTP_RESPONSE_CHUNK_BYTES].encode("utf-8")
+        if buffer.tell() + len(chunk) > limit:
+            raise HttpResponseTooLargeError(f"HTTP response exceeds {limit} bytes.")
+        buffer.write(chunk)
+    return buffer.getvalue()
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
+    transfer_encoding = str(handler.headers.get("Transfer-Encoding") or "").strip()
+    if transfer_encoding:
+        raise ValueError("Transfer-Encoding is not supported for JSON request bodies; send Content-Length.")
     try:
         length = int(handler.headers.get("Content-Length") or 0)
     except ValueError as exc:
         raise ValueError("Content-Length must be an integer.") from exc
+    if length < 0:
+        raise ValueError("Content-Length cannot be negative.")
     if length > MAX_JSON_BODY_BYTES:
         raise ValueError("JSON request body is too large.")
     if length <= 0:
         return {}
     raw = handler.rfile.read(length)
+    if len(raw) != length:
+        raise ValueError("JSON request body is incomplete.")
     if not raw:
         return {}
     try:
@@ -410,6 +605,224 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("JSON request body must be an object.")
     return data
+
+
+def _discard_available_request_body(handler: BaseHTTPRequestHandler) -> None:
+    """Best-effort drain of a small already-sent body before an early close.
+
+    Closing a Windows socket with unread request bytes can reset the connection
+    and hide the structured overload response. Never wait long enough for a
+    slow sender to occupy reserved read capacity.
+    """
+    try:
+        length = int(handler.headers.get("Content-Length") or "0")
+    except (TypeError, ValueError):
+        return
+    if length <= 0 or length > MAX_JSON_BODY_BYTES:
+        return
+    connection = handler.connection
+    previous_timeout = connection.gettimeout()
+    remaining = length
+    deadline = time.monotonic() + 0.05
+    try:
+        connection.settimeout(0.05)
+        while remaining > 0 and time.monotonic() < deadline:
+            chunk = handler.rfile.read1(min(remaining, HTTP_RESPONSE_CHUNK_BYTES))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            connection.settimeout(previous_timeout)
+        except OSError:
+            pass
+
+
+def _validated_idempotency_key(headers: Mapping[str, Any], payload: Mapping[str, Any]) -> str:
+    """Resolve one visible-ASCII idempotency key without exposing it in responses."""
+    header_key = str(headers.get("Idempotency-Key") or "")
+    raw_body_key = payload.get("idempotency_key")
+    if raw_body_key is not None and not isinstance(raw_body_key, str):
+        raise ValueError("idempotency_key must be a string.")
+    body_key = str(raw_body_key or "")
+    for candidate in (header_key, body_key):
+        if candidate and (
+            len(candidate) > LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH
+            or any(ord(char) < 33 or ord(char) > 126 for char in candidate)
+        ):
+            raise ValueError(
+                "Idempotency keys must contain 1-"
+                f"{LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH} visible ASCII characters."
+            )
+    if header_key and body_key and not hmac.compare_digest(header_key, body_key):
+        raise ValueError("Idempotency-Key header and idempotency_key body field must match.")
+    key = header_key or body_key
+    if not key:
+        return ""
+    return key
+
+
+def _is_live_order_management_route(method: str, path: str) -> bool:
+    parts = str(path or "").strip("/").split("/")
+    return (
+        str(method or "").strip().upper() == "POST"
+        and len(parts) == 5
+        and parts[:2] == ["api", "markets"]
+        and parts[3] == "orders"
+        and bool(parts[2])
+        and bool(parts[4])
+    )
+
+
+def _is_general_durable_mutation(method: str, path: str) -> bool:
+    return (
+        str(method or "").strip().upper() == "POST"
+        and (path in LOCAL_DURABLE_CREATE_ROUTES or _is_live_order_management_route(method, path))
+    )
+
+
+def _mutation_key_hash(idempotency_key: str) -> str:
+    return hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
+
+
+def _mutation_request_hash(payload: Mapping[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            dict(payload),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Mutation request must contain canonical JSON values.") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _mutation_journal_entry(
+    cfg: AppConfig,
+    idempotency_key: str,
+) -> Optional[MutationJournalEntry]:
+    key_hash = _mutation_key_hash(idempotency_key)
+    return next((entry for entry in cfg.mutation_journal if entry.key_hash == key_hash), None)
+
+
+def _new_mutation_journal_entry(
+    idempotency_key: str,
+    method: str,
+    path: str,
+    payload: Mapping[str, Any],
+    *,
+    live: bool,
+) -> MutationJournalEntry:
+    return MutationJournalEntry(
+        key_hash=_mutation_key_hash(idempotency_key),
+        method=str(method or "").strip().upper(),
+        path=str(path or "").strip(),
+        request_hash=_mutation_request_hash(payload),
+        live=bool(live),
+    )
+
+
+def _assert_mutation_request_matches(
+    entry: MutationJournalEntry,
+    method: str,
+    path: str,
+    payload: Mapping[str, Any],
+) -> None:
+    request_hash = _mutation_request_hash(payload)
+    if not (
+        hmac.compare_digest(entry.method, str(method or "").strip().upper())
+        and hmac.compare_digest(entry.path, str(path or "").strip())
+        and hmac.compare_digest(entry.request_hash, request_hash)
+    ):
+        raise IdempotencyConflictError(
+            "The Idempotency-Key was already used for a different route or request body."
+        )
+
+
+def _stored_mutation_result(
+    payload: Mapping[str, Any],
+    *,
+    preserve_shape: bool = False,
+    max_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    sanitized = sanitize_audit_value(dict(payload))
+    stored = bounded_mutation_result(
+        sanitized,
+        preserve_shape=preserve_shape,
+        max_bytes=max_bytes if max_bytes is not None else MAX_MUTATION_RESULT_BYTES,
+    )
+    try:
+        assert_no_persisted_secrets(stored)
+    except ValueError:
+        encoded = json.dumps(
+            stored,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return {
+            "ok": True,
+            "mutation_result": {
+                "stored": "receipt_only",
+                "reason": "sensitive_fields_were_redacted",
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            },
+        }
+    return stored
+
+
+def _client_mutation_result(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep the original mutation response shape, trimming only huge bodies."""
+
+    candidate = dict(payload)
+    try:
+        _json_bytes(candidate)
+    except (HttpResponseTooLargeError, TypeError, ValueError):
+        return bounded_mutation_result(
+            sanitize_audit_value(candidate),
+            preserve_shape=True,
+            max_bytes=MAX_HTTP_RESPONSE_BYTES,
+        )
+    return candidate
+
+
+def mutation_journal_payload(cfg: AppConfig) -> Dict[str, Any]:
+    entries = sorted(
+        cfg.mutation_journal,
+        key=lambda item: (item.updated_at, item.created_at, item.id),
+        reverse=True,
+    )
+    return {
+        "entries": [
+            {
+                "id": entry.id,
+                "method": entry.method,
+                "path": entry.path,
+                "live": entry.live,
+                "state": entry.state,
+                "response_status": entry.response_status or None,
+                "outcome_code": entry.outcome_code,
+                "outcome_message": entry.outcome_message,
+                "created_at": entry.created_at,
+                "updated_at": entry.updated_at,
+                "replay_authorized_at": entry.replay_authorized_at or None,
+            }
+            for entry in entries
+        ],
+        "counts": {
+            "total": len(entries),
+            "unresolved": sum(1 for entry in entries if entry.state in {"pending", "ambiguous"}),
+        },
+    }
+
+
+class IdempotencyConflictError(RuntimeError):
+    """Raised when one client key is reused for a different mutation."""
 
 
 def api_error_payload(
@@ -722,8 +1135,7 @@ def optional_positive_float(raw: Any, label: str) -> Optional[float]:
 def sanitize_settings(settings: Mapping[str, Any]) -> Dict[str, Any]:
     sanitized: Dict[str, Any] = {}
     for key, value in settings.items():
-        normalized = str(key).strip().lower()
-        if any(fragment in normalized for fragment in SENSITIVE_SETTING_FRAGMENTS):
+        if is_sensitive_display_key(key):
             sanitized[str(key)] = "***" if value not in (None, "") else ""
         else:
             sanitized[str(key)] = sanitize_audit_value(value, str(key))
@@ -731,8 +1143,7 @@ def sanitize_settings(settings: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def sanitize_audit_value(value: Any, key: str = "") -> Any:
-    normalized = str(key).strip().lower()
-    if any(fragment in normalized for fragment in SENSITIVE_SETTING_FRAGMENTS):
+    if is_sensitive_display_key(key):
         return "***" if value not in (None, "") else ""
     if isinstance(value, Mapping):
         return {str(child_key): sanitize_audit_value(child_value, str(child_key)) for child_key, child_value in value.items()}
@@ -952,8 +1363,9 @@ def live_safety_payload(
         "can_preflight": bool(enabled and meta.capabilities.live_trading),
         "controls": safety,
         "redaction": {
-            "sensitive_key_fragments": list(SENSITIVE_SETTING_FRAGMENTS),
+            "sensitive_key_policy": list(SENSITIVE_SETTING_POLICY_LABELS),
             "audit_payloads_redacted": True,
+            "persistent_credentials_allowed": False,
         },
     }
 
@@ -1072,15 +1484,313 @@ def config_payload(cfg: AppConfig) -> Dict[str, Any]:
     }
 
 
+def _directory_write_probe(path: Path) -> tuple[bool, str]:
+    """Prove create-and-unlink access without modifying a durable state file."""
+    parent = path.parent
+    if not parent.exists():
+        return False, "parent_missing"
+    if not parent.is_dir():
+        return False, "parent_not_directory"
+    descriptor = -1
+    probe_name = ""
+    try:
+        descriptor, probe_name = tempfile.mkstemp(prefix=".market-sentinel-readiness-", dir=parent)
+        os.close(descriptor)
+        descriptor = -1
+        Path(probe_name).unlink()
+        probe_name = ""
+        return True, "create_unlink_succeeded"
+    except OSError as exc:
+        return False, f"create_unlink_failed:{type(exc).__name__}"
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if probe_name:
+            try:
+                Path(probe_name).unlink()
+            except OSError:
+                pass
+
+
+def _json_store_readiness(
+    name: str,
+    path: Path,
+    *,
+    config_store: bool = False,
+    collection_key: str = "",
+    expected_version: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Inspect one local JSON store without changing its durable contents."""
+    target = path.expanduser()
+    result: Dict[str, Any] = {
+        "name": name,
+        "path": str(target),
+        "exists": False,
+        "readable": False,
+        "writable": False,
+        "schema_valid": False,
+        "ready": False,
+        "size_bytes": 0,
+        "last_modified_at": None,
+        "age_seconds": None,
+    }
+    writable, write_probe = _directory_write_probe(target)
+    result["writable"] = writable
+    result["write_probe"] = write_probe
+    try:
+        if target.is_symlink():
+            result["read_status"] = "target_symlink_rejected"
+            return result
+        if not target.exists():
+            # All stores have safe in-memory empty defaults. A missing file is
+            # ready only when its parent has proven atomic-publication access.
+            result["readable"] = True
+            result["schema_valid"] = True
+            result["read_status"] = "uninitialized_default_available"
+            result["ready"] = writable
+            return result
+        if not target.is_file():
+            result["read_status"] = "target_not_regular_file"
+            return result
+        stat_result = target.stat()
+        result["exists"] = True
+        result["size_bytes"] = int(stat_result.st_size)
+        result["last_modified_at"] = float(stat_result.st_mtime)
+        result["age_seconds"] = max(0.0, time.time() - float(stat_result.st_mtime))
+        if stat_result.st_size > MAX_READINESS_JSON_STORE_BYTES:
+            result["read_status"] = "store_exceeds_readiness_size_limit"
+            return result
+        if config_store:
+            load_config(target)
+        else:
+            with target.open("rb") as handle:
+                raw = handle.read(MAX_READINESS_JSON_STORE_BYTES + 1)
+            if len(raw) > MAX_READINESS_JSON_STORE_BYTES:
+                result["read_status"] = "store_exceeds_readiness_size_limit"
+                return result
+            parsed = json.loads(raw.decode("utf-8"))
+            if not isinstance(parsed, Mapping):
+                result["read_status"] = "json_root_not_object"
+                return result
+            if expected_version is not None:
+                version = parsed.get("version")
+                if version is None:
+                    result["read_status"] = "schema_version_missing"
+                    return result
+                if isinstance(version, bool) or not isinstance(version, int) or version != expected_version:
+                    result["read_status"] = "schema_version_mismatch"
+                    return result
+            if collection_key:
+                collection = parsed.get(collection_key)
+                if collection is None:
+                    result["read_status"] = f"collection_missing:{collection_key}"
+                    return result
+                if not isinstance(collection, Mapping):
+                    result["read_status"] = f"collection_not_object:{collection_key}"
+                    return result
+        result["readable"] = True
+        result["schema_valid"] = True
+        result["read_status"] = "validated"
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
+        result["read_status"] = f"validation_failed:{type(exc).__name__}"
+    result["ready"] = bool(result["readable"] and result["writable"])
+    return result
+
+
+def _backup_freshness_signal() -> Dict[str, Any]:
+    """Report bounded backup metadata; integrity remains an offline verifier job."""
+    configured = str(os.environ.get("MARKET_SENTINEL_BACKUP_DIRECTORY") or "").strip()
+    if not configured:
+        return {
+            "configured": False,
+            "status": "unknown",
+            "authoritative": False,
+            "message": "Set MARKET_SENTINEL_BACKUP_DIRECTORY to expose bounded backup-age metadata.",
+        }
+    directory = Path(configured).expanduser()
+    signal: Dict[str, Any] = {
+        "configured": True,
+        "directory": str(directory),
+        "status": "missing",
+        "authoritative": False,
+        "integrity_verified": False,
+        "manifest_pairs_seen": 0,
+        "scan_truncated": False,
+        "latest_manifest_modified_at": None,
+        "latest_manifest_age_seconds": None,
+        "message": "Metadata only; use verify_production_deployment.py for cryptographic backup verification.",
+    }
+    try:
+        if directory.is_symlink() or not directory.is_dir():
+            return signal
+        newest: Optional[float] = None
+        seen = 0
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                seen += 1
+                if seen > 1_000:
+                    signal["scan_truncated"] = True
+                    break
+                if not entry.name.endswith(".manifest.json") or entry.is_symlink():
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                archive_name = entry.name[: -len(".manifest.json")]
+                archive = directory / archive_name
+                if archive.is_symlink() or not archive.is_file():
+                    continue
+                signal["manifest_pairs_seen"] += 1
+                modified_at = float(entry.stat(follow_symlinks=False).st_mtime)
+                newest = modified_at if newest is None else max(newest, modified_at)
+        if newest is not None:
+            age = max(0.0, time.time() - newest)
+            signal["latest_manifest_modified_at"] = newest
+            signal["latest_manifest_age_seconds"] = age
+            signal["status"] = "recent_metadata" if age <= 36 * 60 * 60 else "stale_metadata"
+    except OSError as exc:
+        signal["status"] = f"inspection_failed:{type(exc).__name__}"
+    return signal
+
+
+def local_resource_readiness(config_path: Path, frontend_dir: Path) -> Dict[str, Any]:
+    """Probe local production dependencies without making any network calls."""
+    stores = [
+        _json_store_readiness("configuration", config_path, config_store=True),
+        _json_store_readiness(
+            "analytics_cache",
+            analytics_cache_path(),
+            collection_key="entries",
+            expected_version=ANALYTICS_CACHE_VERSION,
+        ),
+        _json_store_readiness(
+            "live_validation_reports",
+            live_validation_reports_path(),
+            collection_key="reports",
+            expected_version=LIVE_VALIDATION_REPORTS_VERSION,
+        ),
+        _json_store_readiness(
+            "live_validation_decisions",
+            live_validation_decisions_path(),
+            collection_key="decisions",
+            expected_version=LIVE_VALIDATION_DECISIONS_VERSION,
+        ),
+        _json_store_readiness(
+            "live_validation_promotion_snapshots",
+            live_validation_promotion_proposal_snapshots_path(),
+            collection_key="snapshots",
+            expected_version=LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_VERSION,
+        ),
+    ]
+    frontend_index = frontend_dir / "index.html"
+    frontend_ready = False
+    frontend_status = "missing"
+    try:
+        frontend_ready = bool(not frontend_index.is_symlink() and frontend_index.is_file())
+        frontend_status = "available" if frontend_ready else "missing"
+    except OSError as exc:
+        frontend_status = f"inspection_failed:{type(exc).__name__}"
+    return {
+        "storage": {
+            "ready": all(bool(store["ready"]) for store in stores),
+            "stores": stores,
+        },
+        "frontend": {
+            "ready": frontend_ready,
+            "status": frontend_status,
+            "index_path": str(frontend_index),
+        },
+        "backup": _backup_freshness_signal(),
+        "network_checks_performed": False,
+    }
+
+
+def runtime_readiness_payload(
+    resources: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    wallet_polling: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Combine cached local probes with live admission and freshness state."""
+    max_workers = max(1, int(admission.get("max_http_workers") or MAX_HTTP_WORKERS))
+    mutation_capacity = max(1, int(admission.get("max_mutation_workers") or 1))
+    requests_in_flight = max(0, int(admission.get("requests_in_flight") or 0))
+    mutations_in_flight = max(0, int(admission.get("mutations_in_flight") or 0))
+    reserved = max(0, int(admission.get("reserved_read_workers") or 0))
+    admission_payload = dict(admission)
+    admission_payload.update(
+        {
+            "worker_saturated": requests_in_flight >= max_workers,
+            "mutation_saturated": mutations_in_flight >= mutation_capacity,
+            "ready": (
+                reserved >= 1
+                and not bool(admission.get("draining", False))
+                and requests_in_flight < max_workers
+                and mutations_in_flight < mutation_capacity
+                and int(admission.get("mutations_active") or 0) <= 1
+            ),
+        }
+    )
+    polling = dict(wallet_polling or {})
+    interval = max(2.0, float(polling.get("poll_interval_seconds") or 10.0))
+    last_polled_at = polling.get("last_polled_at")
+    last_polled = float(last_polled_at) if isinstance(last_polled_at, (int, float)) else None
+    poll_age = max(0.0, time.time() - last_polled) if last_polled is not None else None
+    polling_freshness = {
+        "last_polled_at": last_polled,
+        "age_seconds": poll_age,
+        "stale_after_seconds": max(60.0, interval * 3),
+        "status": (
+            "not_started"
+            if poll_age is None
+            else "fresh"
+            if poll_age <= max(60.0, interval * 3)
+            else "stale"
+        ),
+        "required_for_service_readiness": False,
+    }
+    storage = resources.get("storage") if isinstance(resources.get("storage"), Mapping) else {}
+    frontend = resources.get("frontend") if isinstance(resources.get("frontend"), Mapping) else {}
+    ready = bool(storage.get("ready") and frontend.get("ready") and admission_payload["ready"])
+    return {
+        "ready": ready,
+        "status": "ready" if ready else "degraded",
+        "storage": dict(storage),
+        "frontend": dict(frontend),
+        "admission": admission_payload,
+        "freshness": {
+            "wallet_polling": polling_freshness,
+            "backup": dict(resources.get("backup") or {}),
+        },
+        "network_checks_performed": False,
+    }
+
+
 def health_payload(
     config_path: Path = DEFAULT_CONFIG_PATH,
     frontend_dir: Path = DEFAULT_FRONTEND_DIR,
     runtime_identity: Optional[Mapping[str, str]] = None,
+    max_http_workers: int = MAX_HTTP_WORKERS,
+    runtime_readiness: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     frontend_index = frontend_dir / "index.html"
     identity = runtime_identity or {}
+    if runtime_readiness is None:
+        reserved = min(HTTP_RESERVED_READ_WORKERS, max(1, int(max_http_workers) // 4))
+        mutation_capacity = max(1, min(MAX_HTTP_MUTATION_WORKERS, int(max_http_workers) - reserved))
+        runtime_readiness = runtime_readiness_payload(
+            local_resource_readiness(config_path, frontend_dir),
+            {
+                "max_http_workers": max(1, int(max_http_workers)),
+                "max_mutation_workers": mutation_capacity,
+                "reserved_read_workers": max(0, int(max_http_workers) - mutation_capacity),
+                "requests_in_flight": 0,
+                "mutations_in_flight": 0,
+                "mutations_active": 0,
+            },
+        )
     return {
         "status": "ok",
+        "ready": bool(runtime_readiness.get("ready")),
+        "readiness": dict(runtime_readiness),
         "api_version": project_version(),
         "runtime_source_revision": str(identity.get("source_revision") or ""),
         "runtime_frontend_sha256": str(identity.get("frontend_sha256") or ""),
@@ -1102,6 +1812,16 @@ def health_payload(
             "metrics_format": "prometheus",
             "request_logging": "structured_json",
             "metrics_access": "same server authorization as the API",
+            "max_http_workers": max(1, int(max_http_workers)),
+            "max_mutation_workers": int(
+                (runtime_readiness.get("admission") or {}).get("max_mutation_workers") or 1
+            ),
+            "reserved_read_workers": int(
+                (runtime_readiness.get("admission") or {}).get("reserved_read_workers") or 0
+            ),
+            "mutation_lock_timeout_seconds": HTTP_MUTATION_LOCK_TIMEOUT_SECONDS,
+            "max_http_response_bytes": MAX_HTTP_RESPONSE_BYTES,
+            "connection_timeout_seconds": HTTP_CONNECTION_TIMEOUT_SECONDS,
         },
         "routes": API_ROUTES,
     }
@@ -1117,10 +1837,18 @@ def app_state_payload(
     wallet_polling: Optional[Mapping[str, Any]] = None,
     recent_wallet_activity: Optional[List[Dict[str, Any]]] = None,
     runtime_identity: Optional[Mapping[str, str]] = None,
+    max_http_workers: int = MAX_HTTP_WORKERS,
+    runtime_readiness: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     registry = registry or build_default_registry()
     return {
-        "health": health_payload(config_path, frontend_dir, runtime_identity),
+        "health": health_payload(
+            config_path,
+            frontend_dir,
+            runtime_identity,
+            max_http_workers,
+            runtime_readiness,
+        ),
         "config": config_payload(cfg),
         "markets": markets_payload(cfg, registry),
         "alerts": alerts_payload(cfg, registry, alert_price_state),
@@ -1152,13 +1880,32 @@ def apply_config_patch(cfg: AppConfig, payload: Dict[str, Any]) -> AppConfig:
     return cfg
 
 
-def apply_market_patch(cfg: AppConfig, market_id: str, payload: Dict[str, Any]) -> AppConfig:
+def _blocked_outbound_setting_keys(value: Any) -> List[str]:
+    blocked: set[str] = set()
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            if is_outbound_endpoint_setting(key):
+                blocked.add(key)
+            blocked.update(_blocked_outbound_setting_keys(child))
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            blocked.update(_blocked_outbound_setting_keys(child))
+    return sorted(blocked)
+
+
+def apply_market_patch(
+    cfg: AppConfig,
+    market_id: str,
+    payload: Dict[str, Any],
+    *,
+    allow_outbound_endpoint_changes: bool = False,
+) -> AppConfig:
     normalized = str(market_id or "").strip().lower()
     if normalized not in cfg.markets:
         raise ValueError(f"Unknown market id: {normalized}")
     market_cfg = cfg.markets[normalized]
-    if "enabled" in payload:
-        market_cfg.enabled = bool(payload["enabled"])
+    enabled = bool(payload["enabled"]) if "enabled" in payload else market_cfg.enabled
     settings = dict(market_cfg.settings)
     for key in ("live_trading_enabled", "live_trading_confirmed", "live_trading_kill_switch"):
         if key in payload:
@@ -1179,7 +1926,16 @@ def apply_market_patch(cfg: AppConfig, market_id: str, payload: Dict[str, Any]) 
         raw_settings = payload["settings"]
         if not isinstance(raw_settings, dict):
             raise ValueError("settings must be an object.")
+        assert_no_persisted_secrets(raw_settings)
+        blocked_outbound = _blocked_outbound_setting_keys(raw_settings)
+        if blocked_outbound and not allow_outbound_endpoint_changes:
+            raise ValueError(
+                "Outbound endpoint and custom-host policy settings cannot be changed through the HTTP API; "
+                "edit trusted local configuration and restart: "
+                + ", ".join(blocked_outbound)
+            )
         settings.update(raw_settings)
+    market_cfg.enabled = enabled
     market_cfg.settings = settings
     return cfg
 
@@ -2082,22 +2838,52 @@ def polymarket_live_validation_promotion_proposal_snapshot_diff_payload(key: str
 
 def polymarket_live_validation_promotion_proposal_snapshot_store_payload(
     payload: Mapping[str, Any],
+    *,
+    idempotency_key: str = "",
 ) -> Dict[str, Any]:
-    target_tier = str(payload.get("target_tier") or "")
-    label = str(payload.get("label") or "")
-    source = str(payload.get("source") or "react_preview")
+    target_tier = str(payload.get("target_tier") or "").strip()
+    label = str(payload.get("label") or "").strip()
+    source = str(payload.get("source") or "react_preview").strip() or "react_preview"
+    idempotency_request = {
+        "target_tier": target_tier,
+        "label": label,
+        "source": source,
+    }
+    replayed = (
+        reconcile_live_validation_promotion_proposal_snapshot_idempotency(
+            idempotency_key=idempotency_key,
+            idempotency_request=idempotency_request,
+        )
+        if idempotency_key
+        else None
+    )
+    if replayed is not None:
+        inventory = polymarket_live_validation_promotion_proposal_snapshots_payload()
+        inventory.update(
+            {
+                "stored": replayed,
+                "message": f"Replayed promotion proposal snapshot {replayed.get('key')}.",
+            }
+        )
+        return inventory
     proposal = live_validation_coverage_promotion_proposal(target_tier=target_tier)
     stored = store_live_validation_coverage_promotion_proposal_snapshot(
         proposal=proposal,
         target_tier=target_tier,
         label=label,
         source=source,
+        idempotency_key=idempotency_key,
+        idempotency_request=idempotency_request,
     )
     inventory = polymarket_live_validation_promotion_proposal_snapshots_payload()
     inventory.update(
         {
             "stored": stored,
-            "message": f"Stored promotion proposal snapshot {stored.get('key')}.",
+            "message": (
+                f"Replayed promotion proposal snapshot {stored.get('key')}."
+                if stored.get("idempotent_replay")
+                else f"Stored promotion proposal snapshot {stored.get('key')}."
+            ),
         }
     )
     return inventory
@@ -2116,22 +2902,40 @@ def polymarket_live_validation_promotion_proposal_snapshot_purge_payload(payload
     )
 
 
-def polymarket_live_validation_decision_store_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+def polymarket_live_validation_decision_store_payload(
+    payload: Mapping[str, Any],
+    *,
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
+    normalized_request = {
+        "report_key": str(payload.get("report_key") or "").strip(),
+        "payload_hash": str(payload.get("payload_hash") or "").strip(),
+        "target_tier": str(payload.get("target_tier") or "").strip(),
+        "decision": str(payload.get("decision") or "").strip().lower(),
+        "reviewer_note": str(payload.get("reviewer_note") or "").strip(),
+        "review_bundle_hash": str(payload.get("review_bundle_hash") or "").strip(),
+        "reviewer": str(payload.get("reviewer") or "").strip() or "operator",
+    }
     stored = record_live_validation_report_decision(
-        report_key=str(payload.get("report_key") or ""),
-        payload_hash=str(payload.get("payload_hash") or ""),
-        target_tier=str(payload.get("target_tier") or ""),
-        decision=str(payload.get("decision") or ""),
-        reviewer_note=str(payload.get("reviewer_note") or ""),
-        review_bundle_hash=str(payload.get("review_bundle_hash") or ""),
-        reviewer=str(payload.get("reviewer") or ""),
+        report_key=normalized_request["report_key"],
+        payload_hash=normalized_request["payload_hash"],
+        target_tier=normalized_request["target_tier"],
+        decision=normalized_request["decision"],
+        reviewer_note=normalized_request["reviewer_note"],
+        review_bundle_hash=normalized_request["review_bundle_hash"],
+        reviewer=normalized_request["reviewer"],
+        idempotency_key=idempotency_key,
+        idempotency_request=normalized_request,
     )
     ledger = polymarket_live_validation_decisions_payload()
     ledger.update(
         {
             "stored": stored,
             "message": (
-                f"Recorded {stored.get('decision')} decision for {stored.get('target_tier')} "
+                f"Replayed {stored.get('decision')} decision for {stored.get('target_tier')} "
+                f"on report {stored.get('report_key')}."
+                if stored.get("idempotent_replay")
+                else f"Recorded {stored.get('decision')} decision for {stored.get('target_tier')} "
                 f"on report {stored.get('report_key')}."
             ),
         }
@@ -2139,26 +2943,66 @@ def polymarket_live_validation_decision_store_payload(payload: Mapping[str, Any]
     return ledger
 
 
-def polymarket_live_validation_report_store_payload(cfg: AppConfig, payload: Mapping[str, Any]) -> Dict[str, Any]:
+def polymarket_live_validation_report_store_payload(
+    cfg: AppConfig,
+    payload: Mapping[str, Any],
+    *,
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
     label = str(payload.get("label") or "").strip()
     source = str(payload.get("source") or "").strip()
     source_file = payload.get("source_file") if str(payload.get("source_file") or "").strip() else None
     allow_duplicate = bool(payload.get("allow_duplicate"))
     skip_duplicate = bool(payload.get("skip_duplicate", True)) and not allow_duplicate
-    report: Mapping[str, Any]
+    report: Optional[Mapping[str, Any]]
+    request_mode: str
 
     if "report_json" in payload and str(payload.get("report_json") or "").strip():
         report = parse_live_validation_report_json(str(payload.get("report_json") or ""))
         source = source or "cli_import"
         label = label or "CLI import"
+        request_mode = "report_json"
     elif isinstance(payload.get("report"), Mapping):
         report = payload["report"]  # type: ignore[assignment]
         source = source or "cli_import"
         label = label or "Imported report"
+        request_mode = "report"
     else:
-        report = polymarket_live_validation_payload(cfg)
+        report = None
         source = source or "gui_snapshot"
         label = label or "GUI readiness snapshot"
+        request_mode = "generated"
+
+    idempotency_request: Dict[str, Any] = {
+        "mode": request_mode,
+        "source": source,
+        "label": label,
+        "source_file": str(Path(str(source_file))) if source_file is not None else "",
+        "duplicate_policy": "allow" if allow_duplicate or not skip_duplicate else "skip",
+    }
+    if request_mode != "generated":
+        assert report is not None
+        idempotency_request["payload_hash"] = live_validation_report_payload_hash(report)
+
+    replayed = (
+        reconcile_live_validation_report_idempotency(
+            idempotency_key=idempotency_key,
+            idempotency_request=idempotency_request,
+        )
+        if idempotency_key
+        else None
+    )
+    if replayed is not None:
+        inventory = polymarket_live_validation_reports_payload()
+        inventory.update(
+            {
+                "stored": replayed,
+                "message": f"Replayed live validation report {replayed.get('key')}.",
+            }
+        )
+        return inventory
+    if report is None:
+        report = polymarket_live_validation_payload(cfg)
 
     stored = store_live_validation_report(
         report,
@@ -2167,9 +3011,13 @@ def polymarket_live_validation_report_store_payload(cfg: AppConfig, payload: Map
         source_file=source_file,
         allow_duplicate=allow_duplicate,
         skip_duplicate=skip_duplicate,
+        idempotency_key=idempotency_key,
+        idempotency_request=idempotency_request,
     )
     inventory = polymarket_live_validation_reports_payload()
-    if stored.get("duplicate") and not stored.get("stored"):
+    if stored.get("idempotent_replay"):
+        message = f"Replayed live validation report {stored.get('key')}."
+    elif stored.get("duplicate") and not stored.get("stored"):
         message = f"Skipped duplicate live validation report {stored.get('duplicate_key') or stored.get('key')}."
     elif stored.get("duplicate"):
         message = f"Stored duplicate live validation report {stored.get('key')}."
@@ -4187,6 +5035,14 @@ def market_order_management_payload(
         )
     if not isinstance(payload, Mapping):
         raise ValueError("Order-management payload must be a JSON object.")
+    if (
+        normalized_market_id == "kalshi"
+        and normalized_operation == "decrease_order"
+        and payload.get("reduce_by") not in (None, "")
+    ):
+        raise ValueError(
+            "Kalshi reduce_by is disabled through the web API because stale quantities can over-reduce a live order; use an explicit reduce_to value."
+        )
     kwargs: Dict[str, Any] = {
         "market_id": str(payload.get("market_id") or payload.get("exchange_market_id") or "").strip(),
         "instructions": payload.get("instructions"),
@@ -4537,10 +5393,28 @@ class ReactGuiServer(ThreadingHTTPServer):
         adapter_registry: Optional[AdapterRegistry] = None,
         api_token: str = "",
         allowed_origins: Optional[Sequence[str]] = None,
+        max_http_workers: int = MAX_HTTP_WORKERS,
+        max_mutation_workers: Optional[int] = None,
+        mutation_lock_timeout_seconds: float = HTTP_MUTATION_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         bind_host = str(server_address[0]).strip()
         is_loopback = is_loopback_host(bind_host)
         token = str(api_token or "").strip()
+        worker_limit = int(max_http_workers)
+        if worker_limit < 1:
+            raise ValueError("max_http_workers must be at least 1.")
+        reserved_target = min(HTTP_RESERVED_READ_WORKERS, max(1, worker_limit // 4))
+        default_mutation_limit = max(1, min(MAX_HTTP_MUTATION_WORKERS, worker_limit - reserved_target))
+        mutation_limit = default_mutation_limit if max_mutation_workers is None else int(max_mutation_workers)
+        if mutation_limit < 1:
+            raise ValueError("max_mutation_workers must be at least 1.")
+        if worker_limit > 1 and mutation_limit >= worker_limit:
+            raise ValueError("max_mutation_workers must reserve at least one HTTP worker for reads.")
+        if worker_limit == 1 and mutation_limit != 1:
+            raise ValueError("A one-worker server supports exactly one mutation worker and cannot reserve read capacity.")
+        mutation_lock_timeout = float(mutation_lock_timeout_seconds)
+        if mutation_lock_timeout <= 0:
+            raise ValueError("mutation_lock_timeout_seconds must be positive.")
         if not is_loopback and not token:
             raise ValueError("A non-loopback React GUI bind requires a non-empty API token.")
         trusted_frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
@@ -4581,8 +5455,145 @@ class ReactGuiServer(ThreadingHTTPServer):
             "last_polled_at": None,
             "last_message": "Not polled yet.",
         }
-        self.http_metrics = HttpRequestMetrics()
+        self.http_metrics = HttpRequestMetrics(worker_limit, mutation_limit, max(0, worker_limit - mutation_limit))
         self.auth_failure_limiter = AuthFailureLimiter()
+        self.max_http_workers = worker_limit
+        self.max_mutation_workers = mutation_limit
+        self.reserved_read_workers = max(0, worker_limit - mutation_limit)
+        self.mutation_lock_timeout_seconds = mutation_lock_timeout
+        self._worker_slots = threading.BoundedSemaphore(worker_limit)
+        self._mutation_slots = threading.BoundedSemaphore(mutation_limit)
+        self.mutation_lock = threading.RLock()
+        self._draining = threading.Event()
+        self._drain_condition = threading.Condition()
+        self._admitted_mutations = 0
+        self._readiness_cache_lock = threading.Lock()
+        self._readiness_cache_at = 0.0
+        self._readiness_cache: Dict[str, Any] = {}
+
+    def try_admit_mutation(self) -> bool:
+        """Bound mutation body readers and lock waiters below the HTTP worker pool."""
+        if self._draining.is_set():
+            return False
+        if not self._mutation_slots.acquire(blocking=False):
+            self.http_metrics.record_mutation_admission_rejection()
+            return False
+        with self._drain_condition:
+            if self._draining.is_set():
+                self._mutation_slots.release()
+                return False
+            self._admitted_mutations += 1
+        self.http_metrics.mutation_admitted()
+        return True
+
+    def finish_mutation_admission(self) -> None:
+        self.http_metrics.mutation_finished()
+        with self._drain_condition:
+            self._admitted_mutations = max(0, self._admitted_mutations - 1)
+            if self._admitted_mutations == 0:
+                self._drain_condition.notify_all()
+        self._mutation_slots.release()
+
+    @property
+    def is_draining(self) -> bool:
+        return self._draining.is_set()
+
+    def begin_drain(self) -> bool:
+        """Stop admitting mutations and report whether this call began the drain."""
+
+        with self._drain_condition:
+            already_draining = self._draining.is_set()
+            self._draining.set()
+            return not already_draining
+
+    def wait_for_mutation_drain(self, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        with self._drain_condition:
+            while self._admitted_mutations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._drain_condition.wait(timeout=remaining)
+            return True
+
+    def readiness_snapshot(self) -> Dict[str, Any]:
+        """Return cached local probes combined with current admission counters."""
+        now = time.monotonic()
+        with self._readiness_cache_lock:
+            if not self._readiness_cache or now - self._readiness_cache_at >= LOCAL_READINESS_CACHE_SECONDS:
+                self._readiness_cache = local_resource_readiness(self.config_path, self.frontend_dir)
+                self._readiness_cache_at = now
+            resources = dict(self._readiness_cache)
+        metrics = self.http_metrics.snapshot()
+        return runtime_readiness_payload(
+            resources,
+            {
+                **metrics,
+                "max_http_workers": self.max_http_workers,
+                "max_mutation_workers": self.max_mutation_workers,
+                "reserved_read_workers": self.reserved_read_workers,
+                "mutation_lock_timeout_seconds": self.mutation_lock_timeout_seconds,
+                "draining": self.is_draining,
+            },
+            self.wallet_polling,
+        )
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """Admit at most ``max_http_workers`` connections before creating threads."""
+        if not self._worker_slots.acquire(blocking=False):
+            self.http_metrics.record_overload_rejection()
+            self._reject_overloaded_request(request)
+            return
+        self.http_metrics.request_started()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.http_metrics.request_finished()
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.http_metrics.request_finished()
+            self._worker_slots.release()
+
+    def _reject_overloaded_request(self, request: Any) -> None:
+        request_id = secrets.token_hex(12)
+        data = json.dumps(
+            api_error_payload(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "server_overloaded",
+                "The HTTP server has reached its active request limit; retry shortly.",
+                {"retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS},
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json; charset=utf-8\r\n"
+            b"Cache-Control: no-store\r\n"
+            b"Connection: close\r\n"
+            b"Retry-After: "
+            + str(HTTP_OVERLOAD_RETRY_AFTER_SECONDS).encode("ascii")
+            + b"\r\nX-Content-Type-Options: nosniff\r\n"
+            + b"X-Frame-Options: DENY\r\n"
+            + b"X-Request-ID: "
+            + request_id.encode("ascii")
+            + b"\r\nContent-Length: "
+            + str(len(data)).encode("ascii")
+            + b"\r\n\r\n"
+            + data
+        )
+        try:
+            request.settimeout(float(HTTP_OVERLOAD_RETRY_AFTER_SECONDS))
+            request.sendall(response)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
 
 
 class ReactGuiHandler(BaseHTTPRequestHandler):
@@ -4675,17 +5686,17 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:
         if not self._require_authorized_request():
             return
-        self._handle_mutation("PATCH")
+        self._handle_admitted_mutation("PATCH")
 
     def do_POST(self) -> None:
         if not self._require_authorized_request():
             return
-        self._handle_mutation("POST")
+        self._handle_admitted_mutation("POST")
 
     def do_DELETE(self) -> None:
         if not self._require_authorized_request():
             return
-        self._handle_mutation("DELETE")
+        self._handle_admitted_mutation("DELETE")
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # handle_one_request emits a structured, query-string-free event instead.
@@ -4735,18 +5746,21 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
     def _handle_api_get(self, path: str, query: str = "") -> None:
         try:
-            cfg = self._load_config()
             query_params = parse_qs(query, keep_blank_values=True)
             if path == "/api/health":
+                readiness = self.app_server.readiness_snapshot()
                 self._send_json(
                     HTTPStatus.OK,
                     health_payload(
                         self.app_server.config_path,
                         self.app_server.frontend_dir,
                         self.app_server.runtime_identity,
+                        self.app_server.max_http_workers,
+                        readiness,
                     ),
                 )
                 return
+            cfg = self._load_config()
             if path == "/api/state":
                 self._send_json(
                     HTTPStatus.OK,
@@ -4760,11 +5774,16 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                         self.app_server.wallet_polling,
                         self.app_server.wallet_recent_activity,
                         self.app_server.runtime_identity,
+                        self.app_server.max_http_workers,
+                        self.app_server.readiness_snapshot(),
                     ),
                 )
                 return
             if path == "/api/config":
                 self._send_json(HTTPStatus.OK, config_payload(cfg))
+                return
+            if path == "/api/mutations":
+                self._send_json(HTTPStatus.OK, mutation_journal_payload(cfg))
                 return
             if path == "/api/markets":
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
@@ -5110,16 +6129,334 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             print(f"[web-gui] internal error while handling GET {path}: {type(exc).__name__}")
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")
 
-    def _handle_mutation(self, method: str) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
+    def _handle_admitted_mutation(self, method: str) -> None:
+        """Bound body parsing and lock wait without weakening mutation serialization."""
+        if not self.app_server.try_admit_mutation():
+            _discard_available_request_body(self)
+            draining = self.app_server.is_draining
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "server_draining" if draining else "mutation_admission_saturated",
+                (
+                    "The server is draining and is not accepting new mutations."
+                    if draining
+                    else "The mutation admission limit is saturated; read and health capacity remains reserved."
+                ),
+                {"retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS},
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if not path.startswith("/api/"):
+                self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown route.")
+                return
+            try:
+                payload = _read_json_body(self)
+                idempotency_key = _validated_idempotency_key(self.headers, payload)
+                specialized_idempotency = method == "POST" and path in IDEMPOTENT_MUTATION_ROUTES
+                durable_mutation = _is_general_durable_mutation(method, path)
+                if specialized_idempotency and not idempotency_key:
+                    raise ValueError("Idempotency-Key is required for this durable create route.")
+                if durable_mutation and not str(self.headers.get("Idempotency-Key") or ""):
+                    raise ValueError("Idempotency-Key header is required for this durable mutation route.")
+                if idempotency_key and not (specialized_idempotency or durable_mutation):
+                    raise ValueError("Idempotency-Key is not supported for this mutation route.")
+            except json.JSONDecodeError:
+                self._send_error(HTTPStatus.BAD_REQUEST, "invalid_json", "Invalid JSON request body.")
+                return
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
+                return
+
+            acquired = self.app_server.mutation_lock.acquire(
+                timeout=self.app_server.mutation_lock_timeout_seconds
+            )
+            if not acquired:
+                self.app_server.http_metrics.record_mutation_lock_timeout()
+                self._send_error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "mutation_busy",
+                    "Another mutation is still running; retry rather than waiting indefinitely.",
+                    {"retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS},
+                    retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+                )
+                return
+            self.app_server.http_metrics.mutation_started()
+            try:
+                self._handle_mutation(method, path, payload, idempotency_key)
+            finally:
+                self.app_server.http_metrics.mutation_stopped()
+                self.app_server.mutation_lock.release()
+        finally:
+            self.app_server.finish_mutation_admission()
+
+    def _prepare_general_idempotent_mutation(
+        self,
+        cfg: AppConfig,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> tuple[Optional[MutationJournalEntry], bool]:
+        """Resolve replay/conflict state and persist the live dispatch barrier."""
+
+        live = _is_live_order_management_route(method, path)
+        route_parts = str(path or "").strip("/").split("/")
+        if (
+            live
+            and len(route_parts) == 5
+            and unquote(route_parts[2]).strip().lower() == "kalshi"
+            and unquote(route_parts[4]).strip().lower() == "decrease_order"
+            and payload.get("reduce_by") not in (None, "")
+        ):
+            raise ValueError(
+                "Kalshi reduce_by is disabled through the web API because stale quantities can over-reduce a live order; use an explicit reduce_to value."
+            )
+        if live and len(route_parts) == 5:
+            market_id = unquote(route_parts[2]).strip().lower()
+            operation = unquote(route_parts[4]).strip().lower()
+            require_market_enabled(cfg, market_id, "order management")
+            adapter = adapter_for_market(cfg, market_id, self.app_server.adapter_registry)
+            supported = tuple(
+                str(value).strip().lower()
+                for value in getattr(adapter, "order_management_operations", ())
+            )
+            if operation not in supported:
+                raise UnsupportedFeatureError(
+                    market_id,
+                    "order_management",
+                    f"{market_id} does not support order-management operation "
+                    f"{operation or '<empty>'}. Supported operations: {', '.join(supported) or 'none'}.",
+                )
+        entry = _mutation_journal_entry(cfg, idempotency_key)
+        if entry is not None:
+            _assert_mutation_request_matches(entry, method, path, payload)
+            if entry.state == "completed":
+                self._send_json(entry.response_status or HTTPStatus.OK, dict(entry.response))
+                return None, True
+            if entry.state == "rejected":
+                if (
+                    entry.outcome_code == "pre_dispatch_validation_failed"
+                    and entry.response_status
+                    and isinstance(entry.response, dict)
+                ):
+                    self._send_json(entry.response_status, dict(entry.response))
+                    return None, True
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    "mutation_rejected_after_reconciliation",
+                    "The reconciled mutation was discarded and cannot be retried with this Idempotency-Key.",
+                    {"mutation_id": entry.id, "state": entry.state},
+                )
+                return None, True
+            if live and entry.state == "retryable" and entry.replay_authorized_at:
+                entry.state = "pending"
+                entry.updated_at = int(time.time())
+                entry.replay_authorized_at = 0
+                entry.outcome_code = "manual_retry_started"
+                entry.outcome_message = "The operator-authorized retry is in progress."
+                self._save_config(cfg)
+                return entry, False
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_reconciliation_required" if entry.live else "mutation_reconciliation_required",
+                (
+                    "The previous live dispatch outcome is unresolved; inspect venue history and reconcile it before retrying."
+                    if entry.live
+                    else "The previous durable mutation outcome is unresolved and cannot be run again automatically."
+                ),
+                {
+                    "mutation_id": entry.id,
+                    "state": entry.state,
+                    "reconciliation_route": "/api/mutations/reconcile" if entry.live else None,
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return None, True
+
+        entry = _new_mutation_journal_entry(
+            idempotency_key,
+            method,
+            path,
+            payload,
+            live=live,
+        )
+        if live:
+            cfg.append_mutation_journal(entry)
+            self._save_config(cfg)
+        return entry, False
+
+    def _commit_local_idempotent_mutation(
+        self,
+        cfg: AppConfig,
+        entry: MutationJournalEntry,
+        response: Mapping[str, Any],
+        *,
+        status: int = HTTPStatus.OK,
+        preserve_response_shape: bool = False,
+        client_response: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        stored = _stored_mutation_result(response, preserve_shape=preserve_response_shape)
+        entry.state = "completed"
+        entry.response_status = int(status)
+        entry.response = stored
+        entry.outcome_code = "committed"
+        entry.outcome_message = "The local mutation and replay result were committed atomically."
+        entry.updated_at = int(time.time())
+        cfg.append_mutation_journal(entry)
+        self._save_config(cfg)
+        self._send_json(
+            status,
+            _client_mutation_result(client_response) if client_response is not None else stored,
+        )
+
+    def _execute_live_order_management(
+        self,
+        cfg: AppConfig,
+        entry: MutationJournalEntry,
+        market_id: str,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Execute once behind a durable pending barrier; never auto-retry ambiguity."""
+
+        try:
+            result = market_order_management_payload(
+                cfg,
+                self.app_server.adapter_registry,
+                market_id,
+                operation,
+                payload,
+            )
+        except (MarketConfigurationError, UnsupportedFeatureError) as exc:
+            # The supported live adapters use these explicit exception types
+            # for validation that completes before their transport call.  Keep
+            # generic exceptions (including a plain ValueError from a client or
+            # response parser) ambiguous: once adapter code has been entered,
+            # the caller cannot prove that the venue was not reached.
+            rejection = api_error_payload(
+                HTTPStatus.BAD_REQUEST,
+                "validation_error",
+                str(exc),
+                {"mutation_id": entry.id, "state": "rejected"},
+            )
+            entry.state = "rejected"
+            entry.response_status = HTTPStatus.BAD_REQUEST
+            entry.response = rejection
+            entry.outcome_code = "pre_dispatch_validation_failed"
+            entry.outcome_message = "Local validation failed before the live adapter was dispatched."
+            entry.updated_at = int(time.time())
+            try:
+                self._save_config(cfg)
+            except Exception as durability_exc:
+                # The durable pending barrier may still be on disk.  Keep the
+                # response fail-closed until that disposition can be saved.
+                print(
+                    "[web-gui] pre-dispatch rejection could not be durably updated: "
+                    f"{type(durability_exc).__name__}"
+                )
+                self._send_error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "live_mutation_durability_uncertain",
+                    "Local validation failed, but its replay disposition was not durably committed. Reconcile before retrying.",
+                    {
+                        "mutation_id": entry.id,
+                        "state": "pending",
+                        "reconciliation_route": "/api/mutations/reconcile",
+                    },
+                    retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+                )
+                return
+            self._send_json(HTTPStatus.BAD_REQUEST, rejection)
+            return
+        except Exception as exc:
+            entry.state = "ambiguous"
+            entry.response_status = HTTPStatus.SERVICE_UNAVAILABLE
+            entry.response = {}
+            entry.outcome_code = "live_dispatch_outcome_unknown"
+            entry.outcome_message = (
+                "The live adapter returned without a provable non-dispatch outcome; venue reconciliation is required."
+            )
+            entry.updated_at = int(time.time())
+            try:
+                self._save_config(cfg)
+            except Exception as durability_exc:
+                print(
+                    "[web-gui] live mutation ambiguity could not be durably updated: "
+                    f"{type(durability_exc).__name__}"
+                )
+            print(
+                "[web-gui] live order-management outcome requires reconciliation: "
+                f"{type(exc).__name__}"
+            )
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_outcome_ambiguous",
+                "The live mutation may have reached the venue. It will not be retried automatically; reconcile venue history first.",
+                {
+                    "mutation_id": entry.id,
+                    "state": "ambiguous",
+                    "reconciliation_route": "/api/mutations/reconcile",
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+
+        stored = _stored_mutation_result(result)
+        entry.state = "completed"
+        entry.response_status = HTTPStatus.OK
+        entry.response = stored
+        entry.outcome_code = "live_dispatch_completed"
+        entry.outcome_message = "The live mutation result was durably recorded."
+        entry.updated_at = int(time.time())
+        try:
+            self._save_config(cfg)
+        except Exception as exc:
+            # The on-disk pending barrier remains fail-closed.  Do not expose
+            # success when its replay disposition was not durably committed.
+            print(f"[web-gui] live mutation result durability is uncertain: {type(exc).__name__}")
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_durability_uncertain",
+                "The venue returned a result, but its replay record was not durably committed. Reconcile before retrying.",
+                {
+                    "mutation_id": entry.id,
+                    "state": "pending",
+                    "reconciliation_route": "/api/mutations/reconcile",
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+        self._send_json(HTTPStatus.OK, stored)
+
+    def _handle_mutation(
+        self,
+        method: str,
+        path: str,
+        payload: Dict[str, Any],
+        idempotency_key: str = "",
+    ) -> None:
         if not path.startswith("/api/"):
             self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown route.")
             return
 
         try:
-            payload = _read_json_body(self)
             cfg = self._load_config()
+            journal_entry: Optional[MutationJournalEntry] = None
+            if _is_general_durable_mutation(method, path):
+                journal_entry, handled = self._prepare_general_idempotent_mutation(
+                    cfg,
+                    method,
+                    path,
+                    payload,
+                    idempotency_key,
+                )
+                if handled:
+                    return
+                if journal_entry is None:
+                    raise RuntimeError("Durable mutation journal preparation failed.")
             if method == "POST":
                 order_route = path.strip("/").split("/")
                 if len(order_route) == 4 and order_route[:2] == ["api", "markets"] and order_route[3] == "positions":
@@ -5134,15 +6471,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     )
                     return
                 if len(order_route) == 5 and order_route[:2] == ["api", "markets"] and order_route[3] == "orders":
-                    self._send_json(
-                        HTTPStatus.OK,
-                        market_order_management_payload(
-                            cfg,
-                            self.app_server.adapter_registry,
-                            unquote(order_route[2]),
-                            unquote(order_route[4]),
-                            payload,
-                        ),
+                    self._execute_live_order_management(
+                        cfg,
+                        journal_entry,
+                        unquote(order_route[2]),
+                        unquote(order_route[4]),
+                        payload,
                     )
                     return
             if method == "PATCH" and path == "/api/config":
@@ -5156,6 +6490,34 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 self._save_config(cfg)
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
                 return
+            if method == "POST" and path == "/api/mutations/reconcile":
+                if str(payload.get("confirm_reconciliation") or "").strip() != LIVE_MUTATION_RECONCILIATION_CONFIRMATION:
+                    raise ValueError(
+                        "Live mutation reconciliation requires exact confirmation text "
+                        f"{LIVE_MUTATION_RECONCILIATION_CONFIRMATION}."
+                    )
+                raw_response = payload.get("response")
+                if raw_response is not None and not isinstance(raw_response, dict):
+                    raise ValueError("response must be a JSON object when supplied.")
+                entry = cfg.reconcile_ambiguous_mutation(
+                    str(payload.get("mutation_id") or ""),
+                    str(payload.get("resolution") or ""),
+                    _stored_mutation_result(raw_response) if isinstance(raw_response, dict) else None,
+                )
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "reconciled": {
+                            "id": entry.id,
+                            "state": entry.state,
+                            "outcome_code": entry.outcome_code,
+                            "updated_at": entry.updated_at,
+                        },
+                        **mutation_journal_payload(cfg),
+                    },
+                )
+                return
             if method == "POST" and path == "/api/polymarket/users/mdd/cache/purge":
                 self._send_json(HTTPStatus.OK, polymarket_mdd_cache_purge_payload(payload))
                 return
@@ -5164,13 +6526,32 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, polymarket_mdd_cache_purge_payload({"key": cache_key}))
                 return
             if method == "POST" and path == "/api/polymarket/live-validation/reports":
-                self._send_json(HTTPStatus.OK, polymarket_live_validation_report_store_payload(cfg, payload))
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_report_store_payload(
+                        cfg,
+                        payload,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
                 return
             if method == "POST" and path == "/api/polymarket/live-validation/decisions":
-                self._send_json(HTTPStatus.OK, polymarket_live_validation_decision_store_payload(payload))
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_decision_store_payload(
+                        payload,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
                 return
             if method == "POST" and path == "/api/polymarket/live-validation/promotion-proposal/snapshots":
-                self._send_json(HTTPStatus.OK, polymarket_live_validation_promotion_proposal_snapshot_store_payload(payload))
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+                        payload,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
                 return
             if method == "DELETE" and path.startswith("/api/polymarket/live-validation/promotion-proposal/snapshots/"):
                 snapshot_key = unquote(path.rsplit("/", 1)[-1])
@@ -5186,11 +6567,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/api/alerts":
                 alert = alert_from_payload(cfg, self.app_server.adapter_registry, payload)
                 cfg.alerts.append(alert)
-                self._save_config(cfg)
-                self._send_json(
-                    HTTPStatus.OK,
-                    alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                response = alerts_payload(
+                    cfg,
+                    self.app_server.adapter_registry,
+                    self.app_server.alert_price_state,
                 )
+                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
                 return
             if method == "POST" and path == "/api/alerts/refresh":
                 result = refresh_all_alert_prices(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state)
@@ -5251,11 +6633,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/wallets":
                 add_wallet_watch(cfg, payload)
-                self._save_config(cfg)
-                self._send_json(
-                    HTTPStatus.OK,
-                    wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                response = wallets_payload(
+                    cfg,
+                    self.app_server.wallet_polling,
+                    self.app_server.wallet_recent_activity,
                 )
+                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
                 return
             if method == "PATCH" and path == "/api/wallets/polling":
                 interval = optional_positive_float(payload.get("poll_interval_seconds"), "Poll interval")
@@ -5335,17 +6718,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/paper/orders":
                 result = submit_paper_order(cfg, self.app_server.adapter_registry, payload)
-                self._save_config(cfg)
                 self.app_server.paper_position_marks = _paper_marks_for_rows(
                     self.app_server.paper_position_marks,
                     paper_position_rows(cfg.paper_trades),
                 )
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        **result,
-                        "paper": paper_payload(cfg, self.app_server.paper_position_marks),
-                    },
+                response = {
+                    **result,
+                    "paper": paper_payload(cfg, self.app_server.paper_position_marks),
+                }
+                self._commit_local_idempotent_mutation(
+                    cfg,
+                    journal_entry,
+                    response,
+                    preserve_response_shape=True,
+                    client_response=response,
                 )
                 return
             if method == "POST" and path == "/api/paper/history/use":
@@ -5439,6 +6825,34 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 {"schema_validation": exc.validation},
             )
             return
+        except ConfigConflictError:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "config_conflict",
+                "Configuration changed in another process. Reload state and retry the mutation.",
+            )
+            return
+        except IdempotencyConflictError as exc:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "idempotency_conflict",
+                str(exc),
+            )
+            return
+        except LiveValidationStoreDurabilityError:
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_validation_store_durability_uncertain",
+                "The evidence record may already be committed but durable flush confirmation failed. "
+                "Retry this exact request with the same Idempotency-Key.",
+                {
+                    "committed": True,
+                    "retryable": True,
+                    "retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
             return
@@ -5477,7 +6891,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             relative_path = target.name
 
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        if target.stat().st_size > MAX_HTTP_RESPONSE_BYTES:
+            self._send_response_too_large()
+            return
         data = target.read_bytes()
+        if len(data) > MAX_HTTP_RESPONSE_BYTES:
+            self._send_response_too_large()
+            return
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
@@ -5577,7 +6997,11 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         return catalog
 
     def _send_json(self, status: int, payload: Dict[str, Any], *, retry_after_seconds: Optional[int] = None) -> None:
-        data = _json_bytes(payload)
+        try:
+            data = _json_bytes(payload)
+        except HttpResponseTooLargeError:
+            self._send_response_too_large()
+            return
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -5591,7 +7015,11 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.close_connection = True
 
     def _send_text(self, status: int, text: str, *, content_type: str, filename: Optional[str] = None) -> None:
-        data = str(text).encode("utf-8")
+        try:
+            data = _utf8_bytes(text)
+        except HttpResponseTooLargeError:
+            self._send_response_too_large()
+            return
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
@@ -5599,6 +7027,28 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         if filename:
             safe_name = _safe_attachment_filename(filename)
             self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self._write_response_body(data)
+        self.close_connection = True
+
+    def _send_response_too_large(self) -> None:
+        self.app_server.http_metrics.record_response_too_large()
+        data = json.dumps(
+            api_error_payload(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "response_too_large",
+                "The server refused to send a response larger than its configured byte limit.",
+                {"max_response_bytes": MAX_HTTP_RESPONSE_BYTES},
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
@@ -5616,7 +7066,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         view = memoryview(data)
         while view:
-            chunk = view[:32768]
+            chunk = view[:HTTP_RESPONSE_CHUNK_BYTES]
             written = self.wfile.write(chunk)
             if written is None:
                 written = len(chunk)
@@ -5646,7 +7096,10 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", _safe_http_header_value(origin))
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, PATCH, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Market-Sentinel-Token")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-Market-Sentinel-Token, Idempotency-Key",
+        )
         self.send_header("Access-Control-Expose-Headers", "X-Request-ID")
 
 
@@ -5721,12 +7174,33 @@ def run_server(
         print("React build not found in the configured frontend directory")
         print(f"Build it with `{REACT_BUILD_COMMAND}`, or run `{REACT_DEV_COMMAND}` for Vite.")
     print(f"Tkinter GUI is unchanged: run `{PYTHON_GUI_SCRIPT}` or `{PYTHON_GUI_COMMAND}`.")
+    previous_signal_handlers: Dict[int, Any] = {}
+
+    def begin_signal_drain(signum: int, _frame: Any) -> None:
+        if server.begin_drain():
+            print(f"\nSignal {signum} received; draining mutations before shutdown.")
+            threading.Thread(target=server.shutdown, name="market-sentinel-shutdown", daemon=True).start()
+
+    if threading.current_thread() is threading.main_thread():
+        for signal_name in ("SIGTERM", "SIGINT"):
+            signal_number = getattr(signal, signal_name, None)
+            if signal_number is None:
+                continue
+            previous_signal_handlers[int(signal_number)] = signal.getsignal(signal_number)
+            signal.signal(signal_number, begin_signal_drain)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping React GUI API.")
     finally:
+        server.begin_drain()
+        if not server.wait_for_mutation_drain(HTTP_MUTATION_DRAIN_TIMEOUT_SECONDS):
+            print(
+                "[web-gui] mutation drain deadline expired; unresolved live requests remain protected by durable pending journal entries."
+            )
         server.server_close()
+        for signal_number, previous_handler in previous_signal_handlers.items():
+            signal.signal(signal_number, previous_handler)
 
 
 def main() -> None:
@@ -5734,6 +7208,12 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(
+        "--frontend-dir",
+        type=Path,
+        default=DEFAULT_FRONTEND_DIR,
+        help="Built React frontend directory. Must remain beneath the deployment resource root.",
+    )
     parser.add_argument(
         "--api-token",
         default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""),
@@ -5758,6 +7238,7 @@ def main() -> None:
         api_token=args.api_token,
         allow_remote=args.allow_remote,
         allowed_origins=configured_allowed_origins(args.allow_origin),
+        frontend_dir=args.frontend_dir,
     )
 
 

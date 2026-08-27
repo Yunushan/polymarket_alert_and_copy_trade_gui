@@ -234,17 +234,12 @@ class IowaElectronicMarketsAdapter(MarketAdapter):
                 "IEM data_url must use iemweb.biz.uiowa.edu or iem.uiowa.edu unless "
                 "iem_allow_custom_data_host is explicitly enabled for a test/archive mirror."
             )
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                "GET", url, headers={}, timeout=self.runtime.timeout_seconds
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"IEM historical data request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"IEM historical data HTTP {status}.")
-        return str(getattr(response, "text", "") or "")
+        return self.runtime.request_text(
+            "GET",
+            url,
+            headers={},
+            error_context="IEM historical data",
+        )
 
     def _market_specs(self) -> List[Dict[str, Any]]:
         configured: Any = self.config.get("iem_historical_markets")

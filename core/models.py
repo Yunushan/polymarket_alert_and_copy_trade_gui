@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 from typing import Literal, Optional, Dict, Any, List, cast
+import hashlib
+import json
 import uuid
 import time
 
@@ -12,8 +14,12 @@ PriceSource = Literal["last_trade", "midpoint", "best_bid", "best_ask"]
 Direction = Literal["above", "below"]
 Theme = Literal["light", "dark"]
 UIDesign = Literal["classic", "aurora_2026", "graphite_2026", "sentinel_2027"]
+CopyActivityState = Literal["pending", "retryable", "completed", "rejected", "ambiguous"]
+MutationJournalState = Literal["pending", "retryable", "completed", "rejected", "ambiguous"]
 DEFAULT_MARKET_ID = "polymarket"
 DEFAULT_UI_DESIGN: UIDesign = "aurora_2026"
+MAX_MUTATION_JOURNAL_ENTRIES = 256
+MAX_MUTATION_RESULT_BYTES = 256 * 1024
 
 
 def _uuid() -> str:
@@ -106,6 +112,258 @@ class WalletWatch:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "WalletWatch":
         return WalletWatch(**d)
+
+
+@dataclass
+class CopyActivityOutboxEntry:
+    """Durable copy-trading disposition for one observed wallet activity.
+
+    ``pending`` and ``retryable`` entries may be processed automatically.
+    ``ambiguous`` means a live dispatch may have reached the venue and must
+    never be retried without operator reconciliation.
+    """
+
+    watch_id: str
+    activity_key: str
+    activity: Dict[str, Any]
+    market_id: str = DEFAULT_MARKET_ID
+    execution_policy: Dict[str, Any] = field(default_factory=dict)
+    state: CopyActivityState = "pending"
+    attempts: int = 0
+    outcome_code: str = ""
+    outcome_message: str = ""
+    dispatch: Dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=_uuid)
+    created_at: int = field(default_factory=lambda: int(time.time()))
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+    replay_authorized_at: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "CopyActivityOutboxEntry":
+        data = dict(d or {})
+        raw_state = str(data.get("state") or "pending").strip().lower()
+        # Unknown future/invalid states fail closed: automatic replay could
+        # duplicate a live order whose dispatch status is not understood.
+        state: CopyActivityState = (
+            cast(CopyActivityState, raw_state)
+            if raw_state in {"pending", "retryable", "completed", "rejected", "ambiguous"}
+            else "ambiguous"
+        )
+        activity = data.get("activity")
+        dispatch = data.get("dispatch")
+        execution_policy = data.get("execution_policy")
+        try:
+            attempts = max(0, int(data.get("attempts") or 0))
+        except (TypeError, ValueError):
+            attempts = 0
+        try:
+            created_at = max(0, int(data.get("created_at") or 0))
+        except (TypeError, ValueError):
+            created_at = 0
+        try:
+            updated_at = max(0, int(data.get("updated_at") or created_at))
+        except (TypeError, ValueError):
+            updated_at = created_at
+        try:
+            replay_authorized_at = max(0, int(data.get("replay_authorized_at") or 0))
+        except (TypeError, ValueError):
+            replay_authorized_at = 0
+        return CopyActivityOutboxEntry(
+            watch_id=str(data.get("watch_id") or ""),
+            activity_key=str(data.get("activity_key") or ""),
+            activity=dict(activity) if isinstance(activity, dict) else {},
+            market_id=str(data.get("market_id") or DEFAULT_MARKET_ID).strip().lower(),
+            execution_policy=(
+                dict(execution_policy) if isinstance(execution_policy, dict) else {}
+            ),
+            state=state,
+            attempts=attempts,
+            outcome_code=str(data.get("outcome_code") or ""),
+            outcome_message=str(data.get("outcome_message") or ""),
+            dispatch=dict(dispatch) if isinstance(dispatch, dict) else {},
+            id=str(data.get("id") or _uuid()),
+            created_at=created_at,
+            updated_at=updated_at,
+            replay_authorized_at=replay_authorized_at,
+        )
+
+
+def _shape_trim_mutation_value(value: Any, *, list_limit: int, string_limit: int) -> Any:
+    """Trim bulky result fields while retaining their JSON/container shape."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _shape_trim_mutation_value(
+                child,
+                list_limit=list_limit,
+                string_limit=string_limit,
+            )
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _shape_trim_mutation_value(
+                child,
+                list_limit=list_limit,
+                string_limit=string_limit,
+            )
+            for child in value[: max(0, list_limit)]
+        ]
+    if isinstance(value, str) and len(value) > string_limit:
+        return value[: max(0, string_limit)]
+    return value
+
+
+def bounded_mutation_result(
+    value: Any,
+    *,
+    preserve_shape: bool = False,
+    max_bytes: int = MAX_MUTATION_RESULT_BYTES,
+) -> Dict[str, Any]:
+    """Return one JSON-safe, size-bounded durable mutation result.
+
+    The journal is part of the persisted configuration, so it must not grow
+    with arbitrary venue responses.  Oversized results are replaced with a
+    stable receipt that is safe to replay without re-running the mutation.
+    """
+
+    candidate = dict(value) if isinstance(value, dict) else {"result": value}
+    try:
+        encoded = json.dumps(
+            candidate,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return {
+            "ok": True,
+            "mutation_result": {
+                "stored": "receipt_only",
+                "reason": "result_was_not_json_serializable",
+            },
+        }
+    limit = max(1, int(max_bytes))
+    if len(encoded) <= limit:
+        return json.loads(encoded.decode("utf-8"))
+    if preserve_shape:
+        # Prefer a compact, schema-shaped replay over a receipt-only object for
+        # routes whose clients dereference nested fields (for example
+        # ``paper`` and ``result.message``).  The final receipt fallback keeps
+        # the journal bounded even for unusually wide or deeply nested input.
+        for list_limit, string_limit in (
+            (128, 8 * 1024),
+            (64, 4 * 1024),
+            (32, 2 * 1024),
+            (16, 1024),
+            (8, 512),
+            (4, 256),
+            (0, 128),
+        ):
+            trimmed = _shape_trim_mutation_value(
+                candidate,
+                list_limit=list_limit,
+                string_limit=string_limit,
+            )
+            try:
+                trimmed_encoded = json.dumps(
+                    trimmed,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                continue
+            if len(trimmed_encoded) <= limit:
+                return json.loads(trimmed_encoded.decode("utf-8"))
+    return {
+        "ok": True,
+        "mutation_result": {
+            "stored": "receipt_only",
+            "reason": "result_exceeded_storage_limit",
+            "original_bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        },
+    }
+
+
+@dataclass
+class MutationJournalEntry:
+    """Durable idempotency disposition for one web mutation.
+
+    Only hashes of the client key and canonical request are retained.  A
+    ``pending`` or unknown live state is treated as ambiguous on replay,
+    preventing an automatic second venue dispatch after a crash or timeout.
+    """
+
+    key_hash: str
+    method: str
+    path: str
+    request_hash: str
+    live: bool = False
+    state: MutationJournalState = "pending"
+    response_status: int = 0
+    response: Dict[str, Any] = field(default_factory=dict)
+    outcome_code: str = ""
+    outcome_message: str = ""
+    id: str = field(default_factory=_uuid)
+    created_at: int = field(default_factory=lambda: int(time.time()))
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+    replay_authorized_at: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["response"] = bounded_mutation_result(self.response)
+        return data
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "MutationJournalEntry":
+        data = dict(d or {})
+        raw_state = str(data.get("state") or "ambiguous").strip().lower()
+        state: MutationJournalState = (
+            cast(MutationJournalState, raw_state)
+            if raw_state in {"pending", "retryable", "completed", "rejected", "ambiguous"}
+            else "ambiguous"
+        )
+        try:
+            response_status = int(data.get("response_status") or 0)
+        except (TypeError, ValueError):
+            response_status = 0
+        if response_status < 100 or response_status > 599:
+            response_status = 0
+        try:
+            created_at = max(0, int(data.get("created_at") or 0))
+        except (TypeError, ValueError):
+            created_at = 0
+        try:
+            updated_at = max(0, int(data.get("updated_at") or created_at))
+        except (TypeError, ValueError):
+            updated_at = created_at
+        try:
+            replay_authorized_at = max(0, int(data.get("replay_authorized_at") or 0))
+        except (TypeError, ValueError):
+            replay_authorized_at = 0
+        return MutationJournalEntry(
+            key_hash=str(data.get("key_hash") or ""),
+            method=str(data.get("method") or "").strip().upper(),
+            path=str(data.get("path") or "").strip(),
+            request_hash=str(data.get("request_hash") or ""),
+            live=bool(data.get("live", False)),
+            state=state,
+            response_status=response_status,
+            response=bounded_mutation_result(data.get("response") or {}),
+            outcome_code=str(data.get("outcome_code") or ""),
+            outcome_message=str(data.get("outcome_message") or ""),
+            id=str(data.get("id") or _uuid()),
+            created_at=created_at,
+            updated_at=updated_at,
+            replay_authorized_at=replay_authorized_at,
+        )
 
 
 @dataclass
@@ -215,17 +473,135 @@ class AppConfig:
     alerts: List[PriceAlert] = field(default_factory=list)
     paper_trades: List[PaperTradeRecord] = field(default_factory=list)
     wallets: List[WalletWatch] = field(default_factory=list)
+    copy_activity_outbox: List[CopyActivityOutboxEntry] = field(default_factory=list)
+    mutation_journal: List[MutationJournalEntry] = field(default_factory=list)
     copytrading: CopyTradeSettings = field(default_factory=CopyTradeSettings)
     markets: Dict[str, MarketConfig] = field(default_factory=default_market_configs)
     selected_market_id: str = DEFAULT_MARKET_ID
     theme: Theme = "light"
     ui_design: UIDesign = DEFAULT_UI_DESIGN
 
+    def reconcile_ambiguous_copy_activity(
+        self,
+        entry_id: str,
+        resolution: str,
+    ) -> CopyActivityOutboxEntry:
+        """Record an operator's venue reconciliation for one ambiguous dispatch."""
+
+        entry = next((item for item in self.copy_activity_outbox if item.id == entry_id), None)
+        if entry is None:
+            raise ValueError("Copy activity outbox entry was not found.")
+        if entry.state != "ambiguous":
+            raise ValueError("Only ambiguous copy activity entries can be reconciled.")
+        normalized = str(resolution or "").strip().lower().replace("-", "_")
+        transitions = {
+            "confirmed_dispatched": (
+                "completed",
+                "manual_dispatch_confirmed",
+                "Operator confirmed the live dispatch in venue order history.",
+            ),
+            "confirmed_not_dispatched": (
+                "retryable",
+                "manual_dispatch_cleared",
+                "Operator confirmed no venue dispatch; automatic retry is allowed.",
+            ),
+            "discard": (
+                "rejected",
+                "manual_dispatch_discarded",
+                "Operator discarded the ambiguous activity without retry.",
+            ),
+        }
+        transition = transitions.get(normalized)
+        if transition is None:
+            raise ValueError(
+                "Resolution must be confirmed_dispatched, confirmed_not_dispatched, or discard."
+            )
+        state, entry.outcome_code, entry.outcome_message = transition
+        entry.state = cast(CopyActivityState, state)
+        entry.updated_at = int(time.time())
+        entry.replay_authorized_at = entry.updated_at if normalized == "confirmed_not_dispatched" else 0
+        return entry
+
+    def append_mutation_journal(self, entry: MutationJournalEntry) -> None:
+        """Append an entry while preserving unresolved live safety records."""
+
+        if len(self.mutation_journal) >= MAX_MUTATION_JOURNAL_ENTRIES:
+            removable = sorted(
+                (
+                    item
+                    for item in self.mutation_journal
+                    if item.state in {"completed", "rejected"}
+                ),
+                key=lambda item: (item.updated_at, item.created_at, item.id),
+            )
+            if not removable:
+                raise ValueError(
+                    "The mutation journal is full of unresolved entries; reconcile them before submitting another durable mutation."
+                )
+            remove_id = removable[0].id
+            self.mutation_journal = [item for item in self.mutation_journal if item.id != remove_id]
+        self.mutation_journal.append(entry)
+
+    def reconcile_ambiguous_mutation(
+        self,
+        entry_id: str,
+        resolution: str,
+        response: Optional[Dict[str, Any]] = None,
+    ) -> MutationJournalEntry:
+        """Record an operator's venue reconciliation for one live mutation."""
+
+        entry = next((item for item in self.mutation_journal if item.id == entry_id), None)
+        if entry is None:
+            raise ValueError("Mutation journal entry was not found.")
+        if not entry.live or entry.state not in {"pending", "ambiguous"}:
+            raise ValueError("Only pending or ambiguous live mutations can be reconciled.")
+        normalized = str(resolution or "").strip().lower().replace("-", "_")
+        now = int(time.time())
+        if normalized == "confirmed_dispatched":
+            entry.state = "completed"
+            entry.response_status = 200
+            entry.response = bounded_mutation_result(
+                response
+                or {
+                    "ok": True,
+                    "mutation": {
+                        "id": entry.id,
+                        "state": "completed",
+                        "reconciled": True,
+                    },
+                }
+            )
+            entry.outcome_code = "manual_dispatch_confirmed"
+            entry.outcome_message = "Operator confirmed the live mutation in venue history."
+            entry.replay_authorized_at = 0
+        elif normalized == "confirmed_not_dispatched":
+            entry.state = "retryable"
+            entry.response_status = 0
+            entry.response = {}
+            entry.outcome_code = "manual_dispatch_cleared"
+            entry.outcome_message = "Operator confirmed no venue dispatch; one retry is authorized."
+            entry.replay_authorized_at = now
+        elif normalized == "discard":
+            entry.state = "rejected"
+            entry.response_status = 409
+            entry.response = {}
+            entry.outcome_code = "manual_dispatch_discarded"
+            entry.outcome_message = "Operator discarded the ambiguous mutation without retry."
+            entry.replay_authorized_at = 0
+        else:
+            raise ValueError(
+                "Resolution must be confirmed_dispatched, confirmed_not_dispatched, or discard."
+            )
+        entry.updated_at = now
+        return entry
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "alerts": [a.to_dict() for a in self.alerts],
             "paper_trades": [t.to_dict() for t in self.paper_trades],
             "wallets": [w.to_dict() for w in self.wallets],
+            "copy_activity_outbox": [entry.to_dict() for entry in self.copy_activity_outbox],
+            "mutation_journal": [entry.to_dict() for entry in self.mutation_journal],
             "copytrading": self.copytrading.to_dict(),
             "markets": {market_id: cfg.to_dict() for market_id, cfg in self.markets.items()},
             "selected_market_id": self.selected_market_id,
@@ -238,6 +614,24 @@ class AppConfig:
         alerts = [PriceAlert.from_dict(x) for x in d.get("alerts", [])]
         paper_trades = [PaperTradeRecord.from_dict(x) for x in d.get("paper_trades", [])]
         wallets = [WalletWatch.from_dict(x) for x in d.get("wallets", [])]
+        raw_outbox = d.get("copy_activity_outbox", [])
+        copy_activity_outbox = (
+            [CopyActivityOutboxEntry.from_dict(x) for x in raw_outbox if isinstance(x, dict)]
+            if isinstance(raw_outbox, list)
+            else []
+        )
+        raw_mutation_journal = d.get("mutation_journal", [])
+        mutation_journal = (
+            [MutationJournalEntry.from_dict(x) for x in raw_mutation_journal if isinstance(x, dict)]
+            if isinstance(raw_mutation_journal, list)
+            else []
+        )
+        if len(mutation_journal) > MAX_MUTATION_JOURNAL_ENTRIES:
+            mutation_journal = sorted(
+                mutation_journal,
+                key=lambda item: (item.updated_at, item.created_at, item.id),
+                reverse=True,
+            )[:MAX_MUTATION_JOURNAL_ENTRIES]
         copytrading = CopyTradeSettings.from_dict(d.get("copytrading", {}))
         markets = default_market_configs()
         raw_markets = d.get("markets", {})
@@ -261,6 +655,8 @@ class AppConfig:
             alerts=alerts,
             paper_trades=paper_trades,
             wallets=wallets,
+            copy_activity_outbox=copy_activity_outbox,
+            mutation_journal=mutation_journal,
             copytrading=copytrading,
             markets=markets,
             selected_market_id=selected_market_id,

@@ -49,8 +49,15 @@ class PolymarketResponseError(PolymarketError):
     """Raised when an endpoint returns malformed or unexpected JSON."""
 
 
+class _ResponseTooLargeError(RuntimeError):
+    pass
+
+
 T = TypeVar("T")
 DEFAULT_USER_AGENT = "market-sentinel/1.0"
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+ERROR_RESPONSE_PREVIEW_BYTES = 4 * 1024
+_ORIGINAL_REQUEST = requests.request
 
 
 @dataclass(frozen=True)
@@ -103,10 +110,19 @@ def request_json(
     timeout: float = 15.0,
     retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY,
 ) -> Any:
-    response = _request(endpoint, path=path, params=params, payload=payload, headers=headers, timeout=timeout, retry_policy=retry_policy)
+    body = _request(
+        endpoint,
+        path=path,
+        params=params,
+        payload=payload,
+        headers=headers,
+        timeout=timeout,
+        retry_policy=retry_policy,
+        json_fallback=True,
+    )
     try:
-        return response.json()
-    except ValueError as exc:
+        return json.loads(body)
+    except (ValueError, RecursionError) as exc:
         raise PolymarketResponseError(
             f"{endpoint.service} {endpoint.method} {path or endpoint.path} returned non-JSON response."
         ) from exc
@@ -121,8 +137,14 @@ def request_bytes(
     timeout: float = 30.0,
     retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY,
 ) -> bytes:
-    response = _request(endpoint, path=path, params=params, headers=headers, timeout=timeout, retry_policy=retry_policy)
-    return bytes(response.content)
+    return _request(
+        endpoint,
+        path=path,
+        params=params,
+        headers=headers,
+        timeout=timeout,
+        retry_policy=retry_policy,
+    )
 
 
 def as_dict(data: Any, *, endpoint_name: str) -> Dict[str, Any]:
@@ -170,9 +192,10 @@ def _request(
     headers: Optional[Mapping[str, str]] = None,
     timeout: float,
     retry_policy: RetryPolicy,
-) -> requests.Response:
+    json_fallback: bool = False,
+) -> bytes:
     method = endpoint.method.upper()
-    url = endpoint_url(endpoint, path)
+    url = _validated_endpoint_url(endpoint, path)
     request_headers = dict(headers or {})
     request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
     request_headers.setdefault("Accept", "application/json")
@@ -190,6 +213,8 @@ def _request(
                 json=payload,
                 headers=request_headers or None,
                 timeout=timeout,
+                allow_redirects=False,
+                stream=True,
             )
         except requests.RequestException as exc:
             last_exc = exc
@@ -203,22 +228,83 @@ def _request(
                 url=url,
             ) from exc
 
-        if response.status_code < 400:
-            return response
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if 300 <= status_code < 400:
+            try:
+                preview = _response_preview(response)
+            finally:
+                _close_response(response)
+            raise PolymarketHTTPError(
+                f"{endpoint.service} {method} {url} returned a redirect, but redirects are disabled.",
+                service=endpoint.service,
+                method=method,
+                url=url,
+                status_code=status_code,
+                response_body=preview,
+            )
 
-        if response.status_code in TRANSIENT_STATUS_CODES and attempt < attempts:
+        if status_code >= 400 and status_code in TRANSIENT_STATUS_CODES and attempt < attempts:
+            _close_response(response)
             _sleep_before_retry(attempt, retry_policy, response=response)
             continue
 
-        error_cls = PolymarketRateLimitError if response.status_code == 429 else PolymarketHTTPError
-        raise error_cls(
-            f"{endpoint.service} {method} {url} returned HTTP {response.status_code}.",
-            service=endpoint.service,
-            method=method,
-            url=url,
-            status_code=response.status_code,
-            response_body=_response_preview(response),
-        )
+        if status_code >= 400:
+            try:
+                preview = _response_preview(response)
+            finally:
+                _close_response(response)
+            error_cls = PolymarketRateLimitError if status_code == 429 else PolymarketHTTPError
+            raise error_cls(
+                f"{endpoint.service} {method} {url} returned HTTP {status_code}.",
+                service=endpoint.service,
+                method=method,
+                url=url,
+                status_code=status_code,
+                response_body=preview,
+            )
+
+        read_error: Optional[requests.RequestException] = None
+        try:
+            content_length = _content_length(response)
+            if content_length is not None and content_length > MAX_RESPONSE_BYTES:
+                raise PolymarketHTTPError(
+                    f"{endpoint.service} {method} {url} exceeded the {MAX_RESPONSE_BYTES}-byte response limit.",
+                    service=endpoint.service,
+                    method=method,
+                    url=url,
+                    status_code=status_code,
+                )
+            body = _read_response_body(
+                response,
+                max_bytes=MAX_RESPONSE_BYTES,
+                json_fallback=json_fallback,
+            )
+        except _ResponseTooLargeError as exc:
+            raise PolymarketHTTPError(
+                f"{endpoint.service} {method} {url} exceeded the {MAX_RESPONSE_BYTES}-byte response limit.",
+                service=endpoint.service,
+                method=method,
+                url=url,
+                status_code=status_code,
+            ) from exc
+        except requests.RequestException as exc:
+            read_error = exc
+        finally:
+            _close_response(response)
+
+        if read_error is not None:
+            last_exc = read_error
+            if attempt < attempts:
+                _sleep_before_retry(attempt, retry_policy)
+                continue
+            raise PolymarketHTTPError(
+                f"{endpoint.service} {method} {url} failed while reading the response: {read_error}",
+                service=endpoint.service,
+                method=method,
+                url=url,
+                status_code=status_code,
+            ) from read_error
+        return body
 
     if last_exc is not None:
         raise PolymarketHTTPError(
@@ -248,12 +334,100 @@ def _retry_after_seconds(response: Optional[requests.Response]) -> Optional[floa
         return None
 
 
+def _validated_endpoint_url(endpoint: PolymarketEndpoint, path: Optional[str]) -> str:
+    # Import lazily to avoid the market_adapters package's adapter registry
+    # importing this Polymarket client while it is still being initialized.
+    from market_adapters.errors import MarketConfigurationError
+    from market_adapters.outbound import validate_outbound_url
+
+    url = endpoint_url(endpoint, path)
+    try:
+        return validate_outbound_url(
+            url,
+            setting_key=f"Polymarket {endpoint.service} endpoint",
+            resolve_addresses=requests.request is _ORIGINAL_REQUEST,
+        )
+    except MarketConfigurationError as exc:
+        raise PolymarketValidationError(str(exc)) from exc
+
+
+def _close_response(response: Any) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
+def _content_length(response: Any) -> Optional[int]:
+    headers = getattr(response, "headers", {})
+    value = str(headers.get("Content-Length") or "").strip() if hasattr(headers, "get") else ""
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _iter_response_content(response: Any, *, chunk_size: int, json_fallback: bool = False):
+    iterator = getattr(response, "iter_content", None)
+    if callable(iterator):
+        yield from iterator(chunk_size=chunk_size)
+        return
+
+    content = getattr(response, "content", None)
+    if content not in (None, b"", ""):
+        yield content.encode("utf-8") if isinstance(content, str) else bytes(content)
+        return
+
+    text = getattr(response, "text", None)
+    if text not in (None, ""):
+        yield str(text).encode("utf-8")
+        return
+
+    if json_fallback:
+        loader = getattr(response, "json", None)
+        if callable(loader):
+            try:
+                yield json.dumps(loader()).encode("utf-8")
+            except (TypeError, ValueError):
+                return
+
+
+def _read_response_body(
+    response: Any,
+    *,
+    max_bytes: int,
+    json_fallback: bool = False,
+    truncate: bool = False,
+) -> bytes:
+    body = bytearray()
+    for chunk in _iter_response_content(response, chunk_size=64 * 1024, json_fallback=json_fallback):
+        if not chunk:
+            continue
+        raw = chunk.encode("utf-8") if isinstance(chunk, str) else bytes(chunk)
+        remaining = max_bytes - len(body)
+        if truncate:
+            if remaining <= 0:
+                break
+            body.extend(raw[:remaining])
+            if len(body) >= max_bytes:
+                break
+            continue
+        if len(raw) > remaining:
+            raise _ResponseTooLargeError
+        body.extend(raw)
+    return bytes(body)
+
+
 def _response_preview(response: requests.Response) -> str:
     try:
-        text = response.text
+        body = _read_response_body(
+            response,
+            max_bytes=ERROR_RESPONSE_PREVIEW_BYTES,
+            json_fallback=True,
+            truncate=True,
+        )
     except Exception:
-        try:
-            return json.dumps(response.json())[:500]
-        except Exception:
-            return ""
-    return str(text)[:500]
+        return ""
+    return body.decode("utf-8", errors="replace").strip()

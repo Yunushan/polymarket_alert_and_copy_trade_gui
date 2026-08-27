@@ -16,7 +16,12 @@ from unittest.mock import patch
 from app import (
     App,
     AdapterPricePoller,
+    CopyActivityOutcome,
+    WalletActivityTask,
     WalletPoller,
+    _COPY_ACTIVITY_MAX_REPLAY_AGE_SECONDS,
+    _apply_wallet_activity_checkpoint,
+    _copy_execution_policy,
     activity_key,
     application_resource_roots,
     extract_slug,
@@ -27,7 +32,14 @@ from app import (
     tkinter_gui_lifecycle_smoke_payload,
     tkinter_smoke_payload,
 )
-from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
+from core.models import (
+    AppConfig,
+    CopyActivityOutboxEntry,
+    CopyTradeSettings,
+    PaperTradeRecord,
+    PriceAlert,
+    WalletWatch,
+)
 from core.storage import ConfigLoadError
 from market_adapters import MARKET_IDS, build_default_registry
 from market_adapters.errors import MarketConfigurationError
@@ -278,6 +290,8 @@ class FakePolymarketAdapter:
     def __init__(self) -> None:
         self.preflight_calls = []
         self.preflight_error = None
+        self.geoblock_result = {"blocked": False, "country": "US", "region": "test"}
+        self.geoblock_error = None
 
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
         return OrderBookSnapshot(
@@ -292,6 +306,11 @@ class FakePolymarketAdapter:
         if self.preflight_error:
             raise self.preflight_error
         return {"approx_notional": float(order.size) * float(order.limit_price or 1.0)}
+
+    def check_geoblock(self):
+        if self.geoblock_error:
+            raise self.geoblock_error
+        return self.geoblock_result
 
 
 class FakeOpinionActivityAdapter:
@@ -699,7 +718,7 @@ class AppLogicTests(unittest.TestCase):
     def test_dependency_version_marks_importable_versionless_module_installed(self) -> None:
         with patch("app.importlib_metadata.version", side_effect=importlib_metadata.PackageNotFoundError):
             with patch("app.importlib.import_module", return_value=object()):
-                installed = App._get_installed_version(object(), "py-clob-client")
+                installed = App._get_installed_version(object(), "py-clob-client-v2")
 
         self.assertEqual(installed, "installed")
 
@@ -1008,7 +1027,7 @@ class AppLogicTests(unittest.TestCase):
         self.assertTrue(kalshi_alert.triggered)
         save_config.assert_called_once()
 
-    def test_adapter_price_poller_emits_non_polymarket_price_updates(self) -> None:
+    def test_adapter_price_poller_emits_updates_for_websocket_and_non_websocket_markets(self) -> None:
         adapter = FakePriceAdapter()
         registry = FakeRegistry(adapter)
         ui_queue: "queue.Queue[tuple]" = queue.Queue()
@@ -1035,14 +1054,55 @@ class AppLogicTests(unittest.TestCase):
 
         poller.poll_once()
 
-        kind, payload, _ = ui_queue.get_nowait()
+        updates = [ui_queue.get_nowait(), ui_queue.get_nowait()]
+        self.assertTrue(all(kind == "adapter_price" for kind, _payload, _unused in updates))
+        payloads = {payload["market_id"]: payload for _kind, payload, _unused in updates}
+        self.assertEqual(set(payloads), {"kalshi", "polymarket"})
+        self.assertEqual(payloads["kalshi"]["contract_id"], "KALSHI-CONTRACT")
+        self.assertEqual(payloads["polymarket"]["contract_id"], "POLY-TOKEN")
+        self.assertEqual(payloads["kalshi"]["values"]["last_trade"], 0.62)
+        self.assertEqual(payloads["polymarket"]["values"]["midpoint"], 0.62)
+        self.assertEqual(adapter.contracts, ["KALSHI-CONTRACT", "POLY-TOKEN"])
+        self.assertEqual([call[0] for call in registry.calls], ["kalshi", "polymarket"])
+
+    def test_adapter_price_poller_skips_market_with_connected_stream(self) -> None:
+        adapter = FakePriceAdapter()
+        registry = FakeRegistry(adapter)
+        ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        cfg = AppConfig(
+            alerts=[
+                PriceAlert(
+                    token_id="KALSHI-CONTRACT",
+                    label="Kalshi",
+                    direction="above",
+                    threshold=0.6,
+                    market_id="kalshi",
+                ),
+                PriceAlert(
+                    token_id="POLY-TOKEN",
+                    label="Poly",
+                    direction="above",
+                    threshold=0.6,
+                    market_id="polymarket",
+                ),
+            ]
+        )
+        cfg.markets["kalshi"].enabled = True
+        poller = AdapterPricePoller(
+            ui_queue,
+            cfg,
+            registry,
+            stream_connected=lambda market_id: market_id == "polymarket",
+        )
+
+        poller.poll_once()
+
+        kind, payload, _unused = ui_queue.get_nowait()
         self.assertEqual(kind, "adapter_price")
         self.assertEqual(payload["market_id"], "kalshi")
-        self.assertEqual(payload["contract_id"], "KALSHI-CONTRACT")
-        self.assertEqual(payload["values"]["last_trade"], 0.62)
-        self.assertEqual(payload["values"]["midpoint"], 0.62)
         self.assertEqual(adapter.contracts, ["KALSHI-CONTRACT"])
-        self.assertEqual(registry.calls[0][0], "kalshi")
+        self.assertEqual([call[0] for call in registry.calls], ["kalshi"])
+        self.assertTrue(ui_queue.empty())
 
     def test_adapter_price_poller_skips_disabled_markets(self) -> None:
         adapter = FakePriceAdapter()
@@ -1969,6 +2029,7 @@ class AppLogicTests(unittest.TestCase):
             "proxyWallet": WALLET,
             "side": "BUY",
             "asset": "token-1234567890",
+            "timestamp": int(time.time()),
             "size": "100",
             "price": "0.45",
         }
@@ -1981,29 +2042,248 @@ class AppLogicTests(unittest.TestCase):
         self.assertIn("size=9.6154", message)
         self.assertIn("price<= 0.5200", message)
 
-    def test_copy_trade_live_runs_adapter_preflight_before_trader(self) -> None:
+    def test_copy_trade_live_fails_closed_for_clob_v2_before_any_side_effect(self) -> None:
         harness = CopyHarness()
         harness.cfg.copytrading.live = True
-        harness._geoblock_cache = {"blocked": False}
-        harness.polymarket_adapter.preflight_error = MarketConfigurationError("central gate blocked")
-        harness._get_trader = lambda: self.fail("trader should not be created when preflight blocks")
+        harness.polymarket_adapter.geoblock_error = AssertionError("geoblock must not run")
+        harness._get_trader = lambda: self.fail("legacy trader must not be created")
+        persisted_dispatches = []
+
+        outcome = App._copy_trade_from_activity(
+            harness,
+            {
+                "proxyWallet": WALLET,
+                "side": "BUY",
+                "asset": "token-1234567890",
+                "timestamp": int(time.time()),
+                "size": "1",
+                "price": "0.45",
+            },
+            market_id="polymarket",
+            before_live_dispatch=persisted_dispatches.append,
+        )
+
+        self.assertEqual(outcome.state, "rejected")
+        self.assertEqual(outcome.code, "polymarket_clob_v2_migration_required")
+        self.assertIn("CLOB V2", outcome.message)
+        self.assertEqual(persisted_dispatches, [])
+        self.assertEqual(harness.polymarket_adapter.preflight_calls, [])
+
+    def test_source_market_change_is_retryable_and_never_uses_selected_adapter(self) -> None:
+        harness = CopyHarness()
+        harness.cfg.selected_market_id = "kalshi"
         item = {
             "proxyWallet": WALLET,
             "side": "BUY",
             "asset": "token-1234567890",
-            "size": "100",
+            "size": "1",
             "price": "0.45",
         }
 
-        App._copy_trade_from_activity(harness, item)
+        mismatch = App._copy_trade_from_activity(harness, item, market_id="polymarket")
+        harness.cfg.selected_market_id = "polymarket"
+        replayed = App._copy_trade_from_activity(harness, item, market_id="polymarket")
 
-        self.assertEqual(len(harness.polymarket_adapter.preflight_calls), 1)
-        order, feature_name = harness.polymarket_adapter.preflight_calls[0]
-        self.assertEqual(feature_name, "live copy trading")
-        self.assertEqual(order.contract_id, "token-1234567890")
-        kind, message = harness.ui_queue.get_nowait()
-        self.assertEqual(kind, "log")
-        self.assertIn("preflight blocked", message)
+        self.assertEqual(mismatch.state, "retryable")
+        self.assertEqual(mismatch.code, "source_market_mismatch")
+        self.assertEqual(replayed.state, "completed")
+
+    def test_staged_paper_policy_cannot_escalate_to_live_or_larger_order(self) -> None:
+        for mutation in (
+            lambda settings: setattr(settings, "live", True),
+            lambda settings: setattr(settings, "scale", settings.scale + 0.25),
+            lambda settings: setattr(settings, "max_usdc_per_trade", settings.max_usdc_per_trade + 5.0),
+        ):
+            with self.subTest(mutation=mutation):
+                harness = CopyHarness()
+                staged_policy = _copy_execution_policy(harness.cfg.copytrading)
+                mutation(harness.cfg.copytrading)
+                harness._get_polymarket_adapter = lambda: self.fail(
+                    "policy drift must fail before adapter access"
+                )
+
+                outcome = App._copy_trade_from_activity(
+                    harness,
+                    {
+                        "proxyWallet": WALLET,
+                        "side": "BUY",
+                        "asset": "token-1",
+                        "size": "1",
+                        "price": "0.45",
+                    },
+                    market_id="polymarket",
+                    execution_policy=staged_policy,
+                    staged_at=int(time.time()),
+                )
+
+                self.assertEqual(outcome.state, "retryable")
+                self.assertEqual(outcome.code, "execution_policy_changed")
+
+    def test_legacy_replay_without_bound_policy_requires_manual_reconciliation(self) -> None:
+        harness = CopyHarness()
+        harness._get_polymarket_adapter = lambda: self.fail("missing policy must fail before adapter access")
+
+        outcome = App._copy_trade_from_activity(
+            harness,
+            {"proxyWallet": WALLET, "side": "BUY", "asset": "token-1", "size": "1"},
+            market_id="polymarket",
+            execution_policy={},
+            staged_at=int(time.time()),
+        )
+
+        self.assertEqual(outcome.state, "ambiguous")
+        self.assertEqual(outcome.code, "execution_policy_missing")
+
+    def test_stale_outbox_and_live_source_timestamps_fail_before_adapter_access(self) -> None:
+        harness = CopyHarness()
+        current_policy = _copy_execution_policy(harness.cfg.copytrading)
+        harness._get_polymarket_adapter = lambda: self.fail("stale replay must fail before adapter access")
+        stale_outbox = App._copy_trade_from_activity(
+            harness,
+            {"proxyWallet": WALLET, "side": "BUY", "asset": "token-1", "size": "1"},
+            market_id="polymarket",
+            execution_policy=current_policy,
+            staged_at=int(time.time()) - 301,
+        )
+
+        harness.cfg.copytrading.live = True
+        live_policy = _copy_execution_policy(harness.cfg.copytrading)
+        for timestamp in (None, int(time.time()) - 301, (int(time.time()) - 301) * 1000):
+            with self.subTest(timestamp=timestamp):
+                item = {
+                    "proxyWallet": WALLET,
+                    "side": "BUY",
+                    "asset": "token-1",
+                    "size": "1",
+                }
+                if timestamp is not None:
+                    item["timestamp"] = timestamp
+                outcome = App._copy_trade_from_activity(
+                    harness,
+                    item,
+                    market_id="polymarket",
+                    execution_policy=live_policy,
+                    staged_at=int(time.time()),
+                )
+                self.assertEqual(outcome.state, "rejected")
+                self.assertIn(outcome.code, {"live_activity_timestamp_missing", "live_activity_timestamp_stale"})
+
+        self.assertEqual(stale_outbox.code, "copy_activity_stale")
+
+    def test_confirmed_not_dispatched_reauthorizes_stale_live_source(self) -> None:
+        harness = CopyHarness()
+        harness.cfg.copytrading.live = True
+        old_timestamp = int(time.time()) - _COPY_ACTIVITY_MAX_REPLAY_AGE_SECONDS - 60
+        activity = {
+            "proxyWallet": WALLET,
+            "side": "BUY",
+            "asset": "token-1",
+            "size": "1",
+            "price": "0.45",
+            "timestamp": old_timestamp,
+        }
+        entry = CopyActivityOutboxEntry(
+            id="manual-replay",
+            watch_id="watch-1",
+            activity_key="tx:manual-replay",
+            activity=activity,
+            market_id="polymarket",
+            execution_policy=_copy_execution_policy(harness.cfg.copytrading),
+            state="ambiguous",
+            created_at=old_timestamp,
+            updated_at=old_timestamp,
+        )
+        harness.cfg.copy_activity_outbox = [entry]
+        harness.cfg.reconcile_ambiguous_copy_activity(
+            entry.id,
+            "confirmed_not_dispatched",
+        )
+        trader_calls = []
+        persisted_dispatches = []
+
+        class Trader:
+            def place_limit_order(self, **kwargs):
+                trader_calls.append(kwargs)
+                return {"status": "accepted"}
+
+        harness._get_trader = Trader
+        outcome = App._copy_trade_from_activity(
+            harness,
+            activity,
+            market_id=entry.market_id,
+            execution_policy=entry.execution_policy,
+            staged_at=entry.created_at,
+            replay_authorized_at=entry.replay_authorized_at,
+            before_live_dispatch=persisted_dispatches.append,
+        )
+
+        self.assertEqual(entry.state, "retryable")
+        self.assertGreater(entry.replay_authorized_at, old_timestamp)
+        self.assertEqual(outcome.state, "rejected")
+        self.assertEqual(outcome.code, "polymarket_clob_v2_migration_required")
+        self.assertEqual(persisted_dispatches, [])
+        self.assertEqual(trader_calls, [])
+
+    def test_live_copy_requires_fresh_executable_side_orderbook_quote(self) -> None:
+        harness = CopyHarness()
+        harness.cfg.copytrading.live = True
+        harness.polymarket_adapter.get_orderbook = lambda contract_id: OrderBookSnapshot(
+            market_id="polymarket",
+            contract_id=contract_id,
+            bids=[],
+            asks=[],
+        )
+        harness._get_trader = lambda: self.fail("missing quote must fail before trader access")
+        callbacks = []
+
+        outcome = App._copy_trade_from_activity(
+            harness,
+            {
+                "proxyWallet": WALLET,
+                "side": "BUY",
+                "asset": "token-1",
+                "size": "1",
+                "timestamp": int(time.time()),
+            },
+            market_id="polymarket",
+            before_live_dispatch=callbacks.append,
+        )
+
+        self.assertEqual(outcome.state, "retryable")
+        self.assertEqual(outcome.code, "live_quote_unavailable")
+        self.assertEqual(callbacks, [])
+
+    def test_retryable_failure_does_not_commit_copy_conflict_reservation(self) -> None:
+        other_wallet = "0x" + "c" * 40
+        harness = CopyHarness()
+        harness.cfg.copytrading.follow_wallets = [WALLET, other_wallet]
+        first = {
+            "proxyWallet": WALLET,
+            "side": "BUY",
+            "asset": "token-1234567890",
+            "size": "1",
+            "price": "0.45",
+            "timestamp": 100,
+            "slug": "market",
+            "outcome": "Yes",
+        }
+        second = {**first, "proxyWallet": other_wallet, "timestamp": 101}
+        harness.polymarket_adapter.place_paper_order = lambda _order: (_ for _ in ()).throw(
+            OSError("temporary paper ledger failure")
+        )
+
+        failed = App._copy_trade_from_activity(harness, first, market_id="polymarket")
+        harness.polymarket_adapter.place_paper_order = lambda order: PaperOrderResult(
+            market_id=order.market_id,
+            contract_id=order.contract_id,
+            accepted=True,
+            message="accepted",
+        )
+        accepted = App._copy_trade_from_activity(harness, second, market_id="polymarket")
+
+        self.assertEqual(failed.state, "retryable")
+        self.assertEqual(accepted.state, "completed")
+        self.assertNotEqual(accepted.code, "conflict_guard")
 
     def test_copy_trade_conflict_guard_skips_duplicate_followed_wallet_signal(self) -> None:
         other_wallet = "0x" + "c" * 40
@@ -2031,9 +2311,467 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(second_kind, "log")
         self.assertIn("Conflict guard skipped", second_message)
 
+    def test_wallet_activity_checkpoint_is_persisted_before_copy_handling(self) -> None:
+        class QueueHarness:
+            def __init__(self) -> None:
+                watch = WalletWatch(id="watch-1", wallet=WALLET, display_name="tracked")
+                self.cfg = AppConfig(wallets=[watch])
+                self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
+                self.task = WalletActivityTask(
+                    "watch-1",
+                    {"timestamp": 100, "transactionHash": "tx-1"},
+                    "tx:tx-1",
+                )
+                self.ui_queue.put(("wallet_activity", self.task))
+                self._shutdown_started = True
+                self.events: list[tuple] = []
+
+            def _handle_wallet_activity(self, watch_id, item, **_kwargs) -> CopyActivityOutcome:
+                self.events.append(("handled", watch_id, item))
+                return CopyActivityOutcome("completed", "test_handled", "Handled by test harness.")
+
+            def log(self, message: str) -> None:
+                self.events.append(("log", message))
+
+        harness = QueueHarness()
+
+        with patch("app.save_config", side_effect=lambda cfg: harness.events.append(("saved", cfg))):
+            App._process_queue(harness)
+
+        self.assertEqual(harness.events[0], ("saved", harness.cfg))
+        self.assertEqual(harness.events[1][0], "handled")
+        self.assertEqual(harness.events[2], ("saved", harness.cfg))
+        self.assertTrue(harness.task.completion.get_nowait())
+        self.assertEqual(harness.cfg.wallets[0].seen_activity_keys, ["tx:tx-1"])
+        self.assertEqual(harness.cfg.copy_activity_outbox[0].state, "completed")
+
+    def test_wallet_activity_checkpoint_and_pending_outbox_are_staged_in_one_save(self) -> None:
+        class QueueHarness:
+            def __init__(self) -> None:
+                self.cfg = AppConfig(wallets=[WalletWatch(id="watch-1", wallet=WALLET)])
+                self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
+                self.task = WalletActivityTask(
+                    "watch-1",
+                    {"timestamp": 100, "transactionHash": "tx-1"},
+                    "tx:tx-1",
+                    "polymarket",
+                )
+                self.ui_queue.put(("wallet_activity", self.task))
+                self._shutdown_started = True
+
+            def _handle_wallet_activity(self, *_args, **_kwargs) -> CopyActivityOutcome:
+                return CopyActivityOutcome("completed", "handled", "Handled.")
+
+            def log(self, _message: str) -> None:
+                pass
+
+        harness = QueueHarness()
+        snapshots = []
+
+        with patch(
+            "app.save_config",
+            side_effect=lambda cfg: snapshots.append(json.loads(json.dumps(cfg.to_dict()))),
+        ):
+            App._process_queue(harness)
+
+        self.assertEqual(snapshots[0]["wallets"][0]["seen_activity_keys"], ["tx:tx-1"])
+        self.assertEqual(snapshots[0]["copy_activity_outbox"][0]["state"], "pending")
+        self.assertEqual(snapshots[0]["copy_activity_outbox"][0]["market_id"], "polymarket")
+        self.assertEqual(snapshots[1]["copy_activity_outbox"][0]["state"], "completed")
+
+    def test_wallet_activity_handler_failure_remains_durably_retryable(self) -> None:
+        class QueueHarness:
+            def __init__(self) -> None:
+                self.cfg = AppConfig(wallets=[WalletWatch(id="watch-1", wallet=WALLET)])
+                self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
+                self.task = WalletActivityTask(
+                    "watch-1",
+                    {"timestamp": 100, "transactionHash": "tx-1"},
+                    "tx:tx-1",
+                    "polymarket",
+                )
+                self.ui_queue.put(("wallet_activity", self.task))
+                self._shutdown_started = True
+                self.logged = []
+
+            def _handle_wallet_activity(self, *_args, **_kwargs):
+                raise OSError("pre-dispatch failure")
+
+            def log(self, message: str) -> None:
+                self.logged.append(message)
+
+        harness = QueueHarness()
+        snapshots = []
+
+        with patch(
+            "app.save_config",
+            side_effect=lambda cfg: snapshots.append(json.loads(json.dumps(cfg.to_dict()))),
+        ):
+            App._process_queue(harness)
+
+        self.assertEqual(harness.cfg.copy_activity_outbox[0].state, "retryable")
+        self.assertEqual(snapshots[-1]["copy_activity_outbox"][0]["state"], "retryable")
+        self.assertTrue(harness.task.completion.get_nowait())
+
+    def test_exception_after_dispatch_boundary_cannot_downgrade_ambiguous_state(self) -> None:
+        class QueueHarness:
+            def __init__(self) -> None:
+                self.cfg = AppConfig(wallets=[WalletWatch(id="watch-1", wallet=WALLET)])
+                self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
+                self.task = WalletActivityTask(
+                    "watch-1",
+                    {"timestamp": 100, "transactionHash": "tx-1"},
+                    "tx:tx-1",
+                    "polymarket",
+                )
+                self.ui_queue.put(("wallet_activity", self.task))
+                self._shutdown_started = True
+                self.logged = []
+
+            def _handle_wallet_activity(self, *_args, before_live_dispatch=None, **_kwargs):
+                before_live_dispatch(
+                    {
+                        "market_id": "polymarket",
+                        "contract_id": "token-1",
+                        "side": "BUY",
+                        "size": 1.0,
+                        "limit_price": 0.5,
+                        "tif": "FOK",
+                    }
+                )
+                raise RuntimeError("unexpected post-boundary failure")
+
+            def log(self, message: str) -> None:
+                self.logged.append(message)
+
+        harness = QueueHarness()
+        snapshots = []
+
+        with patch(
+            "app.save_config",
+            side_effect=lambda cfg: snapshots.append(json.loads(json.dumps(cfg.to_dict()))),
+        ):
+            App._process_queue(harness)
+
+        self.assertEqual(harness.cfg.copy_activity_outbox[0].state, "ambiguous")
+        self.assertEqual(snapshots[-1]["copy_activity_outbox"][0]["state"], "ambiguous")
+        self.assertIn("manual reconciliation", " ".join(harness.logged).lower())
+
+    def test_wallet_poller_replays_pending_in_order_before_new_activity(self) -> None:
+        watch = WalletWatch(
+            id="watch-1",
+            wallet=WALLET,
+            seen_activity_keys=["tx:old-1", "tx:old-2"],
+            last_seen_ts=101,
+        )
+        cfg = AppConfig(
+            wallets=[watch],
+            copy_activity_outbox=[
+                CopyActivityOutboxEntry(
+                    id="entry-2",
+                    watch_id=watch.id,
+                    activity_key="tx:old-2",
+                    activity={"timestamp": 101, "transactionHash": "old-2"},
+                    market_id="polymarket",
+                    created_at=2,
+                ),
+                CopyActivityOutboxEntry(
+                    id="entry-1",
+                    watch_id=watch.id,
+                    activity_key="tx:old-1",
+                    activity={"timestamp": 100, "transactionHash": "old-1"},
+                    market_id="polymarket",
+                    created_at=1,
+                ),
+            ],
+        )
+        processed = []
+
+        class CompletingQueue(queue.Queue):
+            def put(self, item, *args, **kwargs):
+                result = super().put(item, *args, **kwargs)
+                if item[0] == "wallet_activity":
+                    task = item[1]
+                    processed.append(task.checkpoint_key)
+                    _apply_wallet_activity_checkpoint(cfg, task)
+                    entry = next(
+                        row for row in cfg.copy_activity_outbox if row.activity_key == task.checkpoint_key
+                    )
+                    entry.state = "completed"
+                    task.acknowledge(True)
+                return result
+
+        ui_queue: "queue.Queue[tuple]" = CompletingQueue()
+        poller = WalletPoller(ui_queue, cfg, poll_interval=0.01)
+        responses = [
+            [{"timestamp": 102, "transactionHash": "new-3", "slug": "m"}],
+            [],
+        ]
+
+        def fake_get_activity(*_args, **_kwargs):
+            if responses:
+                response = responses.pop(0)
+                if not responses:
+                    poller.stop()
+                return response
+            poller.stop()
+            return []
+
+        with patch("app.data_api.get_activity", side_effect=fake_get_activity):
+            poller._run()
+
+        self.assertEqual(processed, ["tx:old-1", "tx:old-2", "tx:new-3"])
+
+    def test_wallet_poller_surfaces_ambiguous_entry_without_replaying_it(self) -> None:
+        watch = WalletWatch(
+            id="watch-1",
+            wallet=WALLET,
+            seen_activity_keys=["tx:maybe"],
+            last_seen_ts=100,
+        )
+        cfg = AppConfig(
+            wallets=[watch],
+            copy_activity_outbox=[
+                CopyActivityOutboxEntry(
+                    watch_id=watch.id,
+                    activity_key="tx:maybe",
+                    activity={"timestamp": 100, "transactionHash": "maybe"},
+                    market_id="polymarket",
+                    state="ambiguous",
+                )
+            ],
+        )
+        ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        poller = WalletPoller(ui_queue, cfg, poll_interval=0.01)
+
+        def fake_get_activity(*_args, **_kwargs):
+            poller.stop()
+            return [{"timestamp": 100, "transactionHash": "maybe", "slug": "m"}]
+
+        with patch("app.data_api.get_activity", side_effect=fake_get_activity):
+            poller._run()
+
+        drained = []
+        while not ui_queue.empty():
+            drained.append(ui_queue.get_nowait())
+        self.assertFalse(any(item[0] == "wallet_activity" for item in drained))
+        self.assertTrue(any("reconcile" in str(item[1]).lower() for item in drained if item[0] == "log"))
+
+    def test_copy_outbox_retention_never_prunes_unresolved_entries(self) -> None:
+        watch = WalletWatch(id="watch-1", wallet=WALLET)
+        conclusive = [
+            CopyActivityOutboxEntry(
+                id=f"done-{index}",
+                watch_id=watch.id,
+                activity_key=f"tx:done-{index}",
+                activity={"transactionHash": f"done-{index}"},
+                state="completed",
+                created_at=index,
+                updated_at=index,
+            )
+            for index in range(501)
+        ]
+        ambiguous = CopyActivityOutboxEntry(
+            id="ambiguous",
+            watch_id=watch.id,
+            activity_key="tx:ambiguous",
+            activity={"transactionHash": "ambiguous"},
+            state="ambiguous",
+        )
+        cfg = AppConfig(wallets=[watch], copy_activity_outbox=[*conclusive, ambiguous])
+
+        checkpoint = _apply_wallet_activity_checkpoint(
+            cfg,
+            WalletActivityTask(
+                watch.id,
+                {"timestamp": 999, "transactionHash": "pending"},
+                "tx:pending",
+                "polymarket",
+            ),
+        )
+
+        self.assertIsNotNone(checkpoint)
+        self.assertLessEqual(len(cfg.copy_activity_outbox), 500)
+        states = {entry.id: entry.state for entry in cfg.copy_activity_outbox}
+        self.assertEqual(states["ambiguous"], "ambiguous")
+        self.assertEqual(
+            next(entry.state for entry in cfg.copy_activity_outbox if entry.activity_key == "tx:pending"),
+            "pending",
+        )
+
+    def test_full_unresolved_outbox_applies_backpressure_without_checkpointing(self) -> None:
+        watch = WalletWatch(id="watch-1", wallet=WALLET)
+        cfg = AppConfig(
+            wallets=[watch],
+            copy_activity_outbox=[
+                CopyActivityOutboxEntry(
+                    id=f"pending-{index}",
+                    watch_id=watch.id,
+                    activity_key=f"tx:pending-{index}",
+                    activity={"transactionHash": f"pending-{index}"},
+                    state="retryable",
+                )
+                for index in range(500)
+            ],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "full of unresolved"):
+            _apply_wallet_activity_checkpoint(
+                cfg,
+                WalletActivityTask(
+                    watch.id,
+                    {"timestamp": 999, "transactionHash": "new"},
+                    "tx:new",
+                    "polymarket",
+                ),
+            )
+
+        self.assertEqual(len(cfg.copy_activity_outbox), 500)
+        self.assertEqual(watch.seen_activity_keys, [])
+        self.assertEqual(watch.last_seen_ts, 0)
+
+    def test_wallet_poller_does_not_drop_cross_market_raw_key_collision(self) -> None:
+        watch = WalletWatch(
+            id="watch-1",
+            wallet=WALLET,
+            seen_activity_keys=["tx:same"],
+            last_seen_ts=100,
+            last_seen_tx="same",
+        )
+        cfg = AppConfig(
+            selected_market_id="opinion_labs",
+            wallets=[watch],
+            copy_activity_outbox=[
+                CopyActivityOutboxEntry(
+                    watch_id=watch.id,
+                    activity_key="tx:same",
+                    activity={"timestamp": 100, "transactionHash": "same"},
+                    market_id="polymarket",
+                    state="completed",
+                )
+            ],
+        )
+        cfg.markets["opinion_labs"].enabled = True
+        adapter = FakeOpinionActivityAdapter()
+        adapter.list_activity = lambda wallet, limit=25: [
+            {
+                "timestamp": 100,
+                "transactionHash": "same",
+                "proxyWallet": wallet,
+                "asset": "77:YES:0xyes",
+                "side": "BUY",
+                "size": 1,
+                "price": 0.5,
+            }
+        ]
+        processed = []
+
+        class CompletingQueue(queue.Queue):
+            def put(self, item, *args, **kwargs):
+                result = super().put(item, *args, **kwargs)
+                if item[0] == "wallet_activity":
+                    task = item[1]
+                    processed.append((task.market_id, task.checkpoint_key))
+                    _apply_wallet_activity_checkpoint(cfg, task)
+                    entry = _find_entry(task)
+                    entry.state = "completed"
+                    task.acknowledge(True)
+                    poller.stop()
+                return result
+
+        def _find_entry(task):
+            return next(
+                entry
+                for entry in cfg.copy_activity_outbox
+                if entry.market_id == task.market_id and entry.activity_key == task.checkpoint_key
+            )
+
+        ui_queue: "queue.Queue[tuple]" = CompletingQueue()
+        poller = WalletPoller(
+            ui_queue,
+            cfg,
+            poll_interval=0.01,
+            adapter_registry=FakeRegistry(adapter),
+        )
+
+        poller._run()
+
+        self.assertEqual(processed, [("opinion_labs", "tx:same")])
+
+    def test_wallet_activity_is_not_handled_when_checkpoint_persistence_fails(self) -> None:
+        class QueueHarness:
+            def __init__(self) -> None:
+                watch = WalletWatch(id="watch-1", wallet=WALLET, display_name="tracked")
+                self.cfg = AppConfig(wallets=[watch])
+                self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
+                self.task = WalletActivityTask(
+                    "watch-1",
+                    {"timestamp": 100, "transactionHash": "tx-1"},
+                    "tx:tx-1",
+                )
+                self.ui_queue.put(("wallet_activity", self.task))
+                self._shutdown_started = True
+                self.handled: list[tuple] = []
+                self.logged: list[str] = []
+
+            def _handle_wallet_activity(self, watch_id, item) -> None:
+                self.handled.append((watch_id, item))
+
+            def log(self, message: str) -> None:
+                self.logged.append(message)
+
+        harness = QueueHarness()
+        secret_detail = "disk error containing do-not-log"
+
+        with patch("app.save_config", side_effect=OSError(secret_detail)):
+            App._process_queue(harness)
+
+        self.assertEqual(harness.handled, [])
+        self.assertEqual(len(harness.logged), 1)
+        self.assertIn("Refusing wallet activity", harness.logged[0])
+        self.assertIn("OSError", harness.logged[0])
+        self.assertNotIn(secret_detail, harness.logged[0])
+        self.assertFalse(harness.task.completion.get_nowait())
+        self.assertEqual(harness.cfg.wallets[0].last_seen_ts, 0)
+        self.assertEqual(harness.cfg.wallets[0].seen_activity_keys, [])
+
+    def test_wallet_poller_does_not_checkpoint_activity_before_enqueuing_it(self) -> None:
+        cfg = AppConfig(wallets=[WalletWatch(wallet=WALLET, display_name="tracked")])
+        snapshots: list[tuple[int, tuple[str, ...]]] = []
+
+        class CheckpointQueue(queue.Queue):
+            def put(self, item, *args, **kwargs):
+                if item[0] == "wallet_activity":
+                    watch = cfg.wallets[0]
+                    snapshots.append((watch.last_seen_ts, tuple(watch.seen_activity_keys)))
+                return super().put(item, *args, **kwargs)
+
+        ui_queue: "queue.Queue[tuple]" = CheckpointQueue()
+        poller = WalletPoller(ui_queue, cfg, poll_interval=0.01)
+
+        def fake_get_activity(*_args, **_kwargs):
+            poller.stop()
+            return [{"timestamp": 100, "transactionHash": "tx1", "slug": "m"}]
+
+        with patch("app.data_api.get_activity", side_effect=fake_get_activity):
+            poller._run()
+
+        self.assertEqual(snapshots, [(0, ())])
+        self.assertEqual(cfg.wallets[0].last_seen_ts, 0)
+        self.assertEqual(cfg.wallets[0].seen_activity_keys, [])
+
     def test_wallet_poller_deduplicates_same_timestamp_transactions(self) -> None:
         cfg = AppConfig(wallets=[WalletWatch(wallet=WALLET, display_name="tracked")])
-        ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        class CheckpointQueue(queue.Queue):
+            def put(self, item, *args, **kwargs):
+                result = super().put(item, *args, **kwargs)
+                if item[0] == "wallet_activity":
+                    task = item[1]
+                    _apply_wallet_activity_checkpoint(cfg, task)
+                    task.acknowledge(True)
+                return result
+
+        ui_queue: "queue.Queue[tuple]" = CheckpointQueue()
         poller = WalletPoller(ui_queue, cfg, poll_interval=0.01)
         responses = [
             [
@@ -2049,10 +2787,11 @@ class AppLogicTests(unittest.TestCase):
 
         def fake_get_activity(*_args, **_kwargs):
             nonlocal calls
-            response = responses[calls]
-            calls += 1
             if calls == len(responses):
                 poller.stop()
+                return []
+            response = responses[calls]
+            calls += 1
             return response
 
         with patch("app.data_api.get_activity", side_effect=fake_get_activity):
@@ -2063,7 +2802,7 @@ class AppLogicTests(unittest.TestCase):
             drained.append(ui_queue.get_nowait())
 
         activity = [item for item in drained if item[0] == "wallet_activity"]
-        self.assertEqual([item[2]["transactionHash"] for item in activity], ["tx1", "tx2"])
+        self.assertEqual([item[1].activity["transactionHash"] for item in activity], ["tx1", "tx2"])
         self.assertEqual(cfg.wallets[0].last_seen_ts, 100)
         self.assertEqual(set(cfg.wallets[0].seen_activity_keys), {"tx:tx1", "tx:tx2"})
 
@@ -2073,7 +2812,16 @@ class AppLogicTests(unittest.TestCase):
             wallets=[WalletWatch(wallet=WALLET, display_name="tracked")],
         )
         cfg.markets["opinion_labs"].enabled = True
-        ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        class CheckpointQueue(queue.Queue):
+            def put(self, item, *args, **kwargs):
+                result = super().put(item, *args, **kwargs)
+                if item[0] == "wallet_activity":
+                    task = item[1]
+                    _apply_wallet_activity_checkpoint(cfg, task)
+                    task.acknowledge(True)
+                return result
+
+        ui_queue: "queue.Queue[tuple]" = CheckpointQueue()
         adapter = FakeOpinionActivityAdapter()
         registry = FakeRegistry(adapter)
         poller = WalletPoller(ui_queue, cfg, poll_interval=0.01, adapter_registry=registry)
@@ -2086,7 +2834,7 @@ class AppLogicTests(unittest.TestCase):
             drained.append(ui_queue.get_nowait())
         activity = [item for item in drained if item[0] == "wallet_activity"]
         self.assertEqual(len(activity), 1)
-        self.assertEqual(activity[0][2]["asset"], "77:YES:0xyes")
+        self.assertEqual(activity[0][1].activity["asset"], "77:YES:0xyes")
         self.assertEqual(adapter.activity_calls[0], (WALLET, 25))
         self.assertTrue(all(call[0] == "opinion_labs" for call in registry.calls))
 
@@ -2096,7 +2844,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.markets["opinion_labs"].enabled = True
         adapter = FakeOpinionActivityAdapter()
         harness.opinion_adapter = adapter
-        harness._get_selected_market_adapter = lambda: harness.opinion_adapter
+        harness.adapter_registry = FakeRegistry(adapter)
         item = {
             "proxyWallet": WALLET,
             "side": "BUY",

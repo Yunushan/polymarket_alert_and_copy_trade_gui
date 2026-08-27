@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError
+from .errors import MarketConfigurationError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -477,27 +477,15 @@ class XOMarketAdapter(MarketAdapter):
             return self.runtime.get_json(self._url(path), params=params, headers=headers)
         if json_body is not None:
             headers["Content-Type"] = "application/json"
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                method.upper(),
-                self._url(path),
-                params=dict(params or {}),
-                data=body,
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        if status == 204 or not str(getattr(response, "text", "") or "").strip():
-            return {}
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        payload = self.runtime.request_json(
+            method.upper(),
+            self._url(path),
+            params=dict(params or {}),
+            data=body,
+            headers=headers,
+            allow_empty=True,
+        )
+        return {} if payload is None else payload
 
     def _url(self, path: str) -> str:
         clean_path = "/" + str(path or "").strip("/")

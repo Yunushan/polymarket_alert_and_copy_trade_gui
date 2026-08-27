@@ -1,19 +1,34 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from copy import deepcopy
+from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 from .live_report_schema import (
+    CREDENTIAL_PROMOTION_CHECKS,
+    CREDENTIAL_PROMOTION_SEMANTICS,
+    EXPECTED_REPOSITORY_ORIGIN,
+    PUBLIC_PROMOTION_CHECKS,
     compact_schema_validation,
     ensure_live_validation_report_valid,
     validate_live_validation_report,
 )
+from .live_verification import (
+    cancel_response_contains,
+    extract_order_id,
+    order_state_is_cancelled,
+    order_zero_fill_evidence,
+)
+from .constants import POLYMARKET_LIVE_MUTATION_BLOCKER, POLYMARKET_LIVE_MUTATIONS_SUPPORTED
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +53,6 @@ POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND = (
 )
 LIVE_VALIDATION_DECISION_TARGET_TIERS = ("public_live_verified", "credential_live_verified", "funded_live_verified")
 LIVE_VALIDATION_DECISIONS = ("accepted", "rejected")
-CREDENTIAL_PROMOTION_CHECKS = ("clob_l2_orders", "relayer_recent_transactions", "user_websocket_connect")
 LOCAL_ONLY_REPORT_MODES = {
     "local_readiness_only",
     "credential_runbook_no_funded_actions",
@@ -58,6 +72,71 @@ SENSITIVE_REPORT_KEY_FRAGMENTS = (
     "session",
     "bearer",
 )
+
+LIVE_VALIDATION_STORE_LOCK_TIMEOUT_SECONDS = 30.0
+LIVE_VALIDATION_STORE_LOCK_POLL_SECONDS = 0.05
+LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH = 128
+LIVE_VALIDATION_IDEMPOTENCY_BINDINGS_MAX_ENTRIES = 256
+_MISSING_STORE_REVISION = "missing"
+_STORE_REVISION_ATTR = "_live_validation_store_revision"
+
+
+class LiveValidationStoreError(RuntimeError):
+    """Base error for a live-evidence store that cannot be used safely."""
+
+    def __init__(self, path: Path | str, reason: str) -> None:
+        self.path = Path(path)
+        self.reason = str(reason or "store error")
+        super().__init__(
+            f"Live validation evidence store could not be used safely ({self.reason}): {self.path}. "
+            "The existing file was left unchanged."
+        )
+
+
+class LiveValidationStoreReadError(LiveValidationStoreError):
+    """Raised when existing live-evidence JSON is unreadable or malformed."""
+
+
+class LiveValidationStoreLockError(LiveValidationStoreError):
+    """Raised when exclusive mutation access to a live-evidence store fails."""
+
+
+class LiveValidationStoreConflictError(LiveValidationStoreError):
+    """Raised when a stale snapshot would overwrite a newer store revision."""
+
+
+class LiveValidationStoreIntegrityError(LiveValidationStoreError):
+    """Raised when persisted store invariants are malformed or ambiguous."""
+
+
+class LiveValidationStoreDurabilityError(LiveValidationStoreError):
+    """Raised when replacement committed but directory durability is uncertain."""
+
+    def __init__(self, path: Path | str, content_hash: str) -> None:
+        self.path = Path(path)
+        self.reason = "replacement committed but parent-directory fsync failed"
+        self.committed = True
+        self.content_hash = str(content_hash or "")
+        self.operation_key = ""
+        self.idempotency_key_hash = ""
+        RuntimeError.__init__(
+            self,
+            f"Live validation evidence was replaced but directory durability is uncertain: {self.path}. "
+            "Do not create a new operation; retry with the same idempotency key so the committed record can be reconciled.",
+        )
+
+
+class _RevisionedLiveValidationStore(dict[str, Any]):
+    """A store snapshot carrying non-persisted compare-and-swap provenance."""
+
+    def __init__(self, *args: Any, revision: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        setattr(self, _STORE_REVISION_ATTR, revision)
+
+
+_STORE_THREAD_LOCKS_GUARD = threading.Lock()
+_STORE_THREAD_LOCKS: Dict[str, threading.RLock] = {}
+_STORE_THREAD_STATE = threading.local()
 
 
 def live_validation_reports_path(path: Optional[Path | str] = None) -> Path:
@@ -87,19 +166,394 @@ def live_validation_promotion_proposal_snapshots_path(path: Optional[Path | str]
     return DEFAULT_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH
 
 
+def _store_lock_key(target: Path) -> str:
+    return os.path.normcase(str(target.expanduser().resolve(strict=False)))
+
+
+def _store_thread_lock(target: Path) -> threading.RLock:
+    key = _store_lock_key(target)
+    with _STORE_THREAD_LOCKS_GUARD:
+        lock = _STORE_THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _STORE_THREAD_LOCKS[key] = lock
+    return lock
+
+
+def _store_lock_path(target: Path) -> Path:
+    return target.with_name(f".{target.name}.lock")
+
+
+def _lock_is_contended(error: OSError) -> bool:
+    return error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or getattr(error, "winerror", None) in {
+        33,
+        36,
+        158,
+    }
+
+
+def _try_lock_file(handle: Any) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: Any) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _initialize_lock_file(handle: Any, target: Path) -> None:
+    try:
+        if os.name == "posix":
+            os.fchmod(handle.fileno(), 0o600)
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        raise LiveValidationStoreLockError(target, "lock file initialization failed") from None
+
+
+@contextmanager
+def _cross_process_store_lock(
+    target: Path,
+    *,
+    timeout_seconds: float = LIVE_VALIDATION_STORE_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
+    lock_path = _store_lock_path(target)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+    except OSError:
+        raise LiveValidationStoreLockError(target, "lock file unavailable") from None
+
+    try:
+        _initialize_lock_file(handle, target)
+
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            try:
+                _try_lock_file(handle)
+                break
+            except OSError as error:
+                if not _lock_is_contended(error):
+                    raise LiveValidationStoreLockError(target, "lock acquisition failed") from None
+                if time.monotonic() >= deadline:
+                    raise LiveValidationStoreLockError(target, "lock acquisition timed out") from None
+                time.sleep(LIVE_VALIDATION_STORE_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            try:
+                _unlock_file(handle)
+            except OSError:
+                # Closing the descriptor releases an advisory lock even if an
+                # explicit unlock races with process teardown.
+                pass
+    finally:
+        handle.close()
+
+
+@contextmanager
+def _store_mutation_lock(target: Path) -> Iterator[None]:
+    key = _store_lock_key(target)
+    thread_lock = _store_thread_lock(target)
+    if not thread_lock.acquire(timeout=LIVE_VALIDATION_STORE_LOCK_TIMEOUT_SECONDS):
+        raise LiveValidationStoreLockError(target, "in-process lock acquisition timed out")
+
+    depths = getattr(_STORE_THREAD_STATE, "depths", None)
+    if depths is None:
+        depths = {}
+        _STORE_THREAD_STATE.depths = depths
+    depth = int(depths.get(key, 0))
+    depths[key] = depth + 1
+    try:
+        if depth:
+            yield
+        else:
+            with _cross_process_store_lock(target):
+                yield
+    finally:
+        remaining = int(depths.get(key, 1)) - 1
+        if remaining > 0:
+            depths[key] = remaining
+        else:
+            depths.pop(key, None)
+        thread_lock.release()
+
+
+def _locked_store_mutation(path_resolver: Any, *, path_parameter: str, positional_index: Optional[int] = None) -> Any:
+    def decorate(function: Any) -> Any:
+        @wraps(function)
+        def locked(*args: Any, **kwargs: Any) -> Any:
+            configured_path = kwargs.get(path_parameter)
+            if configured_path is None and positional_index is not None and len(args) > positional_index:
+                configured_path = args[positional_index]
+            target = path_resolver(configured_path)
+            with _store_mutation_lock(target):
+                return function(*args, **kwargs)
+
+        return locked
+
+    return decorate
+
+
+def _read_store_json(target: Path, *, collection_key: str) -> Dict[str, Any]:
+    try:
+        encoded = target.read_bytes()
+        payload = encoded.decode("utf-8")
+    except FileNotFoundError:
+        raise
+    except (OSError, UnicodeError):
+        raise LiveValidationStoreReadError(target, "existing file is unreadable") from None
+
+    try:
+        raw = json.loads(payload)
+    except (json.JSONDecodeError, RecursionError):
+        raise LiveValidationStoreReadError(target, "existing file contains invalid JSON") from None
+    if not isinstance(raw, dict):
+        raise LiveValidationStoreReadError(target, "existing JSON root is not an object")
+    if not isinstance(raw.get(collection_key), dict):
+        raise LiveValidationStoreReadError(target, f"existing JSON field '{collection_key}' is not an object")
+    return _RevisionedLiveValidationStore(raw, revision=hashlib.sha256(encoded).hexdigest())
+
+
+def _validate_store_for_write(store: Mapping[str, Any], *, collection_key: str) -> None:
+    if not isinstance(store, Mapping) or not isinstance(store.get(collection_key), Mapping):
+        raise ValueError(f"Live validation evidence store must contain an object field named '{collection_key}'.")
+
+
+def _idempotency_key_hash(kind: str, value: str) -> str:
+    clean = str(value or "")
+    if not clean:
+        return ""
+    if len(clean) > LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH or any(
+        ord(char) < 33 or ord(char) > 126 for char in clean
+    ):
+        raise ValueError(
+            f"idempotency_key must contain 1-{LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH} visible ASCII characters."
+        )
+    return hashlib.sha256(f"{kind}:idempotency:{clean}".encode("utf-8")).hexdigest()
+
+
+def _operation_request_hash(kind: str, payload: Mapping[str, Any]) -> str:
+    body = json.dumps(_jsonable(payload), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(f"{kind}:request:{body}".encode("utf-8")).hexdigest()
+
+
+def _bound_operation_request_hash(
+    kind: str,
+    default_request: Mapping[str, Any],
+    idempotency_request: Optional[Mapping[str, Any]],
+    *,
+    stable_context: Optional[Mapping[str, Any]] = None,
+) -> str:
+    if idempotency_request is not None and not isinstance(idempotency_request, Mapping):
+        raise ValueError("idempotency_request must be an object when provided.")
+    binding_mode = "caller" if idempotency_request is not None else "derived"
+    request = (
+        {
+            "context": _jsonable(stable_context or {}),
+            "caller_request": _jsonable(idempotency_request),
+        }
+        if idempotency_request is not None
+        else _jsonable(default_request)
+    )
+    return _operation_request_hash(
+        kind,
+        {
+            "binding_mode": binding_mode,
+            "request": _jsonable(request),
+        },
+    )
+
+
+def _find_idempotent_entry(
+    entries: Mapping[str, Any],
+    idempotency_hash: str,
+    *,
+    target: Path,
+) -> Optional[Dict[str, Any]]:
+    if not idempotency_hash:
+        return None
+    matches: List[Dict[str, Any]] = []
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        known_hashes = entry.get("idempotency_key_hashes")
+        request_hashes = entry.get("idempotency_requests")
+        if entry.get("idempotency_key_hash") == idempotency_hash or (
+            isinstance(known_hashes, list) and idempotency_hash in known_hashes
+        ) or (
+            isinstance(request_hashes, Mapping) and idempotency_hash in request_hashes
+        ):
+            matches.append(entry)
+    if len(matches) > 1:
+        raise LiveValidationStoreIntegrityError(
+            target,
+            "idempotency binding is ambiguous across multiple records",
+        )
+    return matches[0] if matches else None
+
+
+def _validate_idempotency_request(
+    entry: Mapping[str, Any],
+    *,
+    idempotency_hash: str,
+    request_hash: str,
+    target: Path,
+) -> None:
+    if not idempotency_hash:
+        return
+    requests = entry.get("idempotency_requests")
+    if requests is not None and not isinstance(requests, Mapping):
+        raise LiveValidationStoreIntegrityError(target, "idempotency request bindings are malformed")
+    known_hashes = entry.get("idempotency_key_hashes")
+    if known_hashes is not None and not isinstance(known_hashes, list):
+        raise LiveValidationStoreIntegrityError(target, "idempotency key bindings are malformed")
+    mapped_request_hash = requests.get(idempotency_hash) if isinstance(requests, Mapping) else None
+    primary_request_hash = (
+        entry.get("idempotency_request_hash") if entry.get("idempotency_key_hash") == idempotency_hash else None
+    )
+    if mapped_request_hash is not None and not str(mapped_request_hash):
+        raise LiveValidationStoreIntegrityError(target, "idempotency request binding is empty")
+    if primary_request_hash is not None and not str(primary_request_hash):
+        raise LiveValidationStoreIntegrityError(target, "primary idempotency request binding is empty")
+    if mapped_request_hash and primary_request_hash and str(mapped_request_hash) != str(primary_request_hash):
+        raise LiveValidationStoreIntegrityError(target, "idempotency request bindings contradict each other")
+    known_request_hash = mapped_request_hash or primary_request_hash
+    if not known_request_hash:
+        raise ValueError(
+            "idempotency_key matches an older record without request binding; use a new key for this operation."
+        )
+    if str(known_request_hash) != request_hash:
+        raise ValueError("idempotency_key was already used for a different operation request.")
+
+
+def _register_idempotency_request(
+    entry: Dict[str, Any],
+    *,
+    idempotency_hash: str,
+    request_hash: str,
+    target: Path,
+) -> None:
+    if not idempotency_hash:
+        return
+    requests = entry.get("idempotency_requests")
+    known_hashes = entry.get("idempotency_key_hashes")
+    if requests is not None and not isinstance(requests, dict):
+        raise LiveValidationStoreIntegrityError(target, "idempotency request bindings are malformed")
+    if known_hashes is not None and not isinstance(known_hashes, list):
+        raise LiveValidationStoreIntegrityError(target, "idempotency key bindings are malformed")
+    requests = requests if isinstance(requests, dict) else {}
+    known_hashes = known_hashes if isinstance(known_hashes, list) else []
+    if (
+        idempotency_hash not in requests
+        and len(requests) >= LIVE_VALIDATION_IDEMPOTENCY_BINDINGS_MAX_ENTRIES
+    ):
+        raise LiveValidationStoreError(
+            target,
+            "idempotency binding capacity is exhausted for this retained record",
+        )
+    if idempotency_hash in requests and not str(requests[idempotency_hash]):
+        raise LiveValidationStoreIntegrityError(target, "idempotency request binding is empty")
+    if idempotency_hash in requests and str(requests[idempotency_hash]) != request_hash:
+        raise ValueError("idempotency_key was already used for a different operation request.")
+    primary_key_hash = str(entry.get("idempotency_key_hash") or "")
+    primary_request_hash = str(entry.get("idempotency_request_hash") or "")
+    if primary_key_hash == idempotency_hash and primary_request_hash and primary_request_hash != request_hash:
+        raise LiveValidationStoreIntegrityError(target, "idempotency request bindings contradict each other")
+    if primary_key_hash == idempotency_hash and not primary_request_hash:
+        raise LiveValidationStoreIntegrityError(target, "primary idempotency request binding is empty")
+
+    entry["idempotency_requests"] = requests
+    entry["idempotency_key_hashes"] = known_hashes
+    requests[idempotency_hash] = request_hash
+    if idempotency_hash not in known_hashes:
+        known_hashes.append(idempotency_hash)
+    if not entry.get("idempotency_key_hash"):
+        entry["idempotency_key_hash"] = idempotency_hash
+        entry["idempotency_request_hash"] = request_hash
+
+
+def _attach_uncertain_operation(
+    error: LiveValidationStoreDurabilityError,
+    *,
+    operation_key: str,
+    idempotency_hash: str,
+) -> None:
+    error.operation_key = str(operation_key or "")
+    error.idempotency_key_hash = str(idempotency_hash or "")
+
+
+def _save_store_operation(
+    writer: Any,
+    store: Mapping[str, Any],
+    target: Path,
+    *,
+    operation_key: str,
+    idempotency_hash: str,
+) -> Path:
+    try:
+        return writer(store, target)
+    except LiveValidationStoreDurabilityError as error:
+        _attach_uncertain_operation(
+            error,
+            operation_key=operation_key,
+            idempotency_hash=idempotency_hash,
+        )
+        raise
+
+
+def _reconcile_committed_store_operation(
+    store: Mapping[str, Any],
+    target: Path,
+    *,
+    operation_key: str,
+    idempotency_hash: str,
+) -> None:
+    expected_revision = getattr(store, _STORE_REVISION_ATTR, _MISSING_STORE_REVISION)
+    current_revision = _store_file_revision(target)
+    if expected_revision != current_revision:
+        raise LiveValidationStoreConflictError(
+            target,
+            "store changed while reconciling an idempotent operation; retry after reloading",
+        )
+    try:
+        _fsync_parent_directory(target)
+    except OSError as error:
+        durability_error = LiveValidationStoreDurabilityError(target, current_revision)
+        _attach_uncertain_operation(
+            durability_error,
+            operation_key=operation_key,
+            idempotency_hash=idempotency_hash,
+        )
+        raise durability_error from error
+
+
 def load_live_validation_reports(path: Optional[Path | str] = None) -> Dict[str, Any]:
     target = live_validation_reports_path(path)
-    if not target.exists():
-        return _empty_store()
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except Exception:
+        raw = _read_store_json(target, collection_key="reports")
+    except FileNotFoundError:
         return _empty_store()
-    if not isinstance(raw, dict):
-        return _empty_store()
-    reports = raw.get("reports")
-    if not isinstance(reports, dict):
-        raw["reports"] = {}
     raw.setdefault("version", LIVE_VALIDATION_REPORTS_VERSION)
     raw.setdefault("created_at", _now())
     raw.setdefault("updated_at", raw.get("created_at", _now()))
@@ -109,17 +563,10 @@ def load_live_validation_reports(path: Optional[Path | str] = None) -> Dict[str,
 
 def load_live_validation_decisions(path: Optional[Path | str] = None) -> Dict[str, Any]:
     target = live_validation_decisions_path(path)
-    if not target.exists():
-        return _empty_decision_store()
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except Exception:
+        raw = _read_store_json(target, collection_key="decisions")
+    except FileNotFoundError:
         return _empty_decision_store()
-    if not isinstance(raw, dict):
-        return _empty_decision_store()
-    decisions = raw.get("decisions")
-    if not isinstance(decisions, dict):
-        raw["decisions"] = {}
     raw.setdefault("version", LIVE_VALIDATION_DECISIONS_VERSION)
     raw.setdefault("created_at", _now())
     raw.setdefault("updated_at", raw.get("created_at", _now()))
@@ -128,17 +575,10 @@ def load_live_validation_decisions(path: Optional[Path | str] = None) -> Dict[st
 
 def load_live_validation_promotion_proposal_snapshots(path: Optional[Path | str] = None) -> Dict[str, Any]:
     target = live_validation_promotion_proposal_snapshots_path(path)
-    if not target.exists():
-        return _empty_promotion_proposal_snapshot_store()
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except Exception:
+        raw = _read_store_json(target, collection_key="snapshots")
+    except FileNotFoundError:
         return _empty_promotion_proposal_snapshot_store()
-    if not isinstance(raw, dict):
-        return _empty_promotion_proposal_snapshot_store()
-    snapshots = raw.get("snapshots")
-    if not isinstance(snapshots, dict):
-        raw["snapshots"] = {}
     raw.setdefault("version", LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_VERSION)
     raw.setdefault("created_at", _now())
     raw.setdefault("updated_at", raw.get("created_at", _now()))
@@ -157,41 +597,88 @@ def _fsync_parent_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _store_file_revision(target: Path) -> str:
+    if not target.exists():
+        return _MISSING_STORE_REVISION
+    try:
+        return hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError:
+        raise LiveValidationStoreReadError(target, "existing file is unreadable") from None
+
+
 def _write_store_atomic(target: Path, store: Mapping[str, Any]) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
+    serialized = (json.dumps(_jsonable(store), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    content_hash = hashlib.sha256(serialized).hexdigest()
+    current_revision = _store_file_revision(target)
+    expected_revision = getattr(store, _STORE_REVISION_ATTR, _MISSING_STORE_REVISION)
+    if expected_revision != current_revision:
+        if current_revision == content_hash:
+            if isinstance(store, _RevisionedLiveValidationStore):
+                setattr(store, _STORE_REVISION_ATTR, content_hash)
+            try:
+                _fsync_parent_directory(target)
+            except OSError as error:
+                raise LiveValidationStoreDurabilityError(target, content_hash) from error
+            return target
+        raise LiveValidationStoreConflictError(
+            target,
+            "store changed in another writer; reload before saving to avoid overwriting newer evidence",
+        )
+
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             if os.name == "posix":
                 os.fchmod(handle.fileno(), 0o600)
-            json.dump(_jsonable(store), handle, indent=2, sort_keys=True)
-            handle.write("\n")
+            handle.write(serialized)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
-        _fsync_parent_directory(target)
+        if isinstance(store, _RevisionedLiveValidationStore):
+            setattr(store, _STORE_REVISION_ATTR, content_hash)
+        try:
+            _fsync_parent_directory(target)
+        except OSError as error:
+            raise LiveValidationStoreDurabilityError(target, content_hash) from error
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
     return target
 
 
+@_locked_store_mutation(live_validation_reports_path, path_parameter="path", positional_index=1)
 def save_live_validation_reports(store: Mapping[str, Any], path: Optional[Path | str] = None) -> Path:
     target = live_validation_reports_path(path)
+    if target.exists():
+        load_live_validation_reports(target)
+    _validate_store_for_write(store, collection_key="reports")
     return _write_store_atomic(target, store)
 
 
+@_locked_store_mutation(live_validation_decisions_path, path_parameter="path", positional_index=1)
 def save_live_validation_decisions(store: Mapping[str, Any], path: Optional[Path | str] = None) -> Path:
     target = live_validation_decisions_path(path)
+    if target.exists():
+        load_live_validation_decisions(target)
+    _validate_store_for_write(store, collection_key="decisions")
     return _write_store_atomic(target, store)
 
 
+@_locked_store_mutation(
+    live_validation_promotion_proposal_snapshots_path,
+    path_parameter="path",
+    positional_index=1,
+)
 def save_live_validation_promotion_proposal_snapshots(
     store: Mapping[str, Any],
     path: Optional[Path | str] = None,
 ) -> Path:
     target = live_validation_promotion_proposal_snapshots_path(path)
+    if target.exists():
+        load_live_validation_promotion_proposal_snapshots(target)
+    _validate_store_for_write(store, collection_key="snapshots")
     return _write_store_atomic(target, store)
 
 
@@ -227,6 +714,86 @@ def find_live_validation_report_duplicate(
     return _find_duplicate_live_validation_report(payload_hash, reports, target, exclude_key=exclude_key)
 
 
+def _replay_live_validation_report_idempotency(
+    *,
+    store: Mapping[str, Any],
+    reports: Mapping[str, Any],
+    target: Path,
+    idempotency_hash: str,
+    request_hash: str,
+    max_entries: int,
+) -> Optional[Dict[str, Any]]:
+    idempotent_entry = _find_idempotent_entry(reports, idempotency_hash, target=target)
+    if idempotent_entry is None:
+        return None
+    _validate_idempotency_request(
+        idempotent_entry,
+        idempotency_hash=idempotency_hash,
+        request_hash=request_hash,
+        target=target,
+    )
+    _reconcile_committed_store_operation(
+        store,
+        target,
+        operation_key=str(idempotent_entry.get("key") or ""),
+        idempotency_hash=idempotency_hash,
+    )
+    metadata = live_validation_report_metadata(idempotent_entry, target)
+    existing_payload = idempotent_entry.get("payload")
+    if isinstance(existing_payload, Mapping):
+        metadata["summary"] = live_validation_report_summary(existing_payload)
+    outcomes = idempotent_entry.get("idempotency_outcomes")
+    outcome = outcomes.get(idempotency_hash) if isinstance(outcomes, Mapping) else None
+    if isinstance(outcome, Mapping):
+        metadata.update(_jsonable(outcome))
+    metadata.update(
+        {
+            "stored": False,
+            "idempotent_replay": True,
+            "entries": len(reports),
+            "max_entries": int(store.get("max_entries") or max_entries),
+        }
+    )
+    return metadata
+
+
+@_locked_store_mutation(live_validation_reports_path, path_parameter="path")
+def reconcile_live_validation_report_idempotency(
+    *,
+    idempotency_key: str,
+    idempotency_request: Mapping[str, Any],
+    path: Optional[Path | str] = None,
+    max_entries: int = DEFAULT_LIVE_VALIDATION_REPORTS_MAX_ENTRIES,
+) -> Optional[Dict[str, Any]]:
+    """Reconcile a caller-bound report retry before regenerating its payload."""
+    idempotency_hash = _idempotency_key_hash(POLYMARKET_LIVE_VALIDATION_REPORT_KIND, idempotency_key)
+    if not idempotency_hash:
+        return None
+    request_hash = _bound_operation_request_hash(
+        POLYMARKET_LIVE_VALIDATION_REPORT_KIND,
+        {},
+        idempotency_request,
+        stable_context={
+            "store_path": str(live_validation_reports_path(path)),
+            "max_entries": int(max_entries),
+        },
+    )
+    target = live_validation_reports_path(path)
+    store = load_live_validation_reports(target)
+    reports = store.get("reports")
+    if not isinstance(reports, Mapping):
+        raise LiveValidationStoreIntegrityError(target, "reports collection is malformed")
+    return _replay_live_validation_report_idempotency(
+        store=store,
+        reports=reports,
+        target=target,
+        idempotency_hash=idempotency_hash,
+        request_hash=request_hash,
+        max_entries=max_entries,
+    )
+
+
+@_locked_store_mutation(live_validation_reports_path, path_parameter="path")
 def store_live_validation_report(
     report: Mapping[str, Any],
     *,
@@ -237,23 +804,53 @@ def store_live_validation_report(
     source_file: Optional[Path | str] = None,
     allow_duplicate: bool = False,
     skip_duplicate: bool = True,
+    idempotency_key: str = "",
+    idempotency_request: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not isinstance(report, Mapping):
         raise ValueError("Live validation report must be an object.")
     schema_validation = ensure_live_validation_report_valid(report)
+    clean_report = redact_live_validation_report(report)
+    payload_hash = live_validation_report_payload_hash(clean_report)
+    clean_source = str(source or "gui_snapshot").strip() or "gui_snapshot"
+    clean_label = str(label or "").strip()
+    clean_source_file = str(Path(str(source_file))) if source_file is not None and str(source_file).strip() else ""
+    effective_allow_duplicate = bool(allow_duplicate or not skip_duplicate)
+    idempotency_hash = _idempotency_key_hash(POLYMARKET_LIVE_VALIDATION_REPORT_KIND, idempotency_key)
+    request_hash = _bound_operation_request_hash(
+        POLYMARKET_LIVE_VALIDATION_REPORT_KIND,
+        {
+            "payload_hash": payload_hash,
+            "source": clean_source,
+            "label": clean_label,
+            "source_file": clean_source_file,
+            "duplicate_policy": "allow" if effective_allow_duplicate else "skip",
+            "max_entries": int(max_entries),
+        },
+        idempotency_request,
+        stable_context={
+            "store_path": str(live_validation_reports_path(path)),
+            "max_entries": int(max_entries),
+        },
+    )
     target = live_validation_reports_path(path)
     store = load_live_validation_reports(target)
     reports = store.setdefault("reports", {})
     if not isinstance(reports, dict):
         reports = {}
         store["reports"] = reports
+    idempotent_replay = _replay_live_validation_report_idempotency(
+        store=store,
+        reports=reports,
+        target=target,
+        idempotency_hash=idempotency_hash,
+        request_hash=request_hash,
+        max_entries=max_entries,
+    )
+    if idempotent_replay is not None:
+        return idempotent_replay
     now = _now()
     stored_at_ns = time.time_ns()
-    clean_report = redact_live_validation_report(report)
-    payload_hash = live_validation_report_payload_hash(clean_report)
-    clean_source = str(source or "gui_snapshot").strip() or "gui_snapshot"
-    clean_label = str(label or "").strip()
-    effective_allow_duplicate = bool(allow_duplicate or not skip_duplicate)
     duplicate = _find_duplicate_live_validation_report(payload_hash, reports, target)
     summary = live_validation_report_summary(clean_report)
     schema_validation_metadata = compact_schema_validation(schema_validation)
@@ -270,11 +867,35 @@ def store_live_validation_report(
             attempted_at_ns=stored_at_ns,
         )
         if isinstance(duplicate_entry, dict):
+            _register_idempotency_request(
+                duplicate_entry,
+                idempotency_hash=idempotency_hash,
+                request_hash=request_hash,
+                target=target,
+            )
+            if idempotency_hash:
+                outcomes = duplicate_entry.get("idempotency_outcomes")
+                if outcomes is not None and not isinstance(outcomes, dict):
+                    raise ValueError("Stored idempotency outcomes are malformed; no evidence was changed.")
+                outcomes = outcomes if isinstance(outcomes, dict) else {}
+                outcomes[idempotency_hash] = {
+                    "duplicate": True,
+                    "duplicate_key": duplicate_key,
+                    "duplicate_of": duplicate_key,
+                    "duplicate_policy": "skip",
+                }
+                duplicate_entry["idempotency_outcomes"] = outcomes
             _append_duplicate_import(duplicate_entry, audit_event)
             duplicate_entry["updated_at"] = now
             store["updated_at"] = now
             store["max_entries"] = int(max_entries)
-            save_live_validation_reports(store, target)
+            _save_store_operation(
+                save_live_validation_reports,
+                store,
+                target,
+                operation_key=duplicate_key,
+                idempotency_hash=idempotency_hash,
+            )
             duplicate = live_validation_report_metadata(duplicate_entry, target)
             payload = duplicate_entry.get("payload")
             if isinstance(payload, Mapping):
@@ -293,6 +914,7 @@ def store_live_validation_report(
                 "summary": summary,
                 "schema_validation": schema_validation_metadata,
                 "payload_hash": payload_hash,
+                "idempotent_replay": False,
                 "provenance": _live_validation_report_provenance(
                     payload_hash=payload_hash,
                     source_file=source_file,
@@ -338,12 +960,32 @@ def store_live_validation_report(
         "payload": clean_report,
         "summary": summary,
         "schema_validation": schema_validation_metadata,
+        "idempotency_key_hash": idempotency_hash or None,
+        "idempotency_request_hash": request_hash if idempotency_hash else None,
+        "idempotency_key_hashes": [idempotency_hash] if idempotency_hash else [],
+        "idempotency_requests": {idempotency_hash: request_hash} if idempotency_hash else {},
+        "idempotency_outcomes": {
+            idempotency_hash: {
+                "duplicate": bool(duplicate_key),
+                "duplicate_key": duplicate_key or None,
+                "duplicate_of": duplicate_key or None,
+                "duplicate_policy": "allow" if duplicate_key else "unique",
+            }
+        }
+        if idempotency_hash
+        else {},
     }
     reports[key] = entry
     _prune_reports(reports, max_entries=max_entries)
     store["updated_at"] = now
     store["max_entries"] = int(max_entries)
-    save_live_validation_reports(store, target)
+    _save_store_operation(
+        save_live_validation_reports,
+        store,
+        target,
+        operation_key=key,
+        idempotency_hash=idempotency_hash,
+    )
     metadata = live_validation_report_metadata(entry, target)
     metadata.update(
         {
@@ -356,6 +998,7 @@ def store_live_validation_report(
             "max_entries": int(max_entries),
             "summary": summary,
             "schema_validation": schema_validation_metadata,
+            "idempotent_replay": False,
         }
     )
     return metadata
@@ -431,6 +1074,7 @@ def load_live_validation_report(
     return metadata
 
 
+@_locked_store_mutation(live_validation_reports_path, path_parameter="path")
 def purge_live_validation_reports(
     *,
     keys: Optional[Iterable[str]] = None,
@@ -546,8 +1190,10 @@ def live_validation_report_promotion_inventory(path: Optional[Path | str] = None
     return {
         "source": "stored_live_validation_reports",
         "static_coverage_mutated": False,
-        "credential_live_verified": "yes" if credential_candidates else "blocked",
-        "funded_live_verified": "yes" if funded_candidates else "blocked",
+        "credential_live_verified": "candidate_only" if credential_candidates else "blocked",
+        "funded_live_verified": "candidate_only" if funded_candidates else "blocked",
+        "attested_workflow_verified": False,
+        "evidence_trust": "local_unattested_candidate",
         "credential_candidates": credential_candidates,
         "funded_candidates": funded_candidates,
         "blocked_entries": blocked_entries[:10],
@@ -558,8 +1204,8 @@ def live_validation_report_promotion_inventory(path: Optional[Path | str] = None
             "blocked_entries": len(blocked_entries),
         },
         "note": (
-            "Stored reports are evidence candidates only. Static coverage tiers remain unchanged unless an "
-            "operator explicitly reviews and promotes a report with concrete credentialed/funded evidence."
+            "Stored reports are local unattested evidence candidates only. They never establish a verified "
+            "credentialed or funded tier; production verification requires a trusted workflow and exact-byte attestation."
         ),
     }
 
@@ -740,6 +1386,7 @@ def live_validation_report_review_export_filename(key: str, extension: str) -> s
     return f"polymarket-live-validation-review-{clean_key or 'report'}.{clean_extension}"
 
 
+@_locked_store_mutation(live_validation_decisions_path, path_parameter="decision_path")
 def record_live_validation_report_decision(
     *,
     report_key: str,
@@ -751,6 +1398,8 @@ def record_live_validation_report_decision(
     reviewer: str = "",
     report_store_path: Optional[Path | str] = None,
     decision_path: Optional[Path | str] = None,
+    idempotency_key: str = "",
+    idempotency_request: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     clean_report_key = str(report_key or "").strip()
     clean_payload_hash = str(payload_hash or "").strip()
@@ -782,6 +1431,49 @@ def record_live_validation_report_decision(
     if clean_decision not in LIVE_VALIDATION_DECISIONS:
         raise ValueError("decision must be one of: " + ", ".join(LIVE_VALIDATION_DECISIONS) + ".")
 
+    idempotency_hash = _idempotency_key_hash(POLYMARKET_LIVE_VALIDATION_DECISION_KIND, idempotency_key)
+    request_hash = _bound_operation_request_hash(
+        POLYMARKET_LIVE_VALIDATION_DECISION_KIND,
+        {
+            "report_key": clean_report_key,
+            "payload_hash": clean_payload_hash,
+            "target_tier": clean_target_tier,
+            "decision": clean_decision,
+            "reviewer_note": clean_note,
+            "review_bundle_hash": clean_review_hash,
+            "reviewer": clean_reviewer,
+            "report_store_path": str(live_validation_reports_path(report_store_path)),
+        },
+        idempotency_request,
+        stable_context={
+            "decision_path": str(live_validation_decisions_path(decision_path)),
+            "report_store_path": str(live_validation_reports_path(report_store_path)),
+        },
+    )
+    target = live_validation_decisions_path(decision_path)
+    store = load_live_validation_decisions(target)
+    decisions = store.setdefault("decisions", {})
+    if not isinstance(decisions, dict):
+        decisions = {}
+        store["decisions"] = decisions
+    idempotent_entry = _find_idempotent_entry(decisions, idempotency_hash, target=target)
+    if idempotent_entry is not None:
+        _validate_idempotency_request(
+            idempotent_entry,
+            idempotency_hash=idempotency_hash,
+            request_hash=request_hash,
+            target=target,
+        )
+        _reconcile_committed_store_operation(
+            store,
+            target,
+            operation_key=str(idempotent_entry.get("key") or ""),
+            idempotency_hash=idempotency_hash,
+        )
+        metadata = live_validation_report_decision_metadata(idempotent_entry, target)
+        metadata.update({"stored": False, "idempotent_replay": True, "entries": len(decisions)})
+        return metadata
+
     bundle = live_validation_report_review_bundle(clean_report_key, path=report_store_path)
     if bundle is None:
         raise ValueError("Unknown live validation report for decision.")
@@ -804,8 +1496,19 @@ def record_live_validation_report_decision(
 
     now = _now()
     created_at_ns = time.time_ns()
-    record = {
-        "key": make_live_validation_decision_key(
+    decision_key = make_live_validation_decision_key(
+        report_key=clean_report_key,
+        payload_hash=clean_payload_hash,
+        target_tier=clean_target_tier,
+        decision=clean_decision,
+        reviewer_note=clean_note,
+        review_bundle_hash=clean_review_hash,
+        created_at=now,
+        created_at_ns=created_at_ns,
+    )
+    while decision_key in decisions:
+        created_at_ns += 1
+        decision_key = make_live_validation_decision_key(
             report_key=clean_report_key,
             payload_hash=clean_payload_hash,
             target_tier=clean_target_tier,
@@ -814,7 +1517,9 @@ def record_live_validation_report_decision(
             review_bundle_hash=clean_review_hash,
             created_at=now,
             created_at_ns=created_at_ns,
-        ),
+        )
+    record = {
+        "key": decision_key,
         "kind": POLYMARKET_LIVE_VALIDATION_DECISION_KIND,
         "created_at": now,
         "created_at_ns": created_at_ns,
@@ -833,19 +1538,23 @@ def record_live_validation_report_decision(
         "report_source": (bundle.get("report") or {}).get("source") if isinstance(bundle.get("report"), Mapping) else "",
         "coverage_tier_decision": _jsonable(target_mapping) if isinstance(target_mapping, Mapping) else {},
         "promotion_review": _jsonable(bundle.get("promotion_review") or {}),
+        "idempotency_key_hash": idempotency_hash or None,
+        "idempotency_request_hash": request_hash if idempotency_hash else None,
+        "idempotency_key_hashes": [idempotency_hash] if idempotency_hash else [],
+        "idempotency_requests": {idempotency_hash: request_hash} if idempotency_hash else {},
     }
 
-    target = live_validation_decisions_path(decision_path)
-    store = load_live_validation_decisions(target)
-    decisions = store.setdefault("decisions", {})
-    if not isinstance(decisions, dict):
-        decisions = {}
-        store["decisions"] = decisions
     decisions[record["key"]] = record
     store["updated_at"] = now
-    save_live_validation_decisions(store, target)
+    _save_store_operation(
+        save_live_validation_decisions,
+        store,
+        target,
+        operation_key=str(record["key"]),
+        idempotency_hash=idempotency_hash,
+    )
     metadata = live_validation_report_decision_metadata(record, target)
-    metadata.update({"stored": True, "entries": len(decisions)})
+    metadata.update({"stored": True, "idempotent_replay": False, "entries": len(decisions)})
     return metadata
 
 
@@ -1202,6 +1911,86 @@ def live_validation_coverage_promotion_proposal_export_filename(extension: str) 
     return f"polymarket-live-validation-promotion-proposal.{clean_extension}"
 
 
+def _replay_live_validation_promotion_snapshot_idempotency(
+    *,
+    store: Mapping[str, Any],
+    snapshots: Mapping[str, Any],
+    target: Path,
+    idempotency_hash: str,
+    request_hash: str,
+    report_store_path: Optional[Path | str],
+    decision_path: Optional[Path | str],
+) -> Optional[Dict[str, Any]]:
+    idempotent_entry = _find_idempotent_entry(snapshots, idempotency_hash, target=target)
+    if idempotent_entry is None:
+        return None
+    _validate_idempotency_request(
+        idempotent_entry,
+        idempotency_hash=idempotency_hash,
+        request_hash=request_hash,
+        target=target,
+    )
+    _reconcile_committed_store_operation(
+        store,
+        target,
+        operation_key=str(idempotent_entry.get("key") or ""),
+        idempotency_hash=idempotency_hash,
+    )
+    metadata = live_validation_promotion_proposal_snapshot_metadata(
+        idempotent_entry,
+        target,
+        report_store_path=report_store_path,
+        decision_path=decision_path,
+    )
+    metadata.update({"stored": False, "idempotent_replay": True, "entries": len(snapshots)})
+    return metadata
+
+
+@_locked_store_mutation(live_validation_promotion_proposal_snapshots_path, path_parameter="path")
+def reconcile_live_validation_promotion_proposal_snapshot_idempotency(
+    *,
+    idempotency_key: str,
+    idempotency_request: Mapping[str, Any],
+    report_store_path: Optional[Path | str] = None,
+    decision_path: Optional[Path | str] = None,
+    path: Optional[Path | str] = None,
+    max_entries: int = DEFAULT_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_MAX_ENTRIES,
+) -> Optional[Dict[str, Any]]:
+    """Reconcile a caller-bound snapshot retry before regenerating its proposal."""
+    idempotency_hash = _idempotency_key_hash(
+        POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND,
+        idempotency_key,
+    )
+    if not idempotency_hash:
+        return None
+    request_hash = _bound_operation_request_hash(
+        POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND,
+        {},
+        idempotency_request,
+        stable_context={
+            "snapshot_path": str(live_validation_promotion_proposal_snapshots_path(path)),
+            "report_store_path": str(live_validation_reports_path(report_store_path)),
+            "decision_path": str(live_validation_decisions_path(decision_path)),
+            "max_entries": int(max_entries),
+        },
+    )
+    target = live_validation_promotion_proposal_snapshots_path(path)
+    store = load_live_validation_promotion_proposal_snapshots(target)
+    snapshots = store.get("snapshots")
+    if not isinstance(snapshots, Mapping):
+        raise LiveValidationStoreIntegrityError(target, "snapshots collection is malformed")
+    return _replay_live_validation_promotion_snapshot_idempotency(
+        store=store,
+        snapshots=snapshots,
+        target=target,
+        idempotency_hash=idempotency_hash,
+        request_hash=request_hash,
+        report_store_path=report_store_path,
+        decision_path=decision_path,
+    )
+
+
+@_locked_store_mutation(live_validation_promotion_proposal_snapshots_path, path_parameter="path")
 def store_live_validation_coverage_promotion_proposal_snapshot(
     *,
     proposal: Optional[Mapping[str, Any]] = None,
@@ -1212,6 +2001,8 @@ def store_live_validation_coverage_promotion_proposal_snapshot(
     source: str = "react_preview",
     label: str = "",
     max_entries: int = DEFAULT_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_MAX_ENTRIES,
+    idempotency_key: str = "",
+    idempotency_request: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     clean_target = str(target_tier or "").strip()
     clean_source = str(source or "react_preview").strip() or "react_preview"
@@ -1234,15 +2025,51 @@ def store_live_validation_coverage_promotion_proposal_snapshot(
         raise ValueError("proposal_hash mismatch: snapshot proposal does not match its canonical hash.")
     proposal_payload["proposal_hash"] = expected_hash
 
-    now = _now()
-    stored_at_ns = time.time_ns()
+    effective_target = str(proposal_payload.get("target_tier_filter") or clean_target or "").strip()
+    clean_label = str(label or "").strip() or _proposal_snapshot_default_label(proposal_payload)
+    idempotency_hash = _idempotency_key_hash(
+        POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND,
+        idempotency_key,
+    )
+    request_hash = _bound_operation_request_hash(
+        POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND,
+        {
+            "proposal_hash": expected_hash,
+            "target_tier": effective_target,
+            "source": clean_source,
+            "label": clean_label,
+            "report_store_path": str(live_validation_reports_path(report_store_path)),
+            "decision_path": str(live_validation_decisions_path(decision_path)),
+            "max_entries": int(max_entries),
+        },
+        idempotency_request,
+        stable_context={
+            "snapshot_path": str(live_validation_promotion_proposal_snapshots_path(path)),
+            "report_store_path": str(live_validation_reports_path(report_store_path)),
+            "decision_path": str(live_validation_decisions_path(decision_path)),
+            "max_entries": int(max_entries),
+        },
+    )
     target = live_validation_promotion_proposal_snapshots_path(path)
     store = load_live_validation_promotion_proposal_snapshots(target)
     snapshots = store.setdefault("snapshots", {})
     if not isinstance(snapshots, dict):
         snapshots = {}
         store["snapshots"] = snapshots
-    effective_target = str(proposal_payload.get("target_tier_filter") or clean_target or "").strip()
+    idempotent_replay = _replay_live_validation_promotion_snapshot_idempotency(
+        store=store,
+        snapshots=snapshots,
+        target=target,
+        idempotency_hash=idempotency_hash,
+        request_hash=request_hash,
+        report_store_path=report_store_path,
+        decision_path=decision_path,
+    )
+    if idempotent_replay is not None:
+        return idempotent_replay
+
+    now = _now()
+    stored_at_ns = time.time_ns()
     key = make_live_validation_promotion_proposal_snapshot_key(
         proposal_hash=expected_hash,
         target_tier=effective_target,
@@ -1263,7 +2090,7 @@ def store_live_validation_coverage_promotion_proposal_snapshot(
         "stored_at": now,
         "stored_at_ns": stored_at_ns,
         "source": clean_source,
-        "label": str(label or "").strip() or _proposal_snapshot_default_label(proposal_payload),
+        "label": clean_label,
         "proposal_hash": expected_hash,
         "proposal_generated_at": proposal_payload.get("generated_at"),
         "proposal_version": proposal_payload.get("proposal_version"),
@@ -1282,19 +2109,29 @@ def store_live_validation_coverage_promotion_proposal_snapshot(
             "proposal_hash": expected_hash,
         },
         "proposal": proposal_payload,
+        "idempotency_key_hash": idempotency_hash or None,
+        "idempotency_request_hash": request_hash if idempotency_hash else None,
+        "idempotency_key_hashes": [idempotency_hash] if idempotency_hash else [],
+        "idempotency_requests": {idempotency_hash: request_hash} if idempotency_hash else {},
     }
     snapshots[key] = record
     _prune_promotion_proposal_snapshots(snapshots, max_entries=max_entries)
     store["updated_at"] = now
     store["max_entries"] = int(max_entries)
-    save_live_validation_promotion_proposal_snapshots(store, target)
+    _save_store_operation(
+        save_live_validation_promotion_proposal_snapshots,
+        store,
+        target,
+        operation_key=key,
+        idempotency_hash=idempotency_hash,
+    )
     metadata = live_validation_promotion_proposal_snapshot_metadata(
         record,
         target,
         report_store_path=report_store_path,
         decision_path=decision_path,
     )
-    metadata.update({"stored": True, "entries": len(snapshots)})
+    metadata.update({"stored": True, "idempotent_replay": False, "entries": len(snapshots)})
     return metadata
 
 
@@ -1380,6 +2217,7 @@ def load_live_validation_coverage_promotion_proposal_snapshot(
     }
 
 
+@_locked_store_mutation(live_validation_promotion_proposal_snapshots_path, path_parameter="path")
 def purge_live_validation_coverage_promotion_proposal_snapshots(
     *,
     keys: Optional[Iterable[str]] = None,
@@ -1855,6 +2693,7 @@ def live_validation_report_summary(report: Mapping[str, Any]) -> Dict[str, Any]:
         "generated_at": _safe_float(report.get("generated_at")),
         "market_id": report.get("market_id"),
         "mode": report.get("mode"),
+        "source_provenance": _jsonable(report.get("source_provenance") or {}),
         "selected": bool(report.get("selected")),
         "enabled": bool(report.get("enabled")),
         "public_live_checks": stage_gates.get("public_live_checks"),
@@ -1880,6 +2719,7 @@ def live_validation_report_summary(report: Mapping[str, Any]) -> Dict[str, Any]:
 def live_validation_report_promotion(report: Mapping[str, Any]) -> Dict[str, Any]:
     mode = str(report.get("mode") or "").strip()
     local_only = mode in LOCAL_ONLY_REPORT_MODES
+    source_provenance_verified = _stable_source_provenance(report.get("source_provenance"))
     authenticated_checks = (
         report.get("authenticated_read_checks")
         if isinstance(report.get("authenticated_read_checks"), Mapping)
@@ -1891,39 +2731,120 @@ def live_validation_report_promotion(report: Mapping[str, Any]) -> Dict[str, Any
         else {}
     )
     stage_gates = report.get("stage_gates") if isinstance(report.get("stage_gates"), Mapping) else {}
+    public_checks = report.get("public_checks") if isinstance(report.get("public_checks"), Mapping) else {}
+    public_evidence = _public_promotion_evidence(public_checks)
+    public_verified = bool(report.get("ok") is True and len(public_evidence) == len(PUBLIC_PROMOTION_CHECKS))
     credential_evidence = _credential_promotion_evidence(authenticated_checks)
-    funded_evidence = _funded_promotion_evidence(funded_check)
+    source_revision = ""
+    if isinstance(report.get("source_provenance"), Mapping):
+        source_revision = str(report["source_provenance"].get("source_revision") or "")
+    funded_evidence = _funded_promotion_evidence(
+        funded_check,
+        expected_source_revision=source_revision,
+    )
     blockers: List[str] = []
 
     if local_only:
         blockers.append(f"Report mode {mode!r} is local-only and cannot promote production verification tiers.")
+    if not public_verified:
+        blockers.append(
+            "Credential and funded promotion require report.ok=true plus the exact successful semantic public-check inventory."
+        )
+    if mode == "strict_cli" and not source_provenance_verified:
+        blockers.append(
+            "Strict CLI promotion requires matching clean initial/final source revisions in source_provenance."
+        )
     if stage_gates.get("credentialed_read_ok") and not credential_evidence:
         blockers.append("Stage gates claim credentialed_read_ok, but no accepted authenticated-read evidence is present.")
     if stage_gates.get("funded_live_order_check") in {"ok", "passed"} and not funded_evidence:
         blockers.append("Stage gates claim funded verification, but no funded order/cancel audit evidence is present.")
 
-    can_promote_credential = bool(credential_evidence) and not local_only
-    can_promote_funded = bool(funded_evidence) and not local_only
+    can_promote_credential = (
+        public_verified
+        and bool(credential_evidence)
+        and not local_only
+        and source_provenance_verified
+    )
+    # A funded mutation is not independently sufficient evidence of an
+    # authenticated account path.  Promotion requires a successful accepted
+    # non-mutating read from the same report/run as the order/cancel audit.
+    can_promote_funded = (
+        bool(funded_evidence)
+        and bool(credential_evidence)
+        and public_verified
+        and not local_only
+        and source_provenance_verified
+    )
     if not credential_evidence:
         blockers.append(
-            "Credential live verification requires an ok CLOB L2 order-list read, relayer authenticated read, or user WebSocket connection."
+            "Credential live verification requires an ok CLOB L2 order-list or relayer authenticated read."
         )
     if not funded_evidence:
         blockers.append(
-            "Funded live verification requires an ok funded order/cancel result with live_action=true, order id, and post-cancel verification."
+            "Funded live verification requires an exact-source, same-account, post-only order/cancel result with "
+            "geoblock, balance/allowance, zero-fill, and resolved recovery-journal evidence."
         )
+    if not credential_evidence:
+        blockers.append(
+            "Funded live verification also requires accepted non-mutating authenticated-read evidence "
+            "in the same report."
+        )
+    if not POLYMARKET_LIVE_MUTATIONS_SUPPORTED:
+        blockers.append(POLYMARKET_LIVE_MUTATION_BLOCKER)
 
     return {
-        "credential_live_verified": "yes" if can_promote_credential else "blocked",
-        "funded_live_verified": "yes" if can_promote_funded else "blocked",
+        "credential_live_verified": "candidate_only" if can_promote_credential else "blocked",
+        "funded_live_verified": "candidate_only" if can_promote_funded else "blocked",
         "can_promote_credential_live_verified": can_promote_credential,
         "can_promote_funded_live_verified": can_promote_funded,
+        "attested_workflow_verified": False,
+        "evidence_trust": "local_unattested_candidate",
+        "requires_attested_workflow": True,
+        "candidate_limitations": [
+            "Local report bytes are not trusted workflow evidence and cannot establish a verified production tier."
+        ],
+        "source_provenance_verified": source_provenance_verified,
+        "public_checks_verified": public_verified,
+        "public_evidence": public_evidence,
         "credential_evidence": credential_evidence,
         "funded_evidence": funded_evidence,
         "blocked_reasons": _dedupe(blockers),
         "accepted_credential_checks": list(CREDENTIAL_PROMOTION_CHECKS),
-        "accepted_funded_audit_fields": ["status", "live_action", "audit.order_id", "audit.post_cancel_verified"],
+        "accepted_public_checks": list(PUBLIC_PROMOTION_CHECKS),
+        "accepted_funded_audit_fields": [
+            "status",
+            "live_action",
+            "manual_reconciliation_required",
+            "audit.order_id",
+            "audit.cancel",
+            "audit.post_cancel_order",
+            "audit.post_cancel_verified",
+            "audit.zero_fill_evidence",
+            "audit.recovery_journal",
+            "account_authenticated_read_preflight",
+            "account_preflight",
+            "execution_guards",
+            "geoblock_preflight",
+            "source_revision_gate",
+        ],
     }
+
+
+def _stable_source_provenance(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    source_revision = str(value.get("source_revision") or "")
+    return bool(
+        value.get("schema_version") == 1
+        and value.get("repository") == "market-sentinel"
+        and value.get("repository_origin") == EXPECTED_REPOSITORY_ORIGIN
+        and value.get("stable") is True
+        and value.get("initial_clean") is True
+        and value.get("final_clean") is True
+        and len(source_revision) == 40
+        and all(character in "0123456789abcdef" for character in source_revision)
+        and source_revision == value.get("initial_revision") == value.get("final_revision")
+    )
 
 
 def _credential_promotion_evidence(authenticated_checks: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -1932,27 +2853,131 @@ def _credential_promotion_evidence(authenticated_checks: Mapping[str, Any]) -> L
         item = authenticated_checks.get(name)
         if not isinstance(item, Mapping) or item.get("status") != "ok":
             continue
+        records_observed = item.get("records_observed")
+        if not (
+            item.get("semantic_check") == CREDENTIAL_PROMOTION_SEMANTICS[name]
+            and isinstance(records_observed, int)
+            and not isinstance(records_observed, bool)
+            and records_observed >= 0
+        ):
+            continue
         evidence.append(
             {
                 "check": name,
                 "status": "ok",
                 "detail": item.get("detail") or "",
                 "sample_type": item.get("sample_type") or "",
+                "semantic_check": CREDENTIAL_PROMOTION_SEMANTICS[name],
+                "records_observed": records_observed,
             }
         )
     return evidence
 
 
-def _funded_promotion_evidence(funded_check: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _public_promotion_evidence(public_checks: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    expected_semantics = {
+        "clob_time": "current_unix_time",
+        "gamma_markets": "market_identity",
+        "data_leaderboard": "leaderboard_identity",
+        "bridge_supported_assets": "supported_asset_identity",
+    }
+    if set(public_checks) != set(PUBLIC_PROMOTION_CHECKS):
+        return []
+    evidence: List[Dict[str, Any]] = []
+    for name in PUBLIC_PROMOTION_CHECKS:
+        item = public_checks.get(name)
+        if not isinstance(item, Mapping):
+            return []
+        if item.get("status") != "ok" or item.get("semantic_check") != expected_semantics[name]:
+            return []
+        evidence.append(
+            {
+                "check": name,
+                "status": "ok",
+                "semantic_check": expected_semantics[name],
+            }
+        )
+    return evidence
+
+
+def _funded_promotion_evidence(
+    funded_check: Mapping[str, Any],
+    *,
+    expected_source_revision: str,
+) -> List[Dict[str, Any]]:
+    # A historical/local report cannot establish a supported CLOB V2 mutation
+    # while the repository intentionally exposes no V2 order client.
+    if not POLYMARKET_LIVE_MUTATIONS_SUPPORTED:
+        return []
     audit = funded_check.get("audit") if isinstance(funded_check.get("audit"), Mapping) else {}
+    account_read = (
+        funded_check.get("account_authenticated_read_preflight")
+        if isinstance(funded_check.get("account_authenticated_read_preflight"), Mapping)
+        else {}
+    )
+    account = funded_check.get("account_preflight") if isinstance(funded_check.get("account_preflight"), Mapping) else {}
+    guards = funded_check.get("execution_guards") if isinstance(funded_check.get("execution_guards"), Mapping) else {}
+    geoblock = funded_check.get("geoblock_preflight") if isinstance(funded_check.get("geoblock_preflight"), Mapping) else {}
+    source_gate = (
+        funded_check.get("source_revision_gate")
+        if isinstance(funded_check.get("source_revision_gate"), Mapping)
+        else {}
+    )
+    recovery = audit.get("recovery_journal") if isinstance(audit.get("recovery_journal"), Mapping) else {}
     order_id = str(audit.get("order_id") or "").strip()
     post_cancel_verified = bool(audit.get("post_cancel_verified"))
     if funded_check.get("status") != "ok" or funded_check.get("live_action") is not True:
         return []
+    if funded_check.get("manual_reconciliation_required") is not False:
+        return []
     if not order_id or not post_cancel_verified:
+        return []
+    if not (
+        account_read.get("status") == "pass"
+        and account_read.get("same_trading_client") is True
+        and account_read.get("account_identity_present") is True
+    ):
+        return []
+    if not (
+        account.get("status") == "pass"
+        and account.get("sufficient_balance") is True
+        and account.get("sufficient_allowance") is True
+    ):
+        return []
+    if not (
+        guards.get("status") == "pass"
+        and guards.get("post_only") is True
+        and guards.get("time_in_force") == "GTC"
+        and guards.get("maker_price_verified") is True
+    ):
+        return []
+    if not (geoblock.get("status") == "pass" and geoblock.get("blocked") is False):
+        return []
+    if not (
+        source_gate.get("status") == "pass"
+        and source_gate.get("clean") is True
+        and source_gate.get("matches_initial_revision") is True
+        and source_gate.get("repository_origin") == EXPECTED_REPOSITORY_ORIGIN
+        and bool(expected_source_revision)
+        and source_gate.get("source_revision") == expected_source_revision
+    ):
+        return []
+    if not (
+        recovery.get("status") == "resolved"
+        and recovery.get("stage") == "cancel_verified"
+        and recovery.get("resolved") is True
+    ):
         return []
     required_sections = ("placed", "cancel", "post_cancel_order")
     if not all(isinstance(audit.get(section), Mapping) for section in required_sections):
+        return []
+    if extract_order_id(audit["placed"]) != order_id:
+        return []
+    if not cancel_response_contains(audit["cancel"], order_id):
+        return []
+    if not order_state_is_cancelled(audit["post_cancel_order"], order_id):
+        return []
+    if not order_zero_fill_evidence(audit["post_cancel_order"], order_id)["verified"]:
         return []
     return [
         {
@@ -1960,6 +2985,13 @@ def _funded_promotion_evidence(funded_check: Mapping[str, Any]) -> List[Dict[str
             "status": "ok",
             "order_id_present": True,
             "post_cancel_verified": True,
+            "post_only_verified": True,
+            "same_account_read_verified": True,
+            "geoblock_verified": True,
+            "balance_allowance_verified": True,
+            "zero_fill_verified": True,
+            "recovery_journal_resolved": True,
+            "source_revision_verified": True,
             "audit_sections": list(required_sections),
         }
     ]
@@ -2262,7 +3294,6 @@ def _review_coverage_tier_mapping(summary: Mapping[str, Any], promotion: Mapping
                 "required_evidence": [
                     "ok clob_l2_orders authenticated read",
                     "ok relayer_recent_transactions authenticated read",
-                    "or ok user_websocket_connect authenticated stream",
                 ],
             },
             "funded_live_verified": {
@@ -2271,6 +3302,7 @@ def _review_coverage_tier_mapping(summary: Mapping[str, Any], promotion: Mapping
                 "review_effect": "candidate_evidence_only" if funded_can_promote else "blocked",
                 "can_promote_from_report": funded_can_promote,
                 "required_evidence": [
+                    "same-report accepted non-mutating authenticated read",
                     "funded_live_order_check.status == ok",
                     "funded_live_order_check.live_action == true",
                     "audit order id",
@@ -2480,34 +3512,43 @@ def compare_live_validation_report_entries(latest: Mapping[str, Any], previous: 
 
 def _empty_store() -> Dict[str, Any]:
     now = _now()
-    return {
-        "version": LIVE_VALIDATION_REPORTS_VERSION,
-        "created_at": now,
-        "updated_at": now,
-        "max_entries": DEFAULT_LIVE_VALIDATION_REPORTS_MAX_ENTRIES,
-        "reports": {},
-    }
+    return _RevisionedLiveValidationStore(
+        {
+            "version": LIVE_VALIDATION_REPORTS_VERSION,
+            "created_at": now,
+            "updated_at": now,
+            "max_entries": DEFAULT_LIVE_VALIDATION_REPORTS_MAX_ENTRIES,
+            "reports": {},
+        },
+        revision=_MISSING_STORE_REVISION,
+    )
 
 
 def _empty_decision_store() -> Dict[str, Any]:
     now = _now()
-    return {
-        "version": LIVE_VALIDATION_DECISIONS_VERSION,
-        "created_at": now,
-        "updated_at": now,
-        "decisions": {},
-    }
+    return _RevisionedLiveValidationStore(
+        {
+            "version": LIVE_VALIDATION_DECISIONS_VERSION,
+            "created_at": now,
+            "updated_at": now,
+            "decisions": {},
+        },
+        revision=_MISSING_STORE_REVISION,
+    )
 
 
 def _empty_promotion_proposal_snapshot_store() -> Dict[str, Any]:
     now = _now()
-    return {
-        "version": LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_VERSION,
-        "created_at": now,
-        "updated_at": now,
-        "max_entries": DEFAULT_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_MAX_ENTRIES,
-        "snapshots": {},
-    }
+    return _RevisionedLiveValidationStore(
+        {
+            "version": LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_VERSION,
+            "created_at": now,
+            "updated_at": now,
+            "max_entries": DEFAULT_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_MAX_ENTRIES,
+            "snapshots": {},
+        },
+        revision=_MISSING_STORE_REVISION,
+    )
 
 
 def _now() -> int:

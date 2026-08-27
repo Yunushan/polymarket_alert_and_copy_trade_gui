@@ -24,4 +24,11 @@ targets are documented in `docs/PRODUCTION_OPERATIONS.md`.
   proxy with authentication.
 - Live trading is disabled by default and requires explicit safety gates.
 - Credentials must be supplied through a protected environment file or secret
-  manager, never through committed configuration files.
+  manager, never through committed configuration files. Configuration load,
+  save, HTTP mutation, and CLI mutation reject credential values; only validated
+  environment-variable names and external credential-file paths may persist.
+- Outbound adapter traffic requires HTTPS/WSS, disables redirects, rejects
+  non-public DNS/IP destinations, and applies a response-byte cap. A reviewed
+  local gateway requires an exact origin in
+  `MARKET_SENTINEL_OUTBOUND_PRIVATE_ORIGINS` before process startup. Endpoint
+  and custom-host policy settings cannot be changed through the HTTP API.

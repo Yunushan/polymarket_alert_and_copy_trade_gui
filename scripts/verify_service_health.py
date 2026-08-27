@@ -22,6 +22,11 @@ def check_health(url: str, token: str, timeout: float) -> dict:
     version = payload.get("api_version")
     if not isinstance(version, str) or not version.strip() or version == "unknown":
         raise RuntimeError("health endpoint did not report a usable api_version")
+    readiness = payload.get("readiness")
+    if readiness is not None:
+        if not isinstance(readiness, dict) or readiness.get("ready") is not True:
+            status = readiness.get("status") if isinstance(readiness, dict) else "invalid"
+            raise RuntimeError(f"health endpoint reported service readiness={status or 'degraded'}")
     return payload
 
 

@@ -1,0 +1,121 @@
+name: Governance evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: governance-evidence-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  governance:
+    name: Collect and attest governance evidence
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Verify exact clean source before collection
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Collect live repository and release-environment controls
+        shell: bash
+        env:
+          READINESS_ADMIN_TOKEN: ${{ secrets.READINESS_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${READINESS_ADMIN_TOKEN}"
+          python scripts/verify_repository_settings.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --branch main \
+            --token-env READINESS_ADMIN_TOKEN \
+            --api-url "${GITHUB_API_URL}" \
+            > "${RUNNER_TEMP}/governance-raw.json"
+
+      - name: Generate exact governance evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/governance-evidence"
+          mkdir -p "${output}"
+          python scripts/trusted_readiness_evidence.py governance \
+            --input "${RUNNER_TEMP}/governance-raw.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --source-revision "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --output-directory "${output}"
+
+      - name: Review governance evidence before attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/governance-evidence"
+          python scripts/trusted_readiness_evidence.py validate \
+            --input "${output}/repository-settings-evidence.json" \
+            --evidence-type repository-settings \
+            --expected-revision "${GITHUB_SHA}"
+          python scripts/trusted_readiness_evidence.py validate \
+            --input "${output}/release-environment-evidence.json" \
+            --evidence-type release-environment \
+            --expected-revision "${GITHUB_SHA}"
+
+      - name: Reverify exact clean source after collection
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Attest repository-settings evidence
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/governance-evidence/repository-settings-evidence.json
+
+      - name: Attest release-environment evidence
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/governance-evidence/release-environment-evidence.json
+
+      - name: Upload repository-settings evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: repository-settings-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/governance-evidence/repository-settings-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release-environment evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-environment-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/governance-evidence/release-environment-evidence.json
+          if-no-files-found: error
+          retention-days: 30

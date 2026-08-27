@@ -12,7 +12,7 @@ A local multi-market prediction-market command center for:
 > ⚠️ Disclaimer  
 > This is a developer MVP. It is **not financial advice** and it can lose money.  
 > Only use each market in ways that comply with that market's terms and your local laws/regulations.
-> The currently implemented Polymarket trading path performs a **geoblock check** and will refuse to trade if blocked.
+> Polymarket public/authenticated reads, alerts, paper trading, and simulation-first copy previews remain available. The official `py-clob-client-v2` mutation wrapper is implemented and offline-tested, but **all Polymarket live mutations remain disabled** until exact-revision credentialed and funded order/cancel evidence is reviewed and the support gate is deliberately promoted. The legacy `py-clob-client`/V1-signed order path must not be used in production.
 
 ## Features (what works today)
 
@@ -53,9 +53,9 @@ A local multi-market prediction-market command center for:
 - `polymarket.data_api` covers activity, positions, closed positions, trades, total value, traded markets, leaderboard, market positions, holders, open interest, live volume, accounting snapshot download, and builder analytics
 - `polymarket.analytics_cache` stores bounded local MDD audit artifacts, lists health/retention metadata, purges selected or expired artifacts, and formats JSON/CSV exports for cached public analytics payloads
 - `polymarket.clob_rest` covers public orderbook/pricing, price history, market parameters, CLOB market lists, rebates, public rewards, and builder trades
-- `polymarket.trader` and `polymarket.clob_auth` cover guarded authenticated order placement, account order/fill recovery, fixed-endpoint order lookup/cancel flows, trades, order scoring, heartbeat, and authenticated rewards
+- `polymarket.trader` implements the official `py-clob-client-v2` order, cancellation, balance, batch, and heartbeat contracts with strict offline tests; `polymarket.clob_auth` retains authenticated read/recovery helpers. Every exposure-changing path still rejects before SDK construction or transport until exact-revision credentialed/funded evidence is accepted and the support gate is deliberately promoted
 - `polymarket.bridge` covers supported assets, deposit addresses, quotes, status, and withdrawal-address creation
-- `polymarket.relayer` covers guarded relayer submit/query, nonce, relay payload, deployment check, recent transactions, and API key listing
+- `polymarket.relayer` keeps read-only query, nonce, deployment, recent-transaction, and API-key inventory helpers; relayer submission is disabled by the same CLOB V2 mutation blocker
 - `polymarket.ws_market`, `polymarket.ws_user`, and `polymarket.ws_sports` cover market, authenticated user, and sports WebSocket channels
 - `polymarket.endpoints` and `polymarket.http_client` centralize official endpoint metadata, auth tiers, documented batch caps, retry/rate-limit handling, typed Polymarket errors, and response normalization helpers used by the wrappers
 - `polymarket.auth_readiness` and `GET /api/polymarket/clob-readiness` report redacted CLOB v2 readiness for private key, signature type, funder/deposit wallet, L1 headers, and L2 read-only REST headers without deriving credentials or placing orders
@@ -66,7 +66,7 @@ A local multi-market prediction-market command center for:
 - `polymarket.mdd` also exposes an opt-in CLOB mark-replay mode using `/batch-prices-history`; the default API mode remains fast MDD v2 to avoid heavy price-history calls during normal scans
 - `polymarket.accounting` parses `/v1/accounting/snapshot` ZIP CSVs and can reconcile MDD payloads against equity, positions, deposits, withdrawals, and cash-flow gaps when explicitly requested
 - The GUI exposes the high-level workflows used by this app; the broader official API surface is available to backend code and summarized through `GET /api/polymarket/coverage`
-- Full live end-to-end validation of authenticated trading, user WebSocket, relayer, and funded wallet flows still requires real credentials, eligible region/KYC status, funded wallets, and explicit live-mode opt-in
+- Authenticated read/user-WebSocket validation still requires real credentials and eligible account/region state. Funded order/cancel and relayer-mutation validation cannot be performed by the current implementation: it first requires a reviewed CLOB V2 client/signing migration, after which credentials, eligibility, funding, and explicit live-action approval remain separate gates
 
 Polymarket coverage is intentionally reported by verification tier, not as a single "implemented" flag:
 
@@ -77,7 +77,7 @@ Polymarket coverage is intentionally reported by verification tier, not as a sin
 | `offline_tested` | Unit tests cover request construction, parsing, and guardrails. |
 | `public_live_verified` | Safe non-credentialed live probe passed from this machine. |
 | `credential_live_verified` | Real credentialed read/stream verified. Currently blocked without credentials. |
-| `funded_live_verified` | Funded order/cancel or fund-movement flow verified. Currently blocked without explicit credentials and live-action approval. |
+| `funded_live_verified` | Funded order/cancel or fund-movement flow verified. Unavailable while Polymarket mutations remain disabled pending exact-revision credentialed/funded evidence and deliberate support promotion; credentials and explicit live-action approval are still required. |
 
 Current truthful status: Gamma/Data/CLOB/Bridge probes are implemented and must be
 re-run from the target network before claiming `public_live_verified`; the latest
@@ -85,16 +85,19 @@ local readiness audit could not reach the official endpoints because their TLS
 connections were reset. Endpoint contracts are hardened offline against
 documented paths, auth tiers, and batch caps; CLOB authentication readiness and
 the credential runbook are validated locally with redacted payloads;
-authenticated CLOB, user WebSocket, Relayer, Bridge address/fund movement, and
-funded order/cancel verification remain blocked until credentials and explicit
-live parameters are supplied.
+authenticated CLOB reads and the user WebSocket remain blocked until credentials
+are supplied. Relayer submissions, Bridge fund movement, live orders,
+cancellations, and funded verification remain unsupported even though the V2
+wrapper is offline-tested; configuration flags cannot bypass the repository-wide
+blocker. Promotion requires trusted exact-revision credentialed evidence plus an
+explicitly approved bounded order/immediate-cancel audit.
 
 Stored live-validation reports include a promotion guard before they can support production verification claims:
 
 | Promotion tier | Required evidence |
 | --- | --- |
 | `credential_live_verified` | An actual `ok` non-destructive authenticated CLOB L2 order-list read, relayer authenticated read, or authenticated user WebSocket connection in `authenticated_read_checks`. A stage-gate boolean or credential runbook is not enough. |
-| `funded_live_verified` | An `ok` funded order/cancel result with `live_action=true`, an order id, placed/cancel/post-cancel audit sections, and `post_cancel_verified=true`. Dry-run transcripts and `ready_to_execute` reports do not promote this tier. |
+| `funded_live_verified` | Promotion is blocked while CLOB V2 mutations are unsupported. After a reviewed migration, an `ok` funded order/cancel result would still need `live_action=true`, an order id, placed/cancel/post-cancel audit sections, and `post_cancel_verified=true`; dry-run transcripts and `ready_to_execute` reports never promote this tier. |
 
 Reports with local-only modes such as GUI readiness snapshots, credential runbooks, or browser smoke fixtures are always blocked from promotion even if they contain simulated successful fields.
 
@@ -153,7 +156,7 @@ Authenticated CLOB readiness follows the official Polymarket split between L1/L2
 | Direct L2 read readiness | Requires all explicit `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP` headers. |
 | L1 REST readiness | Reports presence of `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, and `POLY_NONCE`; it does not synthesize signatures. |
 | Redaction | Private keys and signed headers are never returned by readiness payloads; addresses are shortened. |
-| Live action boundary | Readiness never derives API credentials, submits orders, or moves funds. Funded checks remain behind `scripts/verify_polymarket_live.py` explicit flags. |
+| Live action boundary | Readiness never derives API credentials, submits orders, or moves funds. `scripts/verify_polymarket_live.py` reports the funded stage as blocked and cannot execute it while the repository-wide CLOB V2 mutation guard is active. |
 
 The credential runbook is the first local step before any credentialed live validation. It performs no network calls and only inventories whether required environment variables are present:
 
@@ -173,15 +176,15 @@ python scripts/verify_polymarket_credentials.py --json --report-file polymarket-
 python scripts/verify_polymarket_credentials.py --require-authenticated-read-ready
 ```
 
-`--require-authenticated-read-ready` exits non-zero until at least one non-destructive authenticated read/stream candidate is locally ready. The runbook output includes exact follow-up commands for public readiness, credentialed reads, user WebSocket probing, dry-run order/cancel transcripts, and the separate funded order/cancel command. The funded command still requires explicit live flags, allow-listed token id, hard caps, maker-side orderbook preflight, and the exact confirmation text; the runbook itself cannot execute it.
+`--require-authenticated-read-ready` exits non-zero until at least one non-destructive authenticated read/stream candidate is locally ready. The runbook output includes follow-up commands for public readiness, credentialed reads, user WebSocket probing, and dry-run order/cancel transcripts. Any funded command is retained only as a fail-closed migration diagnostic: the runbook itself cannot execute it, and the verifier rejects it before transport while CLOB V2 mutations are unsupported.
 
-The funded live order/cancel verifier is also disabled by default. Running
+The funded live order/cancel verifier is unavailable in the current implementation. Running
 `python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN>`
-returns a dry-run transcript. A real order/cancel verification requires all of the following: `--allow-funded-order`,
-`--cancel-immediately`, an allow-listed token id, `--confirm-live-order-cancel I_UNDERSTAND_THIS_PLACES_A_REAL_POLYMARKET_ORDER`,
-valid CLOB credentials, an eligible/funded account, a GTC order, size <= 5 shares, approximate notional <= 1 USDC, and a public
-orderbook check proving the requested price is maker-side before placement. The harness immediately cancels the returned order id
-and then fetches the order to verify it is no longer live.
+returns a dry-run transcript. Supplying `--allow-funded-order` does not enable
+execution; it returns the explicit CLOB V2 migration blocker before any order
+transport. The retained confirmation, allow-list, hard-cap, maker-side,
+immediate-cancel, and post-cancel checks are defense-in-depth for a future
+reviewed V2 implementation, not evidence that the present client can trade.
 
 For live credential validation, use the verifier as a stage gate and keep the JSON report:
 
@@ -222,7 +225,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Stores local paper-order history in `data/config.json`
 
 ### 6) Central live trading safety
-- Every implemented live adapter and the Polymarket copy-trading live path run the same preflight before an order can be posted
+- Every adapter that advertises live support runs the same preflight before an order can be posted. Polymarket does not currently advertise live support: its offline-tested V2 mutation paths reject before SDK construction/transport until exact-revision live evidence is reviewed and the support gate is deliberately promoted, while copy previews remain simulation-only
 - Preflight requires `live_trading_enabled=true` and `live_trading_confirmed=true`, honors `live_trading_kill_switch`, and blocks orders above the configured size and maximum-exposure caps. The legacy `live_trading_max_notional` setting name is retained for compatibility, but enforcement is deliberately conservative: the default upper bound is the full order size, while Betfair/Matchbook LAY orders use worst-case liability (`size * (1 / probability - 1)`).
 - Preflight returns a redacted audit payload with contract, side, size, conservative maximum exposure, exposure model, metadata key names, dry-run preview text, and region/KYC/credential warnings
 - The React Live Safety tab edits the selected market's live gate and displays the redacted preflight audit without placing orders
@@ -398,7 +401,7 @@ market-sentinel markets account portfolio --market myriad_markets --wallet 0x...
 market-sentinel markets account market_positions --market myriad_markets --wallet 0x... --state open
 market-sentinel markets account active_orders --market polymarket --account-market-id CONDITION_ID --contract TOKEN_ID
 market-sentinel markets account fills --market polymarket --contract TOKEN_ID --after UNIX --before UNIX
-market-sentinel markets manage-orders cancel_order --market polymarket --order-id 0x... --json '{"confirm_order_management":"I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"}'
+market-sentinel markets manage-orders cancel_order --market kalshi --order-id ORDER_ID --json '{"confirm_order_management":"I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"}'
 market-sentinel markets position-intent split --market myriad_markets --market-id 501 --amount 1000000000000000000
 market-sentinel live-safety show --market polymarket
 market-sentinel live-safety preflight --market polymarket --contract TOKEN --side BUY --size 1 --limit-price 0.50
@@ -458,7 +461,7 @@ Useful local API endpoints:
 - `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi and its read-only distribution aliases, Omen/Gnosis public FPMM trades plus bounded derived candles, Trueo validated Uniswap V3/V4 swaps plus bounded derived candles, MetaDAO bounded recent public spot swaps plus derived candles, Hyperliquid HIP-4 wallet fills/candles, Manifold trades plus bounded derived bet-fill candles, Myriad trades/candles, Context V2 activity trades and binary price history, Opinion authenticated filled trades and price history, Gemini authenticated filled account trades and price history, Probable activity trades and price history, Polymarket price history, IBKR event-contract executions/candles, Betfair matched orders plus bounded derived execution candles, Matchbook matched bets, SX Bet public trades plus bounded derived trade-tape candles, Space, Predict.fun public order matches plus timeseries candles, Iowa Electronic Markets archive candles, SciCast Data Mart archive snapshots/trades, Prophet Exchange authenticated filled trades plus bounded derived candles, and Azuro account-scoped single-selection bettor bets plus bounded derived candles; Omen/Gnosis, Trueo, MetaDAO, Manifold, Betfair, SX Bet, Prophet Exchange, and Azuro derived candles retain source trade ids and are explicitly marked as derived because their public/on-chain feeds document fills, swaps, executions, or bets rather than native candle endpoints. Trueo scans a bounded block range ending 12 blocks behind the current head by default, reports its coverage on every trade, marks boundary candles partial, and rejects explicit timestamp ranges outside that coverage; a production Base RPC with batch, archive-state, and `eth_getLogs` support is required. MetaDAO history is intentionally recent and capped by a configured slot window, per-call scan/request window count, streamed response-byte limit, and total decoded-row count. With no timestamp bounds it returns only that bounded recent slice and may return fewer rows or omit the earliest partial candle bucket. Timestamp-complete requests must reach pair creation within the configured scan horizon or fail closed because estimated Solana block times are not assumed to be monotonic; arbitrary full-history completeness is not claimed. Omen/Gnosis resolve each collateral token's indexed scale and reject ambiguous same-second OHLC; Myriad maps common resolutions to its official 24h/7d/30d/all price-chart buckets without resampling; IBKR execution history covers the current day and six previous days from the selected authorized account; Context V2, Gemini, Opinion, Polymarket, Probable, Predict.fun, SciCast, Prophet Exchange, and Azuro one-value-per-timestamp feeds are represented as flat OHLC points without fabricated volume; authenticated/account-scoped history requires the adapter's documented credentials and identity settings; Polymarket trade history still requires explicit operator-supplied CLOB L2 headers; IEM and SciCast history are archive-only); unsupported adapters fail closed with a structured error. Kalshi authenticated fills, Betfair matched orders, IBKR authenticated account executions, Gemini authenticated filled orders, SX Bet authenticated fills, MetaDAO bounded maker-wallet swaps, Prophet Exchange authenticated filled trades, and Azuro single-selection bettor bets also power separate simulation-first copy previews that never submit live orders.
 - `GET /api/markets/{market_id}/account/{operation}` exposes explicitly allow-listed authenticated recovery reads. Kalshi operations are `active_orders`, `order_history`, `fills`, `positions`, `settlements`, `balance`, and `queue_positions`; Gemini operations remain the documented order/position/volume reads; Limitless operations are `positions`, `account_history`, and `user_orders` (the latter requires a validated `market_slug`); Xmarket operations are `positions`, `user_orders`, and `market_orders` with bounded status/page/page-size filters and a validated market id, while its normalized history routes expose only bounded account-scoped fills; Opinion operations are `order_history`, `order_detail`, and wallet-scoped `positions` with bounded page/limit, numeric market/chain filters, status allow-listing, and a validated account wallet; Betfair exposes `active_orders`, `cleared_orders`, `funds`, `account`, `statement`, and `currency_rates` through the documented Exchange/Accounts JSON-RPC feeds with bounded status/order-by/sort/id/date filters, validated locale/currency values, and a validated wallet; Matchbook exposes authenticated `settled_bets`, `current_bets`, `current_offers`, `balance`, and `account` reads with bounded numeric-id, date, odds, side/status, interval, cancellation, and aggregation filters; Hyperliquid operations are `active_orders`, `order_history`, `positions`, `spot_balances`, `portfolio`, and `subaccounts` and use the configured `HYPERLIQUID_ACCOUNT_WALLET` (falling back to the trade/activity wallet) with an optional validated `dex` name; Myriad exposes public wallet-scoped `account_activity`, `portfolio`, and `market_positions` reads from the documented `/users/{address}/events`, `/portfolio`, and `/markets` endpoints with bounded pagination, model/network/wallet validation, documented portfolio filters, and lossless raw payloads; Polymarket exposes L2-authenticated `active_orders`, `order_detail`, and `fills` reads with validated order hashes, condition/token filters, cursors, and time bounds; Probable exposes L2-authenticated `open_orders` and `order` reads through fixed chain-scoped CLOB paths with signed query parameters; IBKR ForecastTrader, ForecastEx, and CME event contracts expose `orders` and `order_status` through the documented Client Portal account paths with an authorized session and account id; Manifold exposes `account`, `active_orders`, and `order_history` through authenticated `/v0/me` and `/v0/bets` calls, including documented `kinds=open-limit` and bounded cursor/time filters; Prophet Exchange exposes `balance`, `transactions`, `order_history`, `order_detail`, and `trades` through the documented `/v4/mm/get_balance`, `/v4/mm/get_transactions`, `/v4/mm/get_order_history`, `/v4/mm/get_order/{id}`, and `/v4/mm/get_trades` wallet/history endpoints with bounded opaque cursors, time bounds, status/identity filters, and page sizes. Limitless accepts an optional validated `on_behalf_of` profile for delegated reads. Kalshi order/fill history accepts `historical=true` for the documented historical endpoints. Credentials, account eligibility, delegation scope, and any live trading remain operator-controlled external gates.
 - `POST /api/markets/{market_id}/positions` accepts only Myriad's allow-listed `split`, `merge`, `redeem`, `redeem_voided`, `neg_risk_split`, and `neg_risk_merge` operations. It returns the documented unsigned `{to, calldata, value}` transaction intent after validating market/network ids, uint256 amounts, NegRisk event ids, and outcome indexes; this route never signs or submits on-chain and requires external wallet review/signing.
-- `POST /api/markets/{market_id}/orders/{operation}` exposes only explicit adapter allow-lists. The current non-increasing surface is Betfair (`cancel_orders`), Kalshi (`cancel_order`, `batch_cancel_orders`, `decrease_order`), Limitless (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Polymarket (`cancel_order`, `cancel_orders`, `cancel_all_orders`, `cancel_market_orders`), Probable (`cancel_order`, `cancel_orders`, `cancel_all_orders`), Hyperliquid (`cancel_order`, `cancel_orders`, `cancel_by_cloid`, `schedule_cancel`), Xmarket (`batch_cancel_orders`), IBKR event contracts (`cancel_order`, `cancel_all_orders`), Manifold (`cancel_order`), Prophet Exchange (`cancel_order`, `cancel_orders`), Context V2 (`cancel_order`, `batch_cancel_orders`), Gemini (`cancel_order`, `batch_cancel_orders`), Opinion (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Myriad (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Matchbook (`cancel_offer`, `cancel_offers`, `cancel_all_offers`), Smarkets (`cancel_order`, `cancel_orders`), SX Bet (`cancel_order`, `cancel_orders`, `cancel_event_orders`, `cancel_all_orders`), XO (`cancel_order`), and Predict.fun (`remove_orders`, `remove_orders_by_hash`). Requests require the venue-specific order-management opt-in, shared live-safety gates, bounded documented payloads, and explicit operator confirmation. Replace, amend, edit, modify, and batch-create operations are intentionally absent so order management cannot increase or reprice exposure. The route is POST-only and never accepts an arbitrary upstream method or path.
+- `POST /api/markets/{market_id}/orders/{operation}` exposes only explicit adapter allow-lists. The current non-increasing surface is Betfair (`cancel_orders`), Kalshi (`cancel_order`, `batch_cancel_orders`, `decrease_order`), Limitless (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Probable (`cancel_order`, `cancel_orders`, `cancel_all_orders`), Hyperliquid (`cancel_order`, `cancel_orders`, `cancel_by_cloid`, `schedule_cancel`), Xmarket (`batch_cancel_orders`), IBKR event contracts (`cancel_order`, `cancel_all_orders`), Manifold (`cancel_order`), Prophet Exchange (`cancel_order`, `cancel_orders`), Context V2 (`cancel_order`, `batch_cancel_orders`), Gemini (`cancel_order`, `batch_cancel_orders`), Opinion (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Myriad (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Matchbook (`cancel_offer`, `cancel_offers`, `cancel_all_offers`), Smarkets (`cancel_order`, `cancel_orders`), SX Bet (`cancel_order`, `cancel_orders`, `cancel_event_orders`, `cancel_all_orders`), XO (`cancel_order`), and Predict.fun (`remove_orders`, `remove_orders_by_hash`). Polymarket declares no order-management operations until its CLOB V2 mutation migration is reviewed. Requests require the venue-specific order-management opt-in, shared live-safety gates, bounded documented payloads, and explicit operator confirmation. Replace, amend, edit, modify, and batch-create operations are intentionally absent so order management cannot increase or reprice exposure. The route is POST-only and never accepts an arbitrary upstream method or path.
 - `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.
 - `POST /api/alerts` creates a market-scoped price alert after validating the selected adapter supports alerts.
@@ -569,9 +572,17 @@ activity filters the documented `maker` field across a bounded recent ticker/tra
 scan and produces simulation-first paper copy previews only; it requires a canonical
 `solana:<base58 wallet>` identity and does not mirror live orders.
 
+Canonical support-matrix snapshot (2026-08-26): **68** catalog markets,
+**57** implemented adapters, and **11** verified-blocked adapters; **55** support
+price reads and paper trading, **33** orderbooks, **35** trade history, and **39**
+candle history. Live trading is **23 guarded/off by default, 34 unsupported,
+and 11 blocked**. Polymarket is counted in the unsupported live group while its
+the offline-tested CLOB V2 wrapper has not been promoted for live use because
+credentialed and funded exact-revision acceptance evidence is absent.
+
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, dry-run default | Yes | Live trading only | Trading may be region/KYC limited |
+| Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | No (V2 wrapper offline-tested; exact live acceptance and promotion pending) | Yes, simulation-only | Yes | Required | Trading may be region/KYC limited |
 | Kalshi (`kalshi`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation-first | Required | Exchange account/API keys | Region/KYC limited |
 | PredictIt (`predictit`) | Implemented | Yes | Yes (prices and one-level top-of-book; depth sizes unavailable) | Yes | No | No | Required | No | Region/account limited |
 | Robinhood Prediction Markets (`robinhood_prediction_markets`) | Implemented | Yes | Yes (including trades/candles) | Yes | No | No | Required | No | Region/KYC limited |
@@ -722,10 +733,20 @@ for the 100-point model and reviewed evidence-manifest contract. A green CI
 matrix is not treated as proof that an external runner or production host has
 completed its required checks.
 
+Current audit result (2026-08-27): the repository's repeatable local checklist
+is **83/100**, while the independent deployment-oriented assessment is
+**57/100 — NO-GO**. Schema-v2 hosted collectors now provide a structural path
+to all 100 formal points, but none of their external points is awarded without
+a clean exact revision, successful trusted workflow/job, uploaded artifact,
+and exact-byte attestation. The funded workflow also remains fail-closed until
+the offline-tested Polymarket V2 mutation support is explicitly promoted after
+credentialed and bounded order/immediate-cancel review.
+
 GitHub Actions workflows live under `.github/workflows`:
 - `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, constructs and closes the real Tkinter widget tree under Ubuntu Xvfb, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
 - `security.yml` runs CodeQL analysis and requires dependency review on pull requests once the repository dependency graph is enabled.
 - `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, SHA256 checksums, an SPDX SBOM, and GitHub build-provenance attestations. Local verification rejects reusing an existing release tag from a newer commit and requires an untagged project version to be newer than the latest tag.
+- `governance-evidence.yml`, `platform-evidence.yml`, and `polymarket-evidence.yml` are protected-main, GitHub-hosted schema-v2 collectors whose canonical artifacts must pass semantic review, run/job/artifact verification, and exact-byte attestation before the scorer awards external points.
 
 Dependabot is configured in `.github/dependabot.yml` for GitHub Actions, Python, and frontend npm dependency updates.
 

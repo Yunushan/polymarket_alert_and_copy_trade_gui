@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .endpoints import CLOB_ENDPOINTS
@@ -36,19 +37,30 @@ def best_bid_ask_from_book(book: Dict[str, Any]) -> Tuple[Optional[float], Optio
     # Docs/examples sometimes use bids/asks; elsewhere buys/sells.
     bids = book.get("bids") or book.get("buys") or []
     asks = book.get("asks") or book.get("sells") or []
-    best_bid = None
-    best_ask = None
-    if bids:
-        try:
-            best_bid = float(bids[0]["price"])
-        except Exception:
-            pass
-    if asks:
-        try:
-            best_ask = float(asks[0]["price"])
-        except Exception:
-            pass
+    bid_prices = _finite_book_prices(bids)
+    ask_prices = _finite_book_prices(asks)
+    # The current API documents descending bids and ascending asks, but choose
+    # the extrema defensively so a malformed/reordered response cannot weaken a
+    # maker-price guard.
+    best_bid = max(bid_prices, default=None)
+    best_ask = min(ask_prices, default=None)
     return best_bid, best_ask
+
+
+def _finite_book_prices(levels: Any) -> List[float]:
+    if not isinstance(levels, list):
+        return []
+    prices: List[float] = []
+    for level in levels:
+        if not isinstance(level, Mapping):
+            continue
+        try:
+            price = float(level.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price) and 0 < price < 1:
+            prices.append(price)
+    return prices
 
 
 def get_midpoint(token_id: str, timeout: float = 10.0) -> Optional[float]:

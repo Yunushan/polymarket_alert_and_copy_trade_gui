@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError
+from .errors import MarketConfigurationError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -593,8 +593,15 @@ class LimitlessAdapter(MarketAdapter):
             market_slugs=market_slugs,
             market_addresses=market_addresses,
         )
+        safe_websocket_url = self.runtime.validate_endpoint(
+            self.websocket_url,
+            setting_key="limitless_ws_url",
+            kind="websocket",
+            base_url=True,
+            resolve_addresses=False,
+        )
         return {
-            "url": self.websocket_url,
+            "url": safe_websocket_url,
             "namespace": LIMITLESS_WS_NAMESPACE,
             "transports": ["websocket"],
             "events": ["newPriceData", "orderbookUpdate", "system", "exception"],
@@ -765,26 +772,12 @@ class LimitlessAdapter(MarketAdapter):
         headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
         if content_type:
             headers["Content-Type"] = "application/json"
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                request_method,
-                self._url(path),
-                data=body,
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            text = str(getattr(response, "text", "") or "")
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {text[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            request_method,
+            self._url(path),
+            data=body,
+            headers=headers,
+        )
 
     def _post_signed_json(self, path: str, payload: Mapping[str, Any], *, body: Optional[str] = None) -> Any:
         request_body = body if body is not None else self._canonical_json(payload)
@@ -799,25 +792,11 @@ class LimitlessAdapter(MarketAdapter):
         if delegated_profile:
             headers["x-on-behalf-of"] = delegated_profile
         headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                "GET",
-                self._url(request_path),
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            text = str(getattr(response, "text", "") or "")
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {text[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            "GET",
+            self._url(request_path),
+            headers=headers,
+        )
 
     def _delegated_profile(self, value: Optional[str]) -> Optional[str]:
         raw = value if value is not None else self.config.get("limitless_on_behalf_of")

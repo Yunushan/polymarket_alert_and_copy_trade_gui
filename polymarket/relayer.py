@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from .endpoints import RELAYER_ENDPOINTS
 from .http_client import request_json
+from .constants import POLYMARKET_LIVE_MUTATION_BLOCKER
 
 
 AUTH_HEADER_SETS = (
@@ -47,8 +48,7 @@ def _post_json(
 
 
 def submit_transaction(payload: Mapping[str, Any], headers: Mapping[str, str], *, timeout: float = 15.0) -> Dict[str, Any]:
-    data = _post_json("submit", payload, headers=headers, auth_required=True, timeout=timeout)
-    return data if isinstance(data, dict) else {}
+    raise RuntimeError(POLYMARKET_LIVE_MUTATION_BLOCKER)
 
 
 def get_transaction(transaction_id: str, *, timeout: float = 15.0) -> Any:

@@ -26,7 +26,7 @@ class ReleaseSbomTests(unittest.TestCase):
         self.assertEqual(payload["packages"][0]["name"], "market-sentinel")
         names = {package["name"] for package in payload["packages"]}
         self.assertIn("requests", names)
-        self.assertIn("py-clob-client", names)
+        self.assertIn("py-clob-client-v2", names)
         self.assertIn("opinion-clob-sdk", names)
         self.assertIn("react", names)
         self.assertGreater(len(payload["relationships"]), 2)

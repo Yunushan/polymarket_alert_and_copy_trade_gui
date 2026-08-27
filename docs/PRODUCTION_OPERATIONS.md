@@ -20,9 +20,12 @@ regional restrictions.
   Caddy remains responsible for public HTTPS-only HSTS, resource isolation, and
   removing the `Server` header at the internet-facing boundary.
 - The threaded loopback server gives each connection 15 seconds to make
-  progress, uses daemon request workers, and does not wait on stalled workers
-  during shutdown. The systemd unit retains its 30-second stop deadline as a
-  final process-level safeguard.
+  progress, admits at most 32 concurrent request workers, rejects overload with
+  `503` and `Retry-After`, and does not wait on stalled daemon workers during
+  shutdown. It rejects ambiguous or incomplete request framing and caps every
+  JSON, text, and static response at 16 MiB before sending response headers.
+  The systemd unit retains its 30-second stop deadline as a final process-level
+  safeguard.
 - When an API token is configured, the server permits ten failed token attempts
   per client per minute, then returns `429` with `Retry-After`. A valid token
   immediately clears that client record. This is a backstop for the proxy's
@@ -31,8 +34,123 @@ regional restrictions.
 - Run under the dedicated `market-sentinel` user. Use `/var/lib/market-sentinel`
   for state and a root-owned `/etc/market-sentinel/market-sentinel.env` for
   credentials and tokens.
+- Never put credential values in `config.json`. Config load, save, the HTTP API,
+  and the CLI reject persisted passwords, private keys, cookies, bearer tokens,
+  and venue API secrets. Persist only validated environment-variable names or
+  protected credential-file paths, then supply the values through the
+  root-owned service environment or secret manager.
+- Configuration writes use an advisory sibling lock, an on-disk revision
+  check, `fsync`, and atomic replacement. A process that loaded an older
+  revision fails closed instead of overwriting a newer writer; the web API
+  returns `409 config_conflict`. Reload state before retrying. Keep the lock
+  file on the same local filesystem as `config.json`, and do not run multiple
+  active instances against network filesystems with unreliable advisory locks.
+- Live-validation report, decision, and promotion-snapshot stores use the same
+  single-writer/atomic-replace discipline. Existing malformed JSON is preserved
+  and rejected rather than silently replaced. Restore a reviewed backup before
+  resuming evidence collection after a store-read error.
+- Adapter egress defaults to reviewed HTTPS/WSS endpoints, refuses redirects,
+  and rejects private, loopback, link-local, reserved, or mixed-public/private
+  DNS destinations. If a reviewed local integration genuinely needs a private
+  origin, list its exact scheme, host, and port in
+  `MARKET_SENTINEL_OUTBOUND_PRIVATE_ORIGINS`; never use wildcards, CIDRs, or a
+  public deployment's browser/API settings endpoint to change it.
+- Managed Polymarket WebSocket connections reject any frame or complete
+  fragmented message larger than 1 MiB. The frame-length check runs before
+  `websocket-client` reads the declared payload, and the continuation check
+  runs before fragments are concatenated. A deliberately injected custom
+  WebSocket connection factory is outside that managed transport boundary and
+  must provide an equivalent receive limit.
 - Do not enable funded trading or live copy execution in a service until the
   evidence gates in `README.md` and `polymarket/live_verification.py` pass.
+- Copy activity is checkpointed durably before any live handler is allowed to
+  run, providing at-most-once crash behavior. If checkpoint persistence fails,
+  execution is skipped. Review the error and reload/restart the operator process
+  after resolving a configuration conflict; do not replay an uncertain funded
+  action automatically.
+- Polymarket price alerts retain a bounded REST polling path when a WebSocket is
+  disconnected. WebSocket workers are restartable and stop with bounded joins;
+  alert freshness and worker health still require monitoring through the
+  application state and service logs.
+
+### Required connect-time egress enforcement
+
+URL validation resolves a configured hostname immediately before a managed
+HTTP or WebSocket request and rejects every non-global answer unless the exact
+origin is explicitly allowed. It is still a preflight: `requests` and
+`websocket-client` perform their own name resolution while opening the socket,
+so the application does not pin the validated address to that connection. TLS
+hostname verification, disabled redirects, and immutable HTTP endpoint settings
+reduce exposure, but they do not eliminate a DNS-rebinding or resolver-race
+window.
+
+A production host must therefore enforce the destination again at connect time.
+Use a service/cgroup-aware egress firewall or a forward proxy that meets all of
+these requirements:
+
+- deny loopback, RFC1918/unique-local, link-local, carrier-grade NAT,
+  documentation, benchmark, multicast, unspecified, reserved, and cloud
+  metadata destinations for service-originated outbound connections;
+- resolve each requested hostname through a trusted resolver, reject the whole
+  request if any answer is non-global, and connect to one of those already
+  approved addresses without a second DNS lookup;
+- preserve the original hostname for HTTP `Host`, TLS SNI, and certificate
+  verification; permit only the required TCP ports (normally 443); and keep
+  redirects disabled or repeat the complete policy for every redirect target;
+- express an intentional private integration as both an exact
+  `MARKET_SENTINEL_OUTBOUND_PRIVATE_ORIGINS` entry and an equally narrow network
+  exception. The environment variable alone is not a firewall rule.
+
+Because the web process also accepts legitimate loopback traffic from Caddy and
+the health probe, a broad host rule that blocks loopback in both directions is
+incorrect. Scope the outbound rule by service cgroup, process owner, proxy, or
+connection direction. Before approving deployment evidence, exercise the rule
+with controlled hostnames that return public, mixed public/private, and rebound
+private answers; all but the stable public case must fail without reaching the
+destination.
+
+### Durable state boundary
+
+The bundled production environment pins every non-configuration durable store
+below `/var/lib/market-sentinel`:
+
+- `POLYMARKET_ANALYTICS_CACHE_PATH` writes
+  `polymarket_analytics_cache.json`.
+- `POLYMARKET_LIVE_VALIDATION_REPORTS_PATH` writes
+  `polymarket_live_validation_reports.json`.
+- `POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH` writes
+  `polymarket_live_validation_decisions.json`.
+- `POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH` writes
+  `polymarket_live_validation_promotion_proposal_snapshots.json`.
+
+These assignments are required, not optional deployment suggestions. The web
+unit requires `/etc/market-sentinel/market-sentinel.env` and runs an exact-value
+preflight for all four variables before `doctor` or the server starts. This
+keeps writes inside the unit's sole `ReadWritePaths` state root while
+`ProtectSystem=strict` makes the release checkout read-only. The backup unit
+recursively captures that same state root, so every existing regular store file
+is included in the next successful snapshot. Do not relocate one store without
+also reviewing the sandbox, backup source, restore procedure, and production
+deployment verifier; the verifier inspects the running process environment and
+fails if its effective paths or backup source differ from this boundary.
+
+### Durable-mutation idempotency window
+
+The live-report, decision, and promotion-snapshot create routes use an opaque
+`Idempotency-Key` (1-128 visible ASCII characters, with no whitespace). Only a
+SHA-256-derived binding is persisted. A retry with the same key and canonical
+request reconciles a committed file replacement, including a prior uncertain
+parent-directory sync, without adding a second record or duplicate-import audit.
+Reusing a key for different inputs fails closed.
+
+Idempotency retention follows the evidence record: report and promotion
+snapshot keys remain protected while their records remain inside the configured
+bounded store, while decision keys remain with the decision ledger. After an
+operator explicitly purges a record or bounded retention prunes it, that old key
+is no longer reserved and clients must not reuse it. Duplicate-import bindings
+on one retained report are capped at 256 to keep authenticated retry metadata
+bounded. Browser clients retain one generated key across transport-uncertain
+retries and discard it only after a terminal HTTP response or success.
 
 ## Install on RHEL/Rocky/Ubuntu
 
@@ -129,11 +247,13 @@ never construct filesystem paths.
 
 The web and health units use strict systemd sandboxes, private device and
 hostname/clock namespaces, restricted network address families, and a root-owned
-environment file. The web unit has a strict read-only `doctor` preflight before
-startup and a startup health check; the timer runs a separate loopback health
-check every minute. Both units limit start failures to five attempts in five
-minutes, and the health unit times out after 30 seconds. A start-limit hit is an
-operator action item rather than a signal to retry continuously; inspect
+environment file. Missing that file or changing a required durable path prevents
+the web service from starting. After those path assertions, the web unit has a
+strict read-only `doctor` preflight and a startup health check; the timer runs a
+separate loopback health check every minute. Both units limit start failures to
+five attempts in five minutes, and the health unit times out after 30 seconds. A
+start-limit hit is an operator action item rather than a signal to retry
+continuously; inspect
 `journalctl -u market-sentinel-web` or `journalctl -u market-sentinel-health`
 and use `systemctl reset-failed` only after correcting the cause. Review
 `systemd-analyze security market-sentinel-web` and
@@ -194,6 +314,12 @@ proxy response, cache policy, the required browser-security header directives,
 and removal of the public `Server` header.
 It also verifies the root-owned, private service environment file and private
 state/backup directories used by the bundled systemd units.
+It extracts only the four non-secret durable-path values from the running web
+process environment for evidence, proves they are the exact paths beneath the
+sandbox-writable state directory, and checks the effective backup command
+captures that directory. A
+missing variable, a release-tree path, an unbacked path, or a stale installed
+unit makes the evidence fail rather than silently accepting partial backups.
 It also requires a successful backup service completion and independently opens
 at least one archive/manifest pair from the trusted private backup directory,
 verifies its SHA-256 digest and bounded archive structure, and requires its
@@ -248,6 +374,45 @@ loopback-only staging host, omit `--public-url`; the script will still validate
 the local service and timer, but retain all three expected identity arguments for the
 deployed release.
 
+Review the raw collector output directly; do not translate its results into a
+hand-written readiness manifest. The reviewer recomputes the raw file digest,
+requires a fresh production-mode collection with the exact systemd and public
+proxy inventory, rechecks the clean source/runtime/frontend identities, and
+rejects missing, duplicate, failed, or unknown checks:
+
+```bash
+/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/review_deployment_evidence.py \
+  /var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json \
+  --expected-version "${RELEASE_VERSION}" \
+  --expected-revision "${EXPECTED_SOURCE_REVISION}" \
+  --json
+```
+
+The review is deliberately ineligible when the collector used
+`--skip-systemd`, omitted `--public-url`, was re-reviewed after its freshness
+window, or reported a backup that is no longer recent. Preserve the original
+raw bytes for later attestation; changing whitespace also changes the bound
+SHA-256 digest.
+
+For score-eligible evidence, manually run the protected-main **Production
+deployment evidence** workflow with the exact stable release tag and production
+HTTPS origin. Its production-labeled self-hosted collector verifies the live
+host; a separate GitHub-hosted job reviews the raw bytes, binds the exact
+release SHA and frontend ZIP digest, and attests canonical
+`deployment-evidence.json`. Download that final artifact and pass it with the
+identical `--deployment-origin`. Raw reports, handwritten wrappers, and reviewer
+summaries remain diagnostic-only. Do not use staging, generic self-hosted
+runners, or placeholder origins for this workflow.
+Configure `MARKET_SENTINEL_PRODUCTION_ORIGIN` as a protected `production`
+environment variable. The workflow rejects an input that is not byte-for-byte
+equal to that canonical public origin, rejects private or non-global resolution,
+and completes this check before the collector job can access credentials. The
+collector executes the verifier from the protected-main checkout with system
+Python and passes `/opt/market-sentinel` only as the inspected deployment root;
+it never executes a mutable verifier from the deployed checkout. Authenticated
+public probes do not follow redirects. Raw evidence is nonce-bound to the exact
+workflow SHA, run ID, and run attempt.
+
 For a non-Linux or isolated local loopback smoke test only, add
 `--skip-systemd`. This intentionally skips Linux systemd and filesystem
 ownership checks while retaining versioned health and metrics validation; it is
@@ -272,19 +437,23 @@ not production-host evidence.
   operator report with the reverse-proxy and service logs; it is also returned
   in the `X-Request-ID` response header.
 - Metrics: the authenticated `/metrics` endpoint exposes bounded Prometheus
-  counters for completed HTTP requests and request duration. It deliberately
-  never uses request paths, wallets, query values, or credentials as labels.
+  counters for completed HTTP requests and request duration, plus current
+  in-flight requests, overload rejections, and oversized-response rejections.
+  It deliberately never uses request paths, wallets, query values, or
+  credentials as labels.
   Caddy Basic Auth and the upstream API token protect this endpoint in the
   supplied deployment. Scrape it through the public proxy or a trusted
   loopback collector, and alert on sustained `5xx` responses, elevated request
-  duration, and an unexpected loss of request traffic.
+  duration, sustained worker saturation or overload rejection, oversized
+  responses, and an unexpected loss of request traffic.
 - Backups: back up `/var/lib/market-sentinel` daily with encryption and tested
   retention. `market-sentinel-backup.timer` performs an integrity-manifested
   daily archive with 14 retained, cryptographically verified archive/manifest
   pairs. Orphaned and invalid entries remain visible for operator investigation
   but do not displace a restorable pair. The directory contains local
-  configuration, paper records, and redacted live-validation reports. Do not
-  back up `.env` files to shared or unencrypted storage.
+  configuration, paper records, the analytics cache, and redacted
+  live-validation reports, decisions, and promotion snapshots. Do not back up
+  `.env` files to shared or unencrypted storage.
 - Restore drill: quarterly, select an archive from
   `/var/lib/market-sentinel-backups`, verify it, then restore it only into a
   brand-new path on an isolated host. The destination itself must not exist;
@@ -345,7 +514,11 @@ publish from an unmerged feature branch. Confirm the release tag matches
 deployment before public proxy cutover. Install `requirements-live.lock` only
 where authenticated CLOB signing is explicitly approved.
 
-Funded production acceptance additionally requires a current credentialed-read
+### Funded production acceptance
+
+Polymarket funded production acceptance is currently unavailable because live
+mutations are blocked pending the reviewed CLOB V2 client/signing migration.
+After that migration, acceptance would still require a current credentialed-read
 report and a deliberately approved, capped order/cancel report with
-post-cancel verification. Dry-run, browser-smoke, and readiness-only reports
-are not substitutes.
+post-cancel verification. Dry-run, browser-smoke, readiness-only, and legacy
+V1 reports are not substitutes.

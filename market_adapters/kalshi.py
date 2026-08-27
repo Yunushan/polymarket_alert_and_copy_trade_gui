@@ -1084,24 +1084,11 @@ class KalshiAdapter(MarketAdapter):
 
         headers = self._auth_headers("GET", path)
         headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                "GET",
-                self._url(path),
-                params=dict(params or {}),
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.get_json(
+            self._url(path),
+            params=dict(params or {}),
+            headers=headers,
+        )
 
     def _authenticated_request(
         self,
@@ -1120,27 +1107,20 @@ class KalshiAdapter(MarketAdapter):
         headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
         if json_body is not None:
             headers["Content-Type"] = "application/json"
-        self.runtime.rate_limiter.wait()
         try:
-            response = self.runtime.session.request(
+            payload = self.runtime.request_json(
                 normalized_method,
                 self._url(path),
                 params=dict(params or {}),
-                json=dict(json_body) if json_body is not None else None,
+                json_body=dict(json_body) if json_body is not None else None,
                 headers=headers,
-                timeout=self.runtime.timeout_seconds,
+                allow_empty=True,
             )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        if status == 204:
+        except MarketHTTPError as exc:
+            if "response was not valid JSON" not in str(exc):
+                raise
             return {}
-        try:
-            return response.json()
-        except ValueError:
-            return {}
+        return {} if payload is None else payload
 
     def _auth_headers(self, method: str, path: str) -> Dict[str, str]:
         api_key = self.resolve_credential(

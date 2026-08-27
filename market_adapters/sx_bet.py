@@ -735,9 +735,22 @@ class SxBetAdapter(MarketAdapter):
     ) -> Dict[str, Any]:
         channels = self.websocket_channels(market_hashes=market_hashes, event_ids=event_ids)
         credential = self.resolve_credential("sx_bet_api_key", ("SX_BET_API_KEY",), label="SX_BET_API_KEY")
+        safe_websocket_url = self.runtime.validate_endpoint(
+            self.websocket_url,
+            setting_key="sx_bet_ws_url",
+            kind="websocket",
+            base_url=True,
+            resolve_addresses=False,
+        )
+        safe_api_base_url = self.runtime.validate_endpoint(
+            self.api_base_url,
+            setting_key="sx_bet_api_base_url",
+            base_url=True,
+            resolve_addresses=False,
+        )
         return {
-            "url": self.websocket_url,
-            "token_endpoint": f"{self.api_base_url}/user/realtime-token/api-key",
+            "url": safe_websocket_url,
+            "token_endpoint": f"{safe_api_base_url}/user/realtime-token/api-key",
             "requires_api_key_header": "X-Api-Key",
             "credential_source": credential.source if credential else None,
             "channels": channels,

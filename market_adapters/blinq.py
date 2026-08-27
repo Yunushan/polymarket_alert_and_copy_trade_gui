@@ -80,6 +80,16 @@ class BlinqAdapter(PolymarketAdapter):
             ),
         )
 
+    def place_live_order(self, order: Any) -> Dict[str, Any]:
+        """Reject the inherited Polymarket mutation boundary for this alias."""
+
+        del order
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "live_trading",
+            "Blinq leverage and wallet execution are not supported by this read-only adapter.",
+        )
+
     def get_account_orders(
         self,
         *,

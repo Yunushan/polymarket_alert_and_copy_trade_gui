@@ -751,6 +751,7 @@ eth-abi==5.2.0 \
     # via
     #   -r requirements.txt
     #   eth-account
+    #   py-clob-client-v2
     #   web3
 eth-account==0.13.7 \
     --hash=sha256:39727de8c94d004ff61d10da7587509c04d2dc7eac71e04830135300bdfc6d24 \
@@ -758,7 +759,7 @@ eth-account==0.13.7 \
     # via
     #   -r requirements.txt
     #   opinion-clob-sdk
-    #   py-clob-client
+    #   py-clob-client-v2
     #   py-order-utils
     #   web3
 eth-hash==0.8.0 \
@@ -803,7 +804,7 @@ eth-utils==6.0.0 \
     #   eth-keys
     #   eth-rlp
     #   poly-eip712-structs
-    #   py-clob-client
+    #   py-clob-client-v2
     #   py-order-utils
     #   rlp
     #   web3
@@ -968,7 +969,7 @@ httpcore==1.0.9 \
 httpx==0.28.1 \
     --hash=sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
-    # via py-clob-client
+    # via py-clob-client-v2
 hyperframe==6.1.0 \
     --hash=sha256:b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5 \
     --hash=sha256:f630908a00854a7adeabd6382b43923a4c4cd4b821fcb527e6ab9e15382a3b08
@@ -1162,7 +1163,7 @@ poly-eip712-structs==0.0.1 \
     --hash=sha256:d9193766fde497b1ee01c79a50092733a34b7a94bed090deb5d3c1b1e41f6d8c
     # via
     #   opinion-clob-sdk
-    #   py-clob-client
+    #   py-clob-client-v2
     #   py-order-utils
 propcache==0.5.2 \
     --hash=sha256:01c4fc7480cd0598bb4b57022df55b9ca296da7fc5a8760bd8451a7e63a7d427 \
@@ -1289,18 +1290,14 @@ propcache==0.5.2 \
     # via
     #   aiohttp
     #   yarl
-py-builder-signing-sdk==0.0.2 \
-    --hash=sha256:114b9d57bec228177d759ce15c475589f47db2252ed1fd67cac3c9b0640abe76 \
-    --hash=sha256:27fa4401944220c51809f549a263c6e53b5cd981fca98eda7ef6f21944e6bf94
-    # via py-clob-client
-py-clob-client==0.34.6 \
-    --hash=sha256:09c6b96e7296f6cc22466018af9ab74bcaab661a697432025e7257252c660af4 \
-    --hash=sha256:29c39002b76f3918f2312c963db0b31941cd455bd6c6acdc1519d8ffcd70842d
+py-clob-client-v2==1.1.0 \
+    --hash=sha256:421dc851ffad5028850dc332a7388863fe854f125b30bf3aa9d3333fb8cd1eeb \
+    --hash=sha256:7821e2f3ced3651da0956a1225e89ec94434736a8e16086c1c6a14351774088d
     # via -r requirements-live.txt
 py-order-utils==0.3.2 \
     --hash=sha256:4c0ecb939f4ce0313cd8a4ca32f2ba9a72449a6fc9ee17b9ce1937f594662988 \
     --hash=sha256:5ab780e61ed532ddda852a6a12d470be7bbdaae01213ced3ebc6c887cedb1d3e
-    # via py-clob-client
+    # via py-clob-client-v2
 pycparser==3.0 \
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
@@ -1501,10 +1498,7 @@ python-dateutil==2.9.0.post0 \
 python-dotenv==1.2.2 \
     --hash=sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a \
     --hash=sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3
-    # via
-    #   -r requirements.txt
-    #   py-builder-signing-sdk
-    #   py-clob-client
+    # via -r requirements.txt
 pyunormalize==17.0.0 \
     --hash=sha256:0949a3e56817e287febcaf1b0cc4b5adf0bb107628d379335938040947eec792 \
     --hash=sha256:f0d93b076f938db2b26d319d04f2b58505d1cd7a80b5b72badbe7d1aa4d2a31c
@@ -1653,7 +1647,6 @@ requests==2.34.2 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
     # via
     #   -r requirements.txt
-    #   py-builder-signing-sdk
     #   web3
 rlp==4.1.0 \
     --hash=sha256:8eca394c579bad34ee0b937aecb96a57052ff3716e19c7a578883e767bc5da6f \

@@ -894,29 +894,13 @@ class MyriadAdapter(MarketAdapter):
                 body=raw_body,
             ),
         }
-        self.runtime.rate_limiter.wait()
-        request_kwargs: Dict[str, Any] = {
-            "json": body_payload,
-            "headers": headers,
-            "timeout": self.runtime.timeout_seconds,
-        }
-        if params is not None:
-            request_kwargs["params"] = dict(params)
-        try:
-            response = self.runtime.session.request(
-                method.upper(),
-                self._url(clean_path),
-                **request_kwargs,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            method.upper(),
+            self._url(clean_path),
+            params=dict(params) if params is not None else None,
+            json_body=body_payload,
+            headers=headers,
+        )
 
     def _url(self, path: str) -> str:
         clean_path = "/" + str(path or "").strip("/")

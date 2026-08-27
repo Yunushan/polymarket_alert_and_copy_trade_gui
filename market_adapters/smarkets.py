@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError
+from .errors import MarketConfigurationError
 from .types import (
     MarketContract,
     MarketCandle,
@@ -530,32 +530,16 @@ class SmarketsAdapter(MarketAdapter):
         auth: bool,
         params: Optional[Mapping[str, Any]] = None,
     ) -> Any:
-        self.runtime.rate_limiter.wait()
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if auth:
             headers.update(self._headers(required=True))
-        request_kwargs: Dict[str, Any] = {
-            "json": dict(body) if body is not None else None,
-            "headers": {"User-Agent": self.runtime.user_agent, **headers},
-            "timeout": self.runtime.timeout_seconds,
-        }
-        if params is not None:
-            request_kwargs["params"] = dict(params)
-        try:
-            response = self.runtime.session.request(
-                method.upper(),
-                self._url(self.api_base_url, path),
-                **request_kwargs,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        return self.runtime.request_json(
+            method.upper(),
+            self._url(self.api_base_url, path),
+            params=dict(params) if params is not None else None,
+            json_body=dict(body) if body is not None else None,
+            headers={"User-Agent": self.runtime.user_agent, **headers},
+        )
 
     def _headers(self, *, required: bool) -> Dict[str, str]:
         credential = self.resolve_credential(

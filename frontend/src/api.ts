@@ -114,7 +114,7 @@ export function apiSchemaValidation(details: unknown): PolymarketLiveValidationR
 
 const vitePorts = new Set(["5173", "4173"]);
 const defaultApiBase = vitePorts.has(window.location.port) ? "http://127.0.0.1:8765" : "";
-const apiBase = (import.meta.env.VITE_API_BASE_URL ?? defaultApiBase).replace(/\/$/, "");
+const apiBase = (import.meta.env?.VITE_API_BASE_URL ?? defaultApiBase).replace(/\/$/, "");
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
@@ -129,11 +129,65 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const error = payload.error;
     const message = typeof error === "string" ? error : error?.message;
     const code = typeof error === "object" ? error?.code : undefined;
-    const status = typeof error === "object" ? error?.status : response.status;
+    const status = typeof error === "object" ? error?.status ?? response.status : response.status;
     const details = typeof error === "object" ? error?.details : undefined;
     throw new ApiRequestError(`${code ? `${code}: ` : ""}${message ?? `Request failed: ${response.status}`}`, code, status, details);
   }
   return payload;
+}
+
+const pendingIdempotencyKeys = new Map<string, string>();
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const members = Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
+  return `{${members.join(",")}}`;
+}
+
+function newIdempotencyKey(): string {
+  if (typeof globalThis.crypto?.randomUUID !== "function") {
+    throw new Error("This browser cannot safely generate an idempotency key.");
+  }
+  return `market-sentinel-${globalThis.crypto.randomUUID()}`;
+}
+
+async function requestIdempotentMutation<T>(path: string, payload: object): Promise<T> {
+  const requestIdentity = `${path}:${canonicalJson(payload)}`;
+  let idempotencyKey = pendingIdempotencyKeys.get(requestIdentity);
+  if (!idempotencyKey) {
+    idempotencyKey = newIdempotencyKey();
+    pendingIdempotencyKeys.set(requestIdentity, idempotencyKey);
+  }
+  try {
+    const response = await request<T>(path, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(payload)
+    });
+    pendingIdempotencyKeys.delete(requestIdentity);
+    return response;
+  } catch (error) {
+    // A non-retryable 4xx response is terminal. Network/parse failures, 429,
+    // and all 5xx responses are ambiguous, so retain the key for reconciliation.
+    if (
+      error instanceof ApiRequestError &&
+      error.status !== undefined &&
+      error.status < 500 &&
+      error.status !== 429
+    ) {
+      pendingIdempotencyKeys.delete(requestIdentity);
+    }
+    throw error;
+  }
 }
 
 export function fetchHealth(): Promise<HealthPayload> {
@@ -262,9 +316,9 @@ export function manageMarketOrders(
   operation: MarketOrderManagementOperation,
   payload: Record<string, unknown>
 ): Promise<MarketOrderManagementPayload> {
-  return request<MarketOrderManagementPayload>(
+  return requestIdempotentMutation<MarketOrderManagementPayload>(
     `/api/markets/${encodeURIComponent(marketId)}/orders/${encodeURIComponent(operation)}`,
-    { method: "POST", body: JSON.stringify(payload) }
+    payload
   );
 }
 
@@ -310,10 +364,10 @@ export function fetchPolymarketLiveValidationReportReview(key: string): Promise<
 export function storePolymarketLiveValidationReport(
   payload: PolymarketLiveValidationReportStoreRequest
 ): Promise<PolymarketLiveValidationReportsPayload> {
-  return request<PolymarketLiveValidationReportsPayload>("/api/polymarket/live-validation/reports", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
+  return requestIdempotentMutation<PolymarketLiveValidationReportsPayload>(
+    "/api/polymarket/live-validation/reports",
+    payload
+  );
 }
 
 export function fetchPolymarketLiveValidationDecisions(reportKey = ""): Promise<PolymarketLiveValidationDecisionLedgerPayload> {
@@ -357,22 +411,19 @@ export function fetchPolymarketLiveValidationPromotionProposalSnapshot(
 export function storePolymarketLiveValidationPromotionProposalSnapshot(
   payload: PolymarketLiveValidationPromotionProposalSnapshotStoreRequest
 ): Promise<PolymarketLiveValidationPromotionProposalSnapshotsPayload> {
-  return request<PolymarketLiveValidationPromotionProposalSnapshotsPayload>(
+  return requestIdempotentMutation<PolymarketLiveValidationPromotionProposalSnapshotsPayload>(
     "/api/polymarket/live-validation/promotion-proposal/snapshots",
-    {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }
+    payload
   );
 }
 
 export function storePolymarketLiveValidationDecision(
   payload: PolymarketLiveValidationDecisionStoreRequest
 ): Promise<PolymarketLiveValidationDecisionLedgerPayload> {
-  return request<PolymarketLiveValidationDecisionLedgerPayload>("/api/polymarket/live-validation/decisions", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
+  return requestIdempotentMutation<PolymarketLiveValidationDecisionLedgerPayload>(
+    "/api/polymarket/live-validation/decisions",
+    payload
+  );
 }
 
 export function deletePolymarketLiveValidationReport(key: string): Promise<PolymarketLiveValidationReportsPayload> {
@@ -461,10 +512,7 @@ export function updateConfig(payload: Partial<Pick<ConfigPayload, "selected_mark
 }
 
 export function createAlert(form: AlertForm): Promise<AlertsPayload> {
-  return request<AlertsPayload>("/api/alerts", {
-    method: "POST",
-    body: JSON.stringify(form)
-  });
+  return requestIdempotentMutation<AlertsPayload>("/api/alerts", form);
 }
 
 export function updateAlert(alertId: string, form: Partial<AlertForm>): Promise<AlertsPayload> {
@@ -495,10 +543,7 @@ export function refreshAlert(alertId: string): Promise<AlertRefreshResponse> {
 }
 
 export function createWallet(form: WalletForm): Promise<WalletsPayload> {
-  return request<WalletsPayload>("/api/wallets", {
-    method: "POST",
-    body: JSON.stringify(form)
-  });
+  return requestIdempotentMutation<WalletsPayload>("/api/wallets", form);
 }
 
 export function updateWallet(walletId: string, form: Partial<WalletForm>): Promise<WalletsPayload> {
@@ -629,10 +674,10 @@ export function previewPaperImpact(form: PaperOrderForm): Promise<PaperImpactPay
 }
 
 export function submitPaperOrder(form: PaperOrderForm): Promise<PaperOrderResponse> {
-  return request<PaperOrderResponse>("/api/paper/orders", {
-    method: "POST",
-    body: JSON.stringify(serializePaperOrderForm(form))
-  });
+  return requestIdempotentMutation<PaperOrderResponse>(
+    "/api/paper/orders",
+    serializePaperOrderForm(form)
+  );
 }
 
 export function usePaperHistory(recordId: string): Promise<PaperFormFillPayload> {

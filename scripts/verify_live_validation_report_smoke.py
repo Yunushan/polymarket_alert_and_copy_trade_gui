@@ -118,9 +118,18 @@ def close_browser_debug_endpoint(port: int | None, browser_ws_path: str) -> None
                 pass
 
 
-def request_json(base_url: str, path: str, *, method: str = "GET", payload: Dict[str, Any] | None = None) -> Tuple[int, Dict[str, Any]]:
+def request_json(
+    base_url: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: Dict[str, Any] | None = None,
+    idempotency_key: str = "",
+) -> Tuple[int, Dict[str, Any]]:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"} if payload is not None else {}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     request = Request(f"{base_url}{path}", data=data, headers=headers, method=method)
     try:
         with urlopen(request, timeout=10) as response:
@@ -400,6 +409,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 base_url,
                 "/api/polymarket/live-validation/reports",
                 method="POST",
+                idempotency_key="browser-smoke-report-seed-v1",
                 payload={
                     "label": "browser smoke",
                     "source": "browser_smoke",
@@ -451,6 +461,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 base_url,
                 "/api/polymarket/live-validation/decisions",
                 method="POST",
+                idempotency_key="browser-smoke-decision-seed-v1",
                 payload={
                     "report_key": report_key,
                     "payload_hash": review.get("bundle", {}).get("report", {}).get("payload_hash"),
@@ -486,6 +497,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 base_url,
                 "/api/polymarket/live-validation/promotion-proposal/snapshots",
                 method="POST",
+                idempotency_key="browser-smoke-proposal-snapshot-seed-v1",
                 payload={"target_tier": "credential_live_verified", "source": "browser_smoke"},
             )
             if status != 200 or snapshots.get("counts", {}).get("entries") != 1:
@@ -562,6 +574,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 base_url,
                 "/api/polymarket/live-validation/reports",
                 method="POST",
+                idempotency_key="browser-smoke-report-duplicate-v1",
                 payload={
                     "label": "browser smoke duplicate",
                     "source": "browser_smoke",
@@ -579,6 +592,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 base_url,
                 "/api/polymarket/live-validation/reports",
                 method="POST",
+                idempotency_key="browser-smoke-report-invalid-v1",
                 payload={
                     "label": "invalid browser smoke",
                     "source": "browser_smoke_invalid",

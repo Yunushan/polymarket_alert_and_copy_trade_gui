@@ -4310,6 +4310,25 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     )
                 )
 
+    def test_opinion_live_approval_check_fails_before_sdk_use(self) -> None:
+        adapter = OpinionAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_size": 25,
+                "opinion_live_check_approval": True,
+            }
+        )
+        with patch.object(adapter, "_create_clob_client") as client, patch.object(
+            adapter, "_build_sdk_order"
+        ) as builder:
+            with self.assertRaisesRegex(MarketConfigurationError, "RPC transport is managed"):
+                adapter.place_live_order(
+                    PaperOrderRequest("opinion_labs", "77:YES:0xyes", "BUY", 4, 0.64)
+                )
+        client.assert_not_called()
+        builder.assert_not_called()
+
     def test_opinion_guarded_order_management_uses_documented_sdk_methods(self) -> None:
         adapter = OpinionAdapter(
             {

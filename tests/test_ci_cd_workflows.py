@@ -127,6 +127,7 @@ class CiCdWorkflowTests(unittest.TestCase):
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
                     "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
+                    "actions/attest-build-provenance": (4, "4d101475d8b20a2381f78447822ac1eab6504dd8"),
                 },
             ),
         )
@@ -140,6 +141,70 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertIn("WINDOWS_10_ENABLED: ${{ vars.ENABLE_WINDOWS_10_SELF_HOSTED }}", package)
         self.assertIn('if [ "${WINDOWS_10_ENABLED}" = "true" ]', package)
         self.assertIn('"Required opt-in CI job windows-10-self-hosted finished with ${WINDOWS_10_RESULT}."', package)
+
+    def test_manual_ci_public_probe_is_read_only_exact_sha_and_attested(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = text.split("  public-polymarket-live:\n", 1)[1].split("  package:\n", 1)[0]
+
+        for fragment in (
+            "name: Public Polymarket live / GitHub-hosted",
+            "if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+            "runs-on: ubuntu-24.04",
+            "contents: read",
+            "attestations: write",
+            "id-token: write",
+            "persist-credentials: false",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "Verify exact clean source before probe",
+            "Reverify exact clean source after probe",
+            'test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"',
+            "git status --porcelain=v1 --untracked-files=all",
+            'report_dir="${RUNNER_TEMP}/public-live"',
+            "for probe_attempt in 1 2",
+            "sleep 1",
+            'if [ "${probe_succeeded}" != true ]',
+            "--public-only",
+            "--validate-public-only-report",
+            '--source-repository "${GITHUB_REPOSITORY}"',
+            '--source-revision "${GITHUB_SHA}"',
+            '--source-run-id "${GITHUB_RUN_ID}"',
+            '--source-run-attempt "${GITHUB_RUN_ATTEMPT}"',
+            '--source-workflow-ref "${GITHUB_WORKFLOW_REF}"',
+            '"error":"probe terminated before a report was written"',
+            "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
+            "subject-path: ${{ runner.temp }}/public-live/public-polymarket-live.json",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+            "name: public-polymarket-live-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+            "if-no-files-found: error",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, job)
+
+        for forbidden in (
+            "env:",
+            "secrets.",
+            "requirements-live.lock",
+            "python -m pip install --no-cache-dir --no-deps -e .",
+            "--skip-authenticated-read-checks",
+            "--require-authenticated-read-ok",
+            "--include-user-websocket-connect",
+            "--include-bridge-address-creation",
+            "--allow-funded-order",
+            "--token-id",
+            "--private-key",
+            "${{ github.workflow_ref }}",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, job)
+
+        probe_index = job.index("Probe reviewed public Polymarket endpoints")
+        validate_index = job.index("Revalidate public-only evidence before attestation")
+        attest_index = job.index("Attest exact public-live evidence file")
+        upload_index = job.index("Upload public-live evidence")
+        self.assertLess(probe_index, validate_index)
+        self.assertLess(validate_index, attest_index)
+        self.assertLess(attest_index, upload_index)
 
     def test_release_workflow_publishes_checked_and_checksummed_assets(self) -> None:
         text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -246,6 +311,21 @@ class CiCdWorkflowTests(unittest.TestCase):
             "scripts/release_version.py validate-project",
             '"--prerelease=${PRERELEASE}"',
             '"--draft=${DRAFT}"',
+            "runs-on: ubuntu-24.04",
+            "Generate exact published release evidence",
+            "scripts/generate_release_evidence.py",
+            "Attest exact published release evidence",
+            "subject-path: release-evidence/release-evidence.json",
+            "Upload published release evidence",
+            "name: release-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+            "id: publish_release",
+            'echo "release_prepared=true" >> "${GITHUB_OUTPUT}"',
+            "Re-draft release after evidence failure",
+            "failure() || cancelled()",
+            'RELEASE_ID: ${{ steps.publish_release.outputs.release_id }}',
+            'RELEASE_FINGERPRINT: ${{ steps.publish_release.outputs.release_fingerprint }}',
+            'current_fingerprint="$(' ,
+            "Release changed after publication; preserving the newer state instead of re-drafting it.",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
@@ -300,25 +380,46 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("release_flags+=(--prerelease)", publish)
         self.assertNotIn("release_flags+=(--draft)", publish)
         self.assertNotIn("gh release delete", publish)
-        self.assertIn('gh release edit "${TAG_NAME}" --draft=true', publish)
+        self.assertNotIn('gh release edit "${TAG_NAME}" --draft=true', publish)
+        self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"', publish)
+        self.assertIn('-F draft=true > "${redrafted_release_json}"', publish)
+        self.assertIn('[ "${current_fingerprint}" != "${RELEASE_FINGERPRINT}" ]', publish)
         self.assertIn('[[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]', publish)
         self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"', publish)
         self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100"', publish)
-        draft_index = publish.index('gh release edit "${TAG_NAME}" --draft=true')
+        preflight_index = publish.index(
+            'if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}"'
+        )
+        draft_index = publish.index('gh api --method PATCH')
+        upload_recheck_index = publish.index(
+            "Release identity changed before asset upload; refusing mutation."
+        )
         upload_index = publish.index('gh release upload "${TAG_NAME}"')
         cleanup_plan_index = publish.index("--print-stale-remote-asset-ids")
         cleanup_index = publish.index('"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"')
         remote_verify_index = publish.index("--verify-remote-inventory")
         download_index = publish.index('gh release download "${TAG_NAME}"')
         byte_compare_index = publish.index("cmp --")
-        final_publish_index = publish.rindex('gh release edit "${TAG_NAME}"')
-        self.assertLess(draft_index, upload_index)
+        release_prepared_index = publish.index('echo "release_prepared=true"')
+        final_publish_index = publish.index('"${release_state_flags[@]}"')
+        evidence_index = publish.index("Generate exact published release evidence")
+        evidence_attest_index = publish.index("Attest exact published release evidence")
+        evidence_upload_index = publish.index("Upload published release evidence")
+        evidence_cleanup_index = publish.index("Re-draft release after evidence failure")
+        self.assertLess(preflight_index, draft_index)
+        self.assertLess(draft_index, upload_recheck_index)
+        self.assertLess(upload_recheck_index, upload_index)
         self.assertLess(upload_index, cleanup_plan_index)
         self.assertLess(cleanup_plan_index, cleanup_index)
         self.assertLess(cleanup_index, remote_verify_index)
         self.assertLess(remote_verify_index, download_index)
         self.assertLess(download_index, byte_compare_index)
-        self.assertLess(byte_compare_index, final_publish_index)
+        self.assertLess(byte_compare_index, release_prepared_index)
+        self.assertLess(release_prepared_index, final_publish_index)
+        self.assertLess(final_publish_index, evidence_index)
+        self.assertLess(evidence_index, evidence_attest_index)
+        self.assertLess(evidence_attest_index, evidence_upload_index)
+        self.assertLess(evidence_upload_index, evidence_cleanup_index)
         self.assertEqual(
             [],
             workflow_action_pin_issues(
@@ -334,6 +435,41 @@ class CiCdWorkflowTests(unittest.TestCase):
             ),
         )
 
+    def test_release_preflights_existing_identity_before_any_mutation(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = text.split("  publish:\n", 1)[1]
+
+        for fragment in (
+            'release_preflight_json="${RUNNER_TEMP}/market-sentinel-release-preflight.json"',
+            'prepared_release_id="$(jq -er \'.id\' "${release_preflight_json}")"',
+            ".tag_name == $tag",
+            ".target_commitish == $target",
+            '(.draft | type == "boolean")',
+            '(.prerelease | type == "boolean")',
+            "Existing published release prerelease state conflicts",
+            '"repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}"',
+            "Existing release changed during draft transition",
+            "Release identity changed before asset upload",
+            'if [ "${release_id}" != "${prepared_release_id}" ]',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, publish)
+
+        preflight = publish.index(
+            'if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}"'
+        )
+        validate_target = publish.index(".target_commitish == $target")
+        exact_id_patch = publish.index('gh api --method PATCH')
+        upload_recheck = publish.index("Release identity changed before asset upload")
+        upload = publish.index('gh release upload "${TAG_NAME}"')
+        self.assertLess(preflight, validate_target)
+        self.assertLess(validate_target, exact_id_patch)
+        self.assertLess(exact_id_patch, upload_recheck)
+        self.assertLess(upload_recheck, upload)
+        self.assertNotIn('if gh release view "${TAG_NAME}"', publish)
+
     def test_distribution_smoke_uses_the_current_catalog_count(self) -> None:
         for workflow_name in ("ci.yml", "release.yml"):
             with self.subTest(workflow=workflow_name):
@@ -341,6 +477,83 @@ class CiCdWorkflowTests(unittest.TestCase):
                 self.assertIn("from market_adapters import MARKET_IDS; print(len(MARKET_IDS))", text)
                 self.assertIn("EXPECTED_MARKET_COUNT", text)
                 self.assertNotIn("len(build_default_registry().list_market_ids()) == 41", text)
+
+    def test_release_reconcile_preserves_prior_evidence_on_failed_rerun(self) -> None:
+        text = (
+            ROOT / ".github" / "workflows" / "release-evidence-reconcile.yml"
+        ).read_text(encoding="utf-8")
+
+        for fragment in (
+            "current_release_has_valid_evidence()",
+            "actions/artifacts?per_page=100",
+            "^release-evidence-${HEAD_SHA}-([1-9][0-9]*)-([1-9][0-9]*)$",
+            ".workflow_run.id, .workflow_run.head_sha",
+            "from scripts.check_product_readiness import _attested_release_report",
+            'result.get("status") == "pass"',
+            "earlier evidence still validates against the current release bytes",
+            "This run attempt did not publish the current release; preserving it.",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, text)
+
+        evidence_check = text.index("if current_release_has_valid_evidence; then")
+        ownership_check = text.index('if [[ "${owns_published_state}" != "true" ]]')
+        draft = text.index("gh api --method PATCH")
+        self.assertLess(evidence_check, ownership_check)
+        self.assertLess(ownership_check, draft)
+        self.assertNotIn(
+            'artifact="release-evidence-${HEAD_SHA}-${RUN_ID}-${RUN_ATTEMPT}"',
+            text,
+        )
+        self.assertNotIn('gh release edit "${tag}" --draft=true', text)
+        self.assertNotIn(
+            'if [[ "${publish_step_conclusion}" == "success" ]]; then\n'
+            "            owns_published_state=true",
+            text,
+        )
+
+    def test_release_reconcile_refuses_stale_run_or_release_identity(self) -> None:
+        text = (
+            ROOT / ".github" / "workflows" / "release-evidence-reconcile.yml"
+        ).read_text(encoding="utf-8")
+
+        for fragment in (
+            "group: release-${{ github.event.workflow_run.head_sha }}",
+            "RUN_NUMBER: ${{ github.event.workflow_run.run_number }}",
+            'if [[ "${current_attempt}" != "${RUN_ATTEMPT}" ]]',
+            "actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100",
+            'select(.name == "Reconcile and publish GitHub release")',
+            "started <= published <= completed and started <= updated <= completed",
+            "release timestamps must belong to this exact job window",
+            'if [[ "${latest_run_attempt}" != "${RUN_ATTEMPT}" ]]',
+            "owned_release_fingerprint",
+            "latest_release_fingerprint",
+            "Release ${release_id} changed after inspection; preserving the newer state.",
+            "Release ${release_id} changed while evidence was rechecked; preserving the newer state.",
+            '"repos/${GITHUB_REPOSITORY}/releases/${release_id}"',
+            "-F draft=true",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, text)
+
+        first_snapshot = text.index('owned_release_fingerprint="$(jq')
+        latest_attempt = text.index('latest_run_attempt="$(gh api')
+        first_recheck = text.index(
+            'latest_release_fingerprint="$(jq', latest_attempt
+        )
+        second_evidence_check = text.rindex("if current_release_has_valid_evidence; then")
+        second_recheck = text.rindex('latest_release_fingerprint="$(jq')
+        draft = text.index("gh api --method PATCH")
+        self.assertLess(first_snapshot, latest_attempt)
+        self.assertLess(latest_attempt, first_recheck)
+        self.assertLess(first_recheck, second_evidence_check)
+        self.assertLess(second_evidence_check, second_recheck)
+        self.assertLess(second_recheck, draft)
+
+        release_workflow = (
+            ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("group: release-${{ github.sha }}", release_workflow)
 
     def test_windows_packaging_lock_is_hash_protected(self) -> None:
         source = (ROOT / "requirements-build.txt").read_text(encoding="utf-8")
@@ -361,7 +574,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "fail-on-severity: high",
             "Frontend dependency audit",
             "npm ci --ignore-scripts",
-            "npm audit --omit=dev --audit-level=high",
+            "npm audit --audit-level=high",
             "Audit all locked Python dependency graphs",
             "name: Python dependency audit",
             "requirements-bootstrap.lock",

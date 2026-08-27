@@ -15,7 +15,10 @@ POLYMARKET_CAPABILITIES = MarketCapabilities(
     candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=True,
+    # Polymarket CLOB V2 is not backward compatible with the repository's
+    # legacy py-clob-client/V1 mutation path. Reads and simulation remain, but
+    # live submission is intentionally not advertised.
+    live_trading=False,
     copy_trading=True,
     api_required=True,
     credentials_required=True,
@@ -616,7 +619,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         display_name="Polymarket",
         default_enabled=True,
         homepage_url="https://polymarket.com",
-        description="Existing Polymarket alert, wallet tracking, and guarded copy-trading support.",
+        description=(
+            "Polymarket public/authenticated reads, alerts, paper trading, and simulation-first copy previews; "
+            "live mutations are disabled pending a reviewed CLOB V2 migration."
+        ),
         capabilities=POLYMARKET_CAPABILITIES,
     ),
     MarketMetadata(

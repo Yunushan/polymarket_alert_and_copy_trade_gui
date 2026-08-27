@@ -843,24 +843,12 @@ class BetfairExchangeAdapter(MarketAdapter):
     def _request_rpc(self, base_url: str, method: str, params: Mapping[str, Any]) -> Any:
         headers = self._headers(required=True)
         body = {"jsonrpc": "2.0", "method": method, "params": dict(params), "id": 1}
-        self.runtime.rate_limiter.wait()
-        try:
-            response = self.runtime.session.request(
-                "POST",
-                base_url,
-                json=body,
-                headers=headers,
-                timeout=self.runtime.timeout_seconds,
-            )
-        except Exception as exc:
-            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+        payload = self.runtime.request_json(
+            "POST",
+            base_url,
+            json_body=body,
+            headers=headers,
+        )
         if isinstance(payload, Mapping) and payload.get("error"):
             raise MarketHTTPError(f"{self.market_id} RPC error: {payload['error']}")
         return payload.get("result") if isinstance(payload, Mapping) else payload

@@ -15,7 +15,11 @@ from market_adapters import (
     RateLimiter,
 )
 from market_adapters.errors import MarketConfigurationError
-from market_adapters.runtime import DEFAULT_USER_AGENT, load_market_fixture
+from market_adapters.runtime import (
+    DEFAULT_USER_AGENT,
+    HARD_MAX_RESPONSE_BYTES,
+    load_market_fixture,
+)
 
 
 class FakeResponse:
@@ -31,7 +35,13 @@ class FakeResponse:
         self.status_code = status_code
         self._payload = payload if payload is not None else {"ok": True}
         self.text = text
-        self.raw_body = raw_body if raw_body is not None else json.dumps(self._payload).encode("utf-8")
+        self.raw_body = (
+            raw_body
+            if raw_body is not None
+            else text.encode("utf-8")
+            if text
+            else json.dumps(self._payload).encode("utf-8")
+        )
         self.headers = dict(headers or {})
         self.closed = False
 
@@ -84,6 +94,78 @@ class AdapterRuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 3.0)
         self.assertEqual(kwargs["headers"]["User-Agent"], DEFAULT_USER_AGENT)
         self.assertEqual(kwargs["headers"]["Accept"], "application/json")
+        self.assertTrue(kwargs["stream"])
+        self.assertFalse(kwargs["allow_redirects"])
+
+    def test_injected_transport_skips_dns_but_still_rejects_private_urls(self) -> None:
+        session = FakeSession(FakeResponse())
+        runtime = AdapterRuntime("dummy", session=session)
+
+        self.assertEqual(runtime.get_json("https://fixture.test/events"), {"ok": True})
+        with self.assertRaisesRegex(MarketConfigurationError, "non-public"):
+            runtime.get_json("https://127.0.0.1/events")
+        self.assertEqual(len(session.calls), 1)
+
+    def test_http_runtime_rejects_redirects_and_closes_response(self) -> None:
+        response = FakeResponse(status_code=302, headers={"Location": "https://example.test/elsewhere"})
+        session = FakeSession(response)
+
+        with self.assertRaisesRegex(MarketHTTPError, "redirects are disabled"):
+            AdapterRuntime("dummy", session=session).get_json("https://example.test/events")
+
+        self.assertTrue(response.closed)
+        self.assertFalse(session.calls[0][1]["allow_redirects"])
+
+    def test_http_runtime_applies_default_configured_response_cap(self) -> None:
+        response = FakeResponse(raw_body=b'{"ok":true}')
+        runtime = AdapterRuntime(
+            "dummy",
+            {"http_max_response_bytes": 5},
+            session=FakeSession(response),
+        )
+
+        with self.assertRaisesRegex(MarketHTTPError, "byte cap"):
+            runtime.get_json("https://example.test/events")
+
+        self.assertTrue(response.closed)
+
+    def test_http_runtime_rejects_invalid_default_response_cap(self) -> None:
+        for cap in (None, 0, -1, True, "1024"):
+            with self.subTest(cap=cap):
+                with self.assertRaisesRegex(MarketConfigurationError, "positive integer"):
+                    AdapterRuntime(
+                        "dummy",
+                        {"http_max_response_bytes": cap},
+                        session=FakeSession(FakeResponse()),
+                    )
+
+        with self.assertRaisesRegex(MarketConfigurationError, "cannot exceed"):
+            AdapterRuntime(
+                "dummy",
+                {"http_max_response_bytes": HARD_MAX_RESPONSE_BYTES + 1},
+                session=FakeSession(FakeResponse()),
+            )
+
+        runtime = AdapterRuntime(
+            "dummy",
+            {"http_max_response_bytes": HARD_MAX_RESPONSE_BYTES},
+            session=FakeSession(FakeResponse()),
+        )
+        self.assertEqual(runtime.max_response_bytes, HARD_MAX_RESPONSE_BYTES)
+
+    def test_http_runtime_rejects_invalid_per_request_response_caps(self) -> None:
+        runtime = AdapterRuntime("dummy", session=FakeSession(FakeResponse()))
+
+        for cap in (0, -1, True):
+            with self.subTest(cap=cap):
+                with self.assertRaisesRegex(MarketConfigurationError, "positive integer"):
+                    runtime.get_json("https://example.test/events", max_response_bytes=cap)
+
+        with self.assertRaisesRegex(MarketConfigurationError, "cannot exceed"):
+            runtime.get_json(
+                "https://example.test/events",
+                max_response_bytes=HARD_MAX_RESPONSE_BYTES + 1,
+            )
 
     def test_http_runtime_raises_market_http_error_for_bad_status(self) -> None:
         session = FakeSession(FakeResponse(status_code=429, text="rate limited"))
@@ -141,6 +223,43 @@ class AdapterRuntimeTests(unittest.TestCase):
                         max_response_bytes=len(malformed_body),
                     )
                 self.assertTrue(malformed.closed)
+
+    def test_http_runtime_bounds_streamed_text_and_closes_response(self) -> None:
+        response = FakeResponse(raw_body=b"abcdef")
+        runtime = AdapterRuntime("dummy", session=FakeSession(response))
+
+        with self.assertRaisesRegex(MarketHTTPError, "byte cap"):
+            runtime.request_text(
+                "GET",
+                "https://example.test/export",
+                max_response_bytes=5,
+            )
+
+        self.assertTrue(response.closed)
+
+    def test_http_runtime_supports_json_only_injected_test_responses(self) -> None:
+        class JsonOnlyResponse:
+            status_code = 200
+            headers = {}
+            text = "{}"
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            def json(self):
+                return {"fixture": [1, 2, 3]}
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = JsonOnlyResponse()
+        runtime = AdapterRuntime("dummy", session=FakeSession(response))
+
+        self.assertEqual(
+            runtime.get_json("https://example.test/events"),
+            {"fixture": [1, 2, 3]},
+        )
+        self.assertTrue(response.closed)
 
     def test_rate_limiter_uses_configured_delay_without_real_sleep(self) -> None:
         clock_values = [0.0, 0.25, 0.25]
