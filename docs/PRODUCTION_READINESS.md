@@ -53,11 +53,11 @@ check does not receive local test or security points.
 | Platform evidence | 10 | 5 | Dispatch the implemented platform collector against a successful exact-revision CI run and supply both exact attested artifacts |
 | Live acceptance | 5 | 0 | Reachable public endpoints plus the implemented credentialed/funded collectors' exact attested artifacts; funded execution also requires deliberate promotion of the offline-tested V2 mutation gate |
 
-The latest completed full local audit on 2026-08-26 is **83/100 (not ready)** when no external
+The latest completed full local audit on 2026-08-27 is **83/100 (not ready)** when no external
 evidence manifests are supplied. Local verification covers the adapter catalog
 (68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
 files, documentation, workflows, secret hygiene, frontend build/browser smoke,
-and packaging checks. The current verifier passed 1,182 tests (7 intentionally
+and packaging checks. The current verifier passed 1,187 tests (7 intentionally
 skipped on Windows), achieved 73% all-source and 75% backend branch coverage,
 satisfied the 65% overall and 74% backend floors, and passed Ruff. Counts are reported
 from this run rather than carried forward from an older artifact.
