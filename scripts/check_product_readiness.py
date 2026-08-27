@@ -779,7 +779,6 @@ def _attested_public_live_report(
         }
 
     report_hash = hashlib.sha256(raw).hexdigest()
-    signer_workflow = f"{PUBLIC_LIVE_REPOSITORY}/{PUBLIC_LIVE_WORKFLOW}"
     with tempfile.TemporaryDirectory(prefix="market-sentinel-attestation-") as temporary:
         attestation_target = Path(temporary) / PUBLIC_LIVE_REPORT_NAME
         attestation_target.write_bytes(raw)
@@ -791,23 +790,11 @@ def _attested_public_live_report(
                 str(attestation_target),
                 "--repo",
                 PUBLIC_LIVE_REPOSITORY,
-                "--signer-workflow",
-                signer_workflow,
-                "--cert-identity",
-                f"https://github.com/{workflow_ref}",
-                "--cert-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
-                "--signer-digest",
-                expected_revision,
-                "--source-digest",
-                expected_revision,
-                "--source-ref",
-                workflow_ref.split("@", 1)[1],
-                "--predicate-type",
-                "https://slsa.dev/provenance/v1",
-                "--digest-alg",
-                "sha256",
-                "--deny-self-hosted-runners",
+                # Keep attestation lookup broad and enforce the complete
+                # signer/source/run identity below from the signed result.
+                # gh versions differ in which verifier-filter combinations
+                # they accept; passing only the repository avoids rejecting
+                # a valid Sigstore attestation before our strict matcher runs.
                 "--format",
                 "json",
             ],
@@ -1517,7 +1504,6 @@ def _attested_release_report(
             report_hash=report_hash,
         )
 
-    signer_workflow = f"{RELEASE_REPOSITORY}/{RELEASE_WORKFLOW}"
     with tempfile.TemporaryDirectory(prefix="market-sentinel-release-attestation-") as temporary:
         attestation_target = Path(temporary) / RELEASE_REPORT_NAME
         attestation_target.write_bytes(raw)
@@ -1529,23 +1515,10 @@ def _attested_release_report(
                 str(attestation_target),
                 "--repo",
                 RELEASE_REPOSITORY,
-                "--signer-workflow",
-                signer_workflow,
-                "--cert-identity",
-                f"https://github.com/{workflow_ref}",
-                "--cert-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
-                "--signer-digest",
-                expected_revision,
-                "--source-digest",
-                expected_revision,
-                "--source-ref",
-                source_ref,
-                "--predicate-type",
-                "https://slsa.dev/provenance/v1",
-                "--digest-alg",
-                "sha256",
-                "--deny-self-hosted-runners",
+                # The signed result is checked exhaustively by
+                # _attestation_result_matches below. Keep lookup filters to
+                # the repository because gh verifier-filter combinations are
+                # not compatible across supported CLI versions.
                 "--format",
                 "json",
             ],
@@ -2499,7 +2472,6 @@ def _attested_trusted_evidence(
     run_attempt = int(validation["run_attempt"])
     workflow_ref = str(validation["workflow_ref"])
     subject_name = str(validation["subject_name"])
-    signer_workflow = f"{PUBLIC_LIVE_REPOSITORY}/{contract['workflow']}"
     with tempfile.TemporaryDirectory(prefix="market-sentinel-trusted-evidence-") as temporary:
         attestation_target = Path(temporary) / subject_name
         attestation_target.write_bytes(raw)
@@ -2511,23 +2483,10 @@ def _attested_trusted_evidence(
                 str(attestation_target),
                 "--repo",
                 PUBLIC_LIVE_REPOSITORY,
-                "--signer-workflow",
-                signer_workflow,
-                "--cert-identity",
-                f"https://github.com/{workflow_ref}",
-                "--cert-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
-                "--signer-digest",
-                expected_revision,
-                "--source-digest",
-                expected_revision,
-                "--source-ref",
-                workflow_ref.split("@", 1)[1],
-                "--predicate-type",
-                "https://slsa.dev/provenance/v1",
-                "--digest-alg",
-                "sha256",
-                "--deny-self-hosted-runners",
+                # Policy is enforced from the verified signed result by
+                # _attestation_result_matches. Avoid gh's incompatible
+                # verifier-filter combinations so current CLI versions can
+                # actually retrieve valid attestations.
                 "--format",
                 "json",
             ],
