@@ -39,6 +39,7 @@ from core.models import (
     UIDesign,
     WalletWatch,
     bounded_mutation_result,
+    MAX_MUTATION_RESULT_BYTES,
 )
 from core.config_security import assert_no_persisted_secrets, is_sensitive_display_key
 from core.deployment_identity import capture_runtime_identity
@@ -46,7 +47,7 @@ from core.storage import ConfigConflictError, DEFAULT_CONFIG_PATH, load_config, 
 from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
-from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
 from market_adapters.identity import activity_identity_hint, normalize_activity_identity
 from market_adapters.outbound import is_outbound_endpoint_setting
 from market_adapters.types import (
@@ -742,9 +743,18 @@ def _assert_mutation_request_matches(
         )
 
 
-def _stored_mutation_result(payload: Mapping[str, Any]) -> Dict[str, Any]:
+def _stored_mutation_result(
+    payload: Mapping[str, Any],
+    *,
+    preserve_shape: bool = False,
+    max_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
     sanitized = sanitize_audit_value(dict(payload))
-    stored = bounded_mutation_result(sanitized)
+    stored = bounded_mutation_result(
+        sanitized,
+        preserve_shape=preserve_shape,
+        max_bytes=max_bytes if max_bytes is not None else MAX_MUTATION_RESULT_BYTES,
+    )
     try:
         assert_no_persisted_secrets(stored)
     except ValueError:
@@ -764,6 +774,21 @@ def _stored_mutation_result(payload: Mapping[str, Any]) -> Dict[str, Any]:
             },
         }
     return stored
+
+
+def _client_mutation_result(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep the original mutation response shape, trimming only huge bodies."""
+
+    candidate = dict(payload)
+    try:
+        _json_bytes(candidate)
+    except (HttpResponseTooLargeError, TypeError, ValueError):
+        return bounded_mutation_result(
+            sanitize_audit_value(candidate),
+            preserve_shape=True,
+            max_bytes=MAX_HTTP_RESPONSE_BYTES,
+        )
+    return candidate
 
 
 def mutation_journal_payload(cfg: AppConfig) -> Dict[str, Any]:
@@ -6212,6 +6237,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 self._send_json(entry.response_status or HTTPStatus.OK, dict(entry.response))
                 return None, True
             if entry.state == "rejected":
+                if (
+                    entry.outcome_code == "pre_dispatch_validation_failed"
+                    and entry.response_status
+                    and isinstance(entry.response, dict)
+                ):
+                    self._send_json(entry.response_status, dict(entry.response))
+                    return None, True
                 self._send_error(
                     HTTPStatus.CONFLICT,
                     "mutation_rejected_after_reconciliation",
@@ -6263,8 +6295,10 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         response: Mapping[str, Any],
         *,
         status: int = HTTPStatus.OK,
+        preserve_response_shape: bool = False,
+        client_response: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        stored = _stored_mutation_result(response)
+        stored = _stored_mutation_result(response, preserve_shape=preserve_response_shape)
         entry.state = "completed"
         entry.response_status = int(status)
         entry.response = stored
@@ -6273,7 +6307,10 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         entry.updated_at = int(time.time())
         cfg.append_mutation_journal(entry)
         self._save_config(cfg)
-        self._send_json(status, stored)
+        self._send_json(
+            status,
+            _client_mutation_result(client_response) if client_response is not None else stored,
+        )
 
     def _execute_live_order_management(
         self,
@@ -6293,6 +6330,47 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 operation,
                 payload,
             )
+        except (MarketConfigurationError, UnsupportedFeatureError) as exc:
+            # The supported live adapters use these explicit exception types
+            # for validation that completes before their transport call.  Keep
+            # generic exceptions (including a plain ValueError from a client or
+            # response parser) ambiguous: once adapter code has been entered,
+            # the caller cannot prove that the venue was not reached.
+            rejection = api_error_payload(
+                HTTPStatus.BAD_REQUEST,
+                "validation_error",
+                str(exc),
+                {"mutation_id": entry.id, "state": "rejected"},
+            )
+            entry.state = "rejected"
+            entry.response_status = HTTPStatus.BAD_REQUEST
+            entry.response = rejection
+            entry.outcome_code = "pre_dispatch_validation_failed"
+            entry.outcome_message = "Local validation failed before the live adapter was dispatched."
+            entry.updated_at = int(time.time())
+            try:
+                self._save_config(cfg)
+            except Exception as durability_exc:
+                # The durable pending barrier may still be on disk.  Keep the
+                # response fail-closed until that disposition can be saved.
+                print(
+                    "[web-gui] pre-dispatch rejection could not be durably updated: "
+                    f"{type(durability_exc).__name__}"
+                )
+                self._send_error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "live_mutation_durability_uncertain",
+                    "Local validation failed, but its replay disposition was not durably committed. Reconcile before retrying.",
+                    {
+                        "mutation_id": entry.id,
+                        "state": "pending",
+                        "reconciliation_route": "/api/mutations/reconcile",
+                    },
+                    retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+                )
+                return
+            self._send_json(HTTPStatus.BAD_REQUEST, rejection)
+            return
         except Exception as exc:
             entry.state = "ambiguous"
             entry.response_status = HTTPStatus.SERVICE_UNAVAILABLE
@@ -6648,7 +6726,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     **result,
                     "paper": paper_payload(cfg, self.app_server.paper_position_marks),
                 }
-                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
+                self._commit_local_idempotent_mutation(
+                    cfg,
+                    journal_entry,
+                    response,
+                    preserve_response_shape=True,
+                    client_response=response,
+                )
                 return
             if method == "POST" and path == "/api/paper/history/use":
                 self._send_json(HTTPStatus.OK, history_refill_payload(cfg, str(payload.get("record_id") or "")))

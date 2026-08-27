@@ -5,6 +5,7 @@ import socket
 import sys
 import types
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,7 +23,7 @@ from market_adapters.outbound import (
     is_outbound_endpoint_setting,
     validate_outbound_url,
 )
-from market_adapters.runtime import AdapterRuntime
+from market_adapters.runtime import AdapterRuntime, _ValidatingSession
 from market_adapters.sx_bet import SxBetAdapter
 
 
@@ -146,6 +147,61 @@ class OutboundEndpointTests(unittest.TestCase):
         policy = OutboundEndpointPolicy(resolver=failing_resolver)
         with self.assertRaisesRegex(MarketConfigurationError, "could not be resolved"):
             validate_outbound_url("https://missing.example", policy=policy)
+
+    def test_managed_session_connects_to_the_validated_address(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib handler API
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        session = _ValidatingSession(
+            OutboundEndpointPolicy(
+                private_origins=frozenset({f"http://localhost:{server.server_port}"})
+            )
+        )
+        session.trust_env = False
+        thread = __import__("threading").Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            import urllib3.util.connection as urllib3_connection
+
+            with patch.object(
+                urllib3_connection,
+                "create_connection",
+                wraps=urllib3_connection.create_connection,
+            ) as create_connection:
+                response = session.get(f"http://localhost:{server.server_port}/health", timeout=2)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(create_connection.call_args_list)
+            targets = [call.args[0][0] for call in create_connection.call_args_list]
+            self.assertIn("127.0.0.1", targets)
+        finally:
+            session.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_managed_session_revalidates_before_a_dns_rebind_can_connect(self) -> None:
+        calls = 0
+
+        def rebinding_resolver(host: str, port: int, *, type: int):
+            nonlocal calls
+            calls += 1
+            return resolver_for("93.184.216.34" if calls == 1 else "127.0.0.1")(host, port, type=type)
+
+        session = _ValidatingSession(OutboundEndpointPolicy(resolver=rebinding_resolver))
+        session.trust_env = False
+        try:
+            with self.assertRaisesRegex(MarketConfigurationError, "non-public"):
+                session.get("https://rebind.example.test/health", timeout=2)
+        finally:
+            session.close()
+        self.assertEqual(calls, 2)
 
     def test_exact_private_origin_allowlist_supports_local_gateways(self) -> None:
         policy = OutboundEndpointPolicy.from_environment(

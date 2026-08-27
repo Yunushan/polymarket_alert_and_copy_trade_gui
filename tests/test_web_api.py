@@ -38,7 +38,7 @@ from market_adapters.types import (
     PriceSnapshot,
     MarketTrade,
 )
-from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
 from market_adapters.outbound import OUTBOUND_ENDPOINT_SETTING_KEYS, OUTBOUND_POLICY_SETTING_KEYS
 from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
@@ -1136,6 +1136,69 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(len(stored.paper_trades), 1)
         self.assertEqual(len(stored.mutation_journal), 1)
 
+    def test_oversized_paper_response_keeps_route_shape_and_bounded_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.selected_market_id = "kalshi"
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            request = {
+                "market_id": "kalshi",
+                "contract_id": "KX-OVERSIZED:YES",
+                "side": "BUY",
+                "size": 2,
+                "limit_price": 0.4,
+            }
+            oversized_paper = {
+                "summary": {},
+                "positions": [],
+                "history": [{"note": "x" * 4_000} for _ in range(100)],
+                "counts": {"history": 100, "accepted": 100, "rejected": 0},
+            }
+            try:
+                with patch("web_api.paper_payload", return_value=oversized_paper):
+                    first_status, first = self._request_json(
+                        base_url,
+                        "/api/paper/orders",
+                        method="POST",
+                        payload=request,
+                        headers={"Idempotency-Key": "paper-oversized-replay-1"},
+                    )
+                    replay_status, replay = self._request_json(
+                        base_url,
+                        "/api/paper/orders",
+                        method="POST",
+                        payload=request,
+                        headers={"Idempotency-Key": "paper-oversized-replay-1"},
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertGreater(len(json.dumps(first).encode("utf-8")), 256 * 1024)
+        self.assertEqual(first["result"]["message"], "accepted")
+        self.assertIn("paper", first)
+        self.assertEqual(replay["result"]["message"], "accepted")
+        self.assertIn("paper", replay)
+        self.assertLess(len(replay["paper"]["history"]), len(first["paper"]["history"]))
+        self.assertLessEqual(
+            len(json.dumps(replay, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+            256 * 1024,
+        )
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+        self.assertIn("paper", stored.mutation_journal[0].response)
+        self.assertIn("result", stored.mutation_journal[0].response)
+
     def test_live_order_management_replays_success_and_conflicts_on_body_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1191,6 +1254,112 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(conflict_status, HTTPStatus.CONFLICT)
         self.assertEqual(conflict["error"]["code"], "idempotency_conflict")
         self.assertEqual(stored.mutation_journal[0].state, "completed")
+
+    def test_pre_dispatch_live_validation_is_rejected_and_replays_without_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+            calls = 0
+
+            def invalid_manage(_operation, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise MarketConfigurationError("cancel_order requires a configured confirmation")
+
+            adapter.manage_orders = invalid_manage  # type: ignore[method-assign]
+            request = {"order_id": "order-invalid"}
+            headers = {"Idempotency-Key": "live-pre-dispatch-invalid-1"}
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(first["error"]["code"], "validation_error")
+        self.assertEqual(replay_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(replay, first)
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(stored.mutation_journal), 1)
+        self.assertEqual(stored.mutation_journal[0].state, "rejected")
+        self.assertEqual(
+            stored.mutation_journal[0].outcome_code,
+            "pre_dispatch_validation_failed",
+        )
+
+    def test_plain_value_error_from_live_adapter_remains_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+
+            def uncertain_manage(_operation, **_kwargs):
+                # A generic client/parser error does not prove that the
+                # request stopped before the venue transport boundary.
+                raise ValueError("response parser failed after dispatch")
+
+            adapter.manage_orders = uncertain_manage  # type: ignore[method-assign]
+            request = {"order_id": "order-uncertain"}
+            headers = {"Idempotency-Key": "live-value-error-ambiguous-1"}
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(first["error"]["code"], "live_mutation_outcome_ambiguous")
+        self.assertEqual(replay_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(replay["error"]["code"], "live_mutation_reconciliation_required")
+        self.assertEqual(stored.mutation_journal[0].state, "ambiguous")
+        self.assertEqual(stored.mutation_journal[0].outcome_code, "live_dispatch_outcome_unknown")
 
     def test_ambiguous_live_order_requires_reconciliation_before_one_authorized_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -11,11 +11,17 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 import requests
+import urllib3
+from requests.adapters import HTTPAdapter
+from requests.models import PreparedRequest
+from requests.utils import select_proxy
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
 from .errors import MarketConfigurationError, MarketHTTPError
 from .outbound import (
     OutboundEndpointPolicy,
     validate_outbound_url,
+    validate_outbound_url_with_addresses,
 )
 
 
@@ -67,12 +73,181 @@ class RateLimiter:
             return delay
 
 
+class _PinnedConnectionMixin:
+    """Connect to addresses validated for the request while retaining TLS SNI."""
+
+    def __init__(self, *args: Any, pinned_addresses: Iterable[str] = (), **kwargs: Any) -> None:
+        self._market_sentinel_pinned_addresses = tuple(str(address) for address in pinned_addresses)
+        super().__init__(*args, **kwargs)
+
+    def _new_conn(self):
+        addresses = self._market_sentinel_pinned_addresses
+        if not addresses:
+            return super()._new_conn()
+
+        # urllib3 keeps the origin hostname in ``host``/``server_hostname``
+        # for certificate validation, while ``_dns_host`` is the value passed
+        # to socket.create_connection.  Temporarily replacing only the latter
+        # pins the socket without changing HTTP Host or TLS SNI.
+        original_dns_host = getattr(self, "_dns_host", getattr(self, "host", ""))
+        last_error: Optional[BaseException] = None
+        try:
+            for address in addresses:
+                self._dns_host = address
+                try:
+                    return super()._new_conn()
+                except Exception as exc:  # pragma: no cover - urllib3 version-specific errors
+                    last_error = exc
+        finally:
+            self._dns_host = original_dns_host
+        if last_error is not None:
+            raise last_error
+        return super()._new_conn()
+
+
+class _PinnedHTTPConnection(_PinnedConnectionMixin, urllib3.connection.HTTPConnection):
+    pass
+
+
+class _PinnedHTTPSConnection(_PinnedConnectionMixin, urllib3.connection.HTTPSConnection):
+    pass
+
+
+class _PinnedHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _PinnedHTTPConnection
+
+    def __init__(self, host: str, port: Optional[int] = None, *, pinned_addresses: Iterable[str] = (), **kwargs: Any) -> None:
+        self._market_sentinel_pinned_addresses = tuple(str(address) for address in pinned_addresses)
+        kwargs["pinned_addresses"] = self._market_sentinel_pinned_addresses
+        super().__init__(host, port, **kwargs)
+
+
+class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _PinnedHTTPSConnection
+
+    def __init__(self, host: str, port: Optional[int] = None, *, pinned_addresses: Iterable[str] = (), **kwargs: Any) -> None:
+        self._market_sentinel_pinned_addresses = tuple(str(address) for address in pinned_addresses)
+        kwargs["pinned_addresses"] = self._market_sentinel_pinned_addresses
+        super().__init__(host, port, **kwargs)
+
+
+class _PinnedPoolManager(urllib3.PoolManager):
+    """Pool manager that passes request pins into newly-created pools.
+
+    ``pinned_addresses`` is transport metadata, not part of urllib3's
+    ``PoolKey``.  Removing it only while constructing the key avoids a
+    version-dependent ``PoolKey`` failure; the first validated address set for
+    an origin is retained by that origin's pool.  A later request is still
+    validated immediately before dispatch, so a private rebind fails closed.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.pool_classes_by_scheme = dict(self.pool_classes_by_scheme)
+        self.pool_classes_by_scheme.update(
+            http=_PinnedHTTPConnectionPool,
+            https=_PinnedHTTPSConnectionPool,
+        )
+
+    def connection_from_context(self, request_context: dict[str, Any]):
+        context = dict(request_context)
+        pinned_addresses = context.pop("pinned_addresses", ())
+        pool_key = self.key_fn_by_scheme[context["scheme"].lower()](context)
+        context["pinned_addresses"] = pinned_addresses
+        return self.connection_from_pool_key(pool_key, request_context=context)
+
+
+class _PinnedHTTPAdapter(HTTPAdapter):
+    """HTTP adapter that pins direct sockets to the session's last validation."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._market_sentinel_active_pins = threading.local()
+
+    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
+        self.poolmanager = _PinnedPoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs,
+        )
+
+    def send(self, request: PreparedRequest, **kwargs: Any):
+        pins = tuple(getattr(request, "_market_sentinel_pinned_addresses", ()) or ())
+        self._market_sentinel_active_pins.addresses = pins
+        try:
+            return super().send(request, **kwargs)
+        finally:
+            try:
+                del self._market_sentinel_active_pins.addresses
+            except AttributeError:
+                pass
+
+    def _direct_pinned_connection(self, url: str, pins: Iterable[str]):
+        return self.poolmanager.connection_from_url(
+            url,
+            pool_kwargs={"pinned_addresses": tuple(pins)},
+        )
+
+    def get_connection(self, url: str, proxies: Optional[Mapping[str, str]] = None):
+        # Requests <2.32 does not pass the PreparedRequest to a connection
+        # hook.  ``send`` keeps the pins in thread-local state for that path.
+        if select_proxy(url, proxies):
+            return super().get_connection(url, proxies)
+        pins = tuple(getattr(self._market_sentinel_active_pins, "addresses", ()) or ())
+        if pins:
+            return self._direct_pinned_connection(url, pins)
+        return super().get_connection(url, proxies)
+
+    def get_connection_with_tls_context(
+        self,
+        request: PreparedRequest,
+        verify: Any,
+        proxies: Optional[Mapping[str, str]] = None,
+        cert: Any = None,
+    ):
+        # A configured proxy owns the target connection; retain Requests'
+        # normal proxy handling while the origin is still validated by the
+        # session before this hook runs.
+        if select_proxy(request.url, proxies):
+            return super().get_connection_with_tls_context(request, verify, proxies, cert)
+        pins = tuple(getattr(request, "_market_sentinel_pinned_addresses", ()) or ())
+        if not pins:
+            return super().get_connection_with_tls_context(request, verify, proxies, cert)
+        try:
+            host_params, pool_kwargs = self.build_connection_pool_key_attributes(request, verify, cert)
+        except ValueError as exc:
+            raise requests.exceptions.InvalidURL(exc, request=request) from exc
+        pool_kwargs = dict(pool_kwargs)
+        pool_kwargs["pinned_addresses"] = pins
+        return self.poolmanager.connection_from_host(**host_params, pool_kwargs=pool_kwargs)
+
+
 class _ValidatingSession(requests.Session):
     """Requests session that also covers adapters using ``runtime.session`` directly."""
 
     def __init__(self, policy: OutboundEndpointPolicy) -> None:
         super().__init__()
         self._outbound_policy = policy
+        self.mount("http://", _PinnedHTTPAdapter())
+        self.mount("https://", _PinnedHTTPAdapter())
+
+    def send(self, request: PreparedRequest, **kwargs: Any) -> requests.Response:
+        safe_url, addresses = validate_outbound_url_with_addresses(
+            request.url,
+            setting_key="outbound_url",
+            policy=self._outbound_policy,
+            resolve_addresses=True,
+        )
+        request.url = safe_url
+        request._market_sentinel_pinned_addresses = tuple(str(address) for address in addresses)  # type: ignore[attr-defined]
+        try:
+            return super().send(request, **kwargs)
+        finally:
+            try:
+                del request._market_sentinel_pinned_addresses  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         already_validated = bool(kwargs.pop("_market_sentinel_url_validated", False))

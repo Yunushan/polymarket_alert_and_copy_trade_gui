@@ -255,7 +255,7 @@ def _resolved_addresses(
     return tuple(addresses)
 
 
-def validate_outbound_url(
+def validate_outbound_url_with_addresses(
     value: Any,
     *,
     setting_key: str = "outbound_url",
@@ -263,8 +263,14 @@ def validate_outbound_url(
     base_url: bool = False,
     policy: OutboundEndpointPolicy | None = None,
     resolve_addresses: bool = True,
-) -> str:
-    """Return a canonical safe URL or fail before an outbound connection is made."""
+) -> tuple[str, tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]]:
+    """Return a canonical safe URL and the addresses validated for it.
+
+    Callers that open a managed socket should use the returned addresses rather
+    than resolving the hostname a second time.  Keeping the validated address
+    set alongside the canonical URL closes the DNS-rebinding window between
+    policy validation and connection establishment.
+    """
 
     if kind not in {"http", "websocket"}:
         raise ValueError("Outbound endpoint kind must be http or websocket.")
@@ -302,7 +308,29 @@ def validate_outbound_url(
 
     rendered_host = f"[{hostname}]" if ":" in hostname else hostname
     netloc = rendered_host if port == _default_port(scheme) else f"{rendered_host}:{port}"
-    return urlunsplit((scheme, netloc, parsed.path, parsed.query, ""))
+    return urlunsplit((scheme, netloc, parsed.path, parsed.query, "")), addresses
+
+
+def validate_outbound_url(
+    value: Any,
+    *,
+    setting_key: str = "outbound_url",
+    kind: str = "http",
+    base_url: bool = False,
+    policy: OutboundEndpointPolicy | None = None,
+    resolve_addresses: bool = True,
+) -> str:
+    """Return a canonical safe URL or fail before an outbound connection is made."""
+
+    canonical, _addresses = validate_outbound_url_with_addresses(
+        value,
+        setting_key=setting_key,
+        kind=kind,
+        base_url=base_url,
+        policy=policy,
+        resolve_addresses=resolve_addresses,
+    )
+    return canonical
 
 
 def is_outbound_endpoint_setting(key: Any) -> bool:

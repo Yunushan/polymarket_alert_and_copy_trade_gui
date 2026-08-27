@@ -191,7 +191,38 @@ class CopyActivityOutboxEntry:
         )
 
 
-def bounded_mutation_result(value: Any) -> Dict[str, Any]:
+def _shape_trim_mutation_value(value: Any, *, list_limit: int, string_limit: int) -> Any:
+    """Trim bulky result fields while retaining their JSON/container shape."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _shape_trim_mutation_value(
+                child,
+                list_limit=list_limit,
+                string_limit=string_limit,
+            )
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _shape_trim_mutation_value(
+                child,
+                list_limit=list_limit,
+                string_limit=string_limit,
+            )
+            for child in value[: max(0, list_limit)]
+        ]
+    if isinstance(value, str) and len(value) > string_limit:
+        return value[: max(0, string_limit)]
+    return value
+
+
+def bounded_mutation_result(
+    value: Any,
+    *,
+    preserve_shape: bool = False,
+    max_bytes: int = MAX_MUTATION_RESULT_BYTES,
+) -> Dict[str, Any]:
     """Return one JSON-safe, size-bounded durable mutation result.
 
     The journal is part of the persisted configuration, so it must not grow
@@ -216,8 +247,40 @@ def bounded_mutation_result(value: Any) -> Dict[str, Any]:
                 "reason": "result_was_not_json_serializable",
             },
         }
-    if len(encoded) <= MAX_MUTATION_RESULT_BYTES:
+    limit = max(1, int(max_bytes))
+    if len(encoded) <= limit:
         return json.loads(encoded.decode("utf-8"))
+    if preserve_shape:
+        # Prefer a compact, schema-shaped replay over a receipt-only object for
+        # routes whose clients dereference nested fields (for example
+        # ``paper`` and ``result.message``).  The final receipt fallback keeps
+        # the journal bounded even for unusually wide or deeply nested input.
+        for list_limit, string_limit in (
+            (128, 8 * 1024),
+            (64, 4 * 1024),
+            (32, 2 * 1024),
+            (16, 1024),
+            (8, 512),
+            (4, 256),
+            (0, 128),
+        ):
+            trimmed = _shape_trim_mutation_value(
+                candidate,
+                list_limit=list_limit,
+                string_limit=string_limit,
+            )
+            try:
+                trimmed_encoded = json.dumps(
+                    trimmed,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                continue
+            if len(trimmed_encoded) <= limit:
+                return json.loads(trimmed_encoded.decode("utf-8"))
     return {
         "ok": True,
         "mutation_result": {
