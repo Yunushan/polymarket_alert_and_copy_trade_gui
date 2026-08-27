@@ -484,24 +484,23 @@ class ProductReadinessTests(unittest.TestCase):
         commands = [call.args[0] for call in run.call_args_list]
         attestation_command = commands[0]
         self.assertEqual(attestation_command[:3], ["gh", "attestation", "verify"])
-        self.assertIn("--deny-self-hosted-runners", attestation_command)
-        self.assertEqual(attestation_command[attestation_command.index("--digest-alg") + 1], "sha256")
         self.assertEqual(
-            attestation_command[attestation_command.index("--predicate-type") + 1],
-            "https://slsa.dev/provenance/v1",
+            attestation_command[attestation_command.index("--repo") + 1],
+            "Yunushan/market-sentinel",
         )
-        self.assertEqual(
-            attestation_command[attestation_command.index("--signer-digest") + 1],
-            revision,
-        )
-        self.assertEqual(
-            attestation_command[attestation_command.index("--source-digest") + 1],
-            revision,
-        )
-        self.assertEqual(
-            attestation_command[attestation_command.index("--signer-workflow") + 1],
-            "Yunushan/market-sentinel/.github/workflows/ci.yml",
-        )
+        # Identity and runner policy are enforced from the signed verification
+        # result by _attestation_result_matches. Passing gh's optional verifier
+        # filters here is not portable: current gh versions reject several
+        # combinations before returning otherwise-valid attestations.
+        for unsupported_filter in (
+            "--cert-identity",
+            "--signer-workflow",
+            "--signer-digest",
+            "--source-digest",
+            "--source-ref",
+            "--deny-self-hosted-runners",
+        ):
+            self.assertNotIn(unsupported_filter, attestation_command)
         self.assertTrue(any(command[-1].endswith("/actions/runs/123456") for command in commands))
         self.assertTrue(any("/actions/runs/123456/jobs?" in command[-1] for command in commands))
 
