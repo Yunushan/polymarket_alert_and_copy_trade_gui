@@ -171,10 +171,19 @@ def _scrubbed_git_environment() -> Dict[str, str]:
 
 
 def _run_git_readonly(*arguments: str) -> subprocess.CompletedProcess[str]:
+    # Git refuses to inspect a checkout owned by another OS identity unless the
+    # repository is explicitly marked safe.  The verifier deliberately disables
+    # global/system Git configuration, so pass the already-resolved repository
+    # root on every read instead of relying on a caller's global safe.directory
+    # entry.  This keeps the provenance check functional in sandboxed Windows
+    # runners while still trusting only this checkout.
+    trusted_root = ROOT.resolve()
     return subprocess.run(
         [
             "git",
             "--no-optional-locks",
+            "-c",
+            f"safe.directory={trusted_root}",
             "-c",
             "core.fsmonitor=false",
             "-c",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -118,6 +119,20 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
         self.assertEqual(provenance["repository_origin"], "")
         self.assertEqual(gate["status"], "fail")
         self.assertEqual(gate["repository_origin"], "")
+
+    def test_readonly_git_command_scopes_safe_directory_to_checkout(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["git"],
+            0,
+            f"{live_probe.ROOT.resolve()}\n",
+            "",
+        )
+        with patch.object(live_probe.subprocess, "run", return_value=completed) as run:
+            live_probe._run_git_readonly("rev-parse", "--show-toplevel")
+
+        command = run.call_args.args[0]
+        self.assertIn(f"safe.directory={live_probe.ROOT.resolve()}", command)
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
 
     def test_public_checks_require_semantically_usable_payloads(self) -> None:
         valid_payloads = {

@@ -733,7 +733,7 @@ for the 100-point model and reviewed evidence-manifest contract. A green CI
 matrix is not treated as proof that an external runner or production host has
 completed its required checks.
 
-Current audit result (2026-08-27): the repository's repeatable local checklist
+Current audit result (2026-08-28): the repository's repeatable local checklist
 is **83/100**, while the independent deployment-oriented assessment is
 **57/100 — NO-GO**. Schema-v2 hosted collectors now provide a structural path
 to all 100 formal points, but none of their external points is awarded without
