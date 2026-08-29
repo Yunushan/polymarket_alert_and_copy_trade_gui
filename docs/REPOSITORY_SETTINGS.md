@@ -43,12 +43,16 @@ commits. Keep `.github/CODEOWNERS` current before enabling that policy.
 ## Release environment
 
 Create the `release` environment with required reviewers, no self-approval,
-and deployment-branch rules limited to protected `main` tags. Store code
-signing credentials there: `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`,
+and deployment-branch rules limited to protected `main` tags. For production
+Windows releases, store code-signing credentials there:
+`WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`,
 `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`, and optional
-`WINDOWS_CODE_SIGNING_TIMESTAMP_URL`. Set repository/environment variable
-`REQUIRE_WINDOWS_CODE_SIGNING=true`. Never add venue credentials to GitHub
-Actions.
+`WINDOWS_CODE_SIGNING_TIMESTAMP_URL`; set
+`REQUIRE_WINDOWS_CODE_SIGNING=true`. If those credentials are unavailable,
+an explicitly unsigned testing/development release can set
+`REQUIRE_WINDOWS_CODE_SIGNING=false`; the workflow labels its Windows assets
+unsigned and the release must not be treated as production-trusted. Never add
+venue credentials to GitHub Actions.
 
 ## Evidence check
 

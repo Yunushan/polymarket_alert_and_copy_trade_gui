@@ -280,8 +280,9 @@ class CiCdWorkflowTests(unittest.TestCase):
             "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
             "attestations: write",
             "id-token: write",
-            "Verify protected Windows signing configuration",
+            "Verify Windows signing configuration",
             "REQUIRE_WINDOWS_CODE_SIGNING",
+            "WINDOWS_SIGNING_REQUIRED",
             "WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64",
             "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD",
             "X509Certificate2",
@@ -297,10 +298,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             "fetch-depth: 0",
             "scripts/verify_python_dist_artifacts.py",
             "Prepare Windows application payload",
+            "Smoke test staged Windows executable",
             "Sign staged Windows executable",
-            "Package signed Windows portable zip and MSI",
+            "Package Windows portable zip and MSI",
             "Sign Windows MSI package",
             "Verify signatures in final Windows artifacts",
+            "Verify unsigned Windows artifacts",
             "--prepare-only",
             "--package-only",
             "requirements-live.lock",
@@ -337,10 +340,11 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn('version=${tag_name#v}', text)
         self.assertNotIn('tag_name="${{ inputs.tag_name }}"', text)
         self.assertLess(
-            text.index("Verify protected Windows signing configuration"),
+            text.index("Verify Windows signing configuration"),
             text.index("Download frontend bundle"),
         )
         windows_app = text.split("  windows-app:\n", 1)[1].split("  publish:\n", 1)[0]
+        self.assertIn("WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}", windows_app)
         self.assertIn(
             "python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock",
             windows_app,
@@ -350,16 +354,24 @@ class CiCdWorkflowTests(unittest.TestCase):
             windows_app,
         )
         prepare_index = windows_app.index("Prepare Windows application payload")
+        smoke_index = windows_app.index("Smoke test staged Windows executable")
         sign_exe_index = windows_app.index("Sign staged Windows executable")
-        package_index = windows_app.index("Package signed Windows portable zip and MSI")
+        package_index = windows_app.index("Package Windows portable zip and MSI")
         sign_msi_index = windows_app.index("Sign Windows MSI package")
         verify_signatures_index = windows_app.index("Verify signatures in final Windows artifacts")
+        verify_unsigned_index = windows_app.index("Verify unsigned Windows artifacts")
         upload_index = windows_app.index("Upload Windows release packages")
+        self.assertLess(prepare_index, smoke_index)
+        self.assertLess(smoke_index, sign_exe_index)
         self.assertLess(prepare_index, sign_exe_index)
         self.assertLess(sign_exe_index, package_index)
         self.assertLess(package_index, sign_msi_index)
         self.assertLess(sign_msi_index, verify_signatures_index)
+        self.assertLess(verify_signatures_index, verify_unsigned_index)
         self.assertLess(verify_signatures_index, upload_index)
+        self.assertLess(verify_unsigned_index, upload_index)
+        self.assertIn("if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}", windows_app)
+        self.assertIn("if: ${{ env.WINDOWS_SIGNING_REQUIRED != 'true' }}", windows_app)
         self.assertIn("build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe", windows_app)
         self.assertIn("& $executable --smoke-test", windows_app)
         self.assertIn("release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi", windows_app)

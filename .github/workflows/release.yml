@@ -297,6 +297,10 @@ jobs:
     runs-on: windows-2025-vs2026
     timeout-minutes: 45
     environment: release
+    env:
+      # Keep signed releases fail-closed when explicitly required, while
+      # allowing an explicitly unsigned ZIP/MSI for development or testing.
+      WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
     needs:
       - metadata
       - frontend-dist
@@ -312,18 +316,20 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Verify protected Windows signing configuration
+      - name: Verify Windows signing configuration
         env:
-          REQUIRE_WINDOWS_CODE_SIGNING: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING }}
+          WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
           WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
         shell: pwsh
         run: |
-          $missing = [System.Collections.Generic.List[string]]::new()
-          if ($env:REQUIRE_WINDOWS_CODE_SIGNING -cne "true") {
-            $missing.Add("repository or release-environment variable REQUIRE_WINDOWS_CODE_SIGNING=true")
+          if ($env:WINDOWS_SIGNING_REQUIRED -ne "true") {
+            Write-Warning "Windows code signing is disabled; this release will contain unsigned Windows artifacts."
+            exit 0
           }
+
+          $missing = [System.Collections.Generic.List[string]]::new()
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64)) {
             $missing.Add("release-environment secret WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64")
           }
@@ -411,7 +417,14 @@ jobs:
             --output-dir "release-assets" `
             --prepare-only
 
+      - name: Smoke test staged Windows executable
+        shell: pwsh
+        run: |
+          $executable = "build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe"
+          & $executable --smoke-test
+
       - name: Sign staged Windows executable
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         env:
           WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
@@ -420,9 +433,8 @@ jobs:
         run: |
           $executable = "build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe"
           python scripts/sign_windows_release.py --path $executable
-          & $executable --smoke-test
 
-      - name: Package signed Windows portable zip and MSI
+      - name: Package Windows portable zip and MSI
         shell: pwsh
         run: |
           python scripts/build_windows_release.py `
@@ -432,6 +444,7 @@ jobs:
             --package-only
 
       - name: Sign Windows MSI package
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         env:
           WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
@@ -442,6 +455,7 @@ jobs:
           python scripts/sign_windows_release.py --path $installer
 
       - name: Verify signatures in final Windows artifacts
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         shell: pwsh
         run: |
           $tag = "${{ needs.metadata.outputs.tag_name }}"
@@ -464,6 +478,31 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "The final MSI failed Authenticode verification."
           }
+
+      - name: Verify unsigned Windows artifacts
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED != 'true' }}
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.metadata.outputs.tag_name }}"
+          $installer = "release-assets/market-sentinel-$tag-win-x64.msi"
+          $portable = "release-assets/market-sentinel-$tag-win-x64.zip"
+          foreach ($path in @($portable, $installer)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Unsigned Windows release artifact is missing: $path"
+            }
+          }
+          $extractDirectory = Join-Path $env:RUNNER_TEMP "market-sentinel-portable-content-check"
+          if (Test-Path -LiteralPath $extractDirectory) {
+            Remove-Item -LiteralPath $extractDirectory -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
+          $embeddedExecutables = @(
+            Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "market-sentinel.exe"
+          )
+          if ($embeddedExecutables.Count -ne 1) {
+            throw "Expected exactly one embedded market-sentinel.exe; found $($embeddedExecutables.Count)."
+          }
+          Write-Warning "Windows EXE/MSI artifacts are intentionally unsigned; do not treat this release as production-trusted."
 
       - name: Upload Windows release packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -533,10 +572,17 @@ jobs:
             --output "release-assets/${APP_NAME}-${RELEASE_VERSION}-sbom.spdx.json"
 
       - name: Generate checksums and release notes
+        env:
+          WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
         shell: bash
         run: |
           tag="${{ needs.metadata.outputs.tag_name }}"
           version="${{ needs.metadata.outputs.version }}"
+          if [ "${WINDOWS_SIGNING_REQUIRED}" = "true" ]; then
+            windows_signing_note='- Windows EXE/MSI packages Authenticode-signed and verified'
+          else
+            windows_signing_note='- Windows EXE/MSI packages intentionally unsigned (testing/development distribution only)'
+          fi
           (
             cd release-assets
             sha256sum * > SHA256SUMS.txt
@@ -553,6 +599,7 @@ jobs:
           - React production build
           - Python wheel/sdist build
           - Windows executable, portable zip, and MSI installer build
+          ${windows_signing_note}
           - SHA256 checksum generation
 
           Assets:

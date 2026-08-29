@@ -213,7 +213,7 @@ The portable zip contains:
 - bundled `frontend/dist` React assets
 - `README.md`, `README_WINDOWS.txt`, `LICENSE`, `.env.example`, and `data/config.example.json`
 
-The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Protected releases fail closed unless the `release` environment has `REQUIRE_WINDOWS_CODE_SIGNING=true`, `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`, and `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. This catches missing or malformed release configuration without building unsigned assets. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner.
+The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Set `REQUIRE_WINDOWS_CODE_SIGNING=true` for production releases; the `release` environment must then provide `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64` and `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner. If `REQUIRE_WINDOWS_CODE_SIGNING` is explicitly false or absent, the workflow still builds and verifies the portable ZIP/MSI contents, but publishes them as intentionally unsigned testing/development artifacts and labels that status in the release notes. Unsigned Windows artifacts are not production-trusted.
 
 The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\market-sentinel\data\config.json` so normal users can save settings without administrator privileges.
 
@@ -230,7 +230,9 @@ Recommended GitHub settings:
 
 The release workflow uses the built-in `GITHUB_TOKEN` with `contents: write`,
 `attestations: write`, and `id-token: write` only on the protected publish job.
-Windows code-signing credentials are required separately before distributing an
+Windows code-signing credentials are required before distributing a production
 installer publicly. Set `REQUIRE_WINDOWS_CODE_SIGNING=true` and the protected
-code-signing secrets in the `release` environment. See `docs/REPOSITORY_SETTINGS.md` and
+code-signing secrets in the `release` environment. For an explicitly unsigned
+testing/development release, set the variable to `false`; the workflow labels
+the resulting Windows artifacts as unsigned. See `docs/REPOSITORY_SETTINGS.md` and
 `docs/PRODUCTION_OPERATIONS.md` for the mandatory repository and deployment controls.
