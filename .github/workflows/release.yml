@@ -296,7 +296,12 @@ jobs:
     name: Build Windows EXE and MSI
     runs-on: windows-2025-vs2026
     timeout-minutes: 45
-    environment: release
+    # Protected environments are branch-scoped and can reject tag-triggered
+    # jobs before a runner starts. Use the protected environment for signed
+    # production releases, and an unprotected environment for explicitly
+    # unsigned testing/development artifacts.
+    environment:
+      name: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned' }}
     env:
       # Keep signed releases fail-closed when explicitly required, while
       # allowing an explicitly unsigned ZIP/MSI for development or testing.
@@ -522,7 +527,12 @@ jobs:
       - python-dist
       - frontend-dist
       - windows-app
-    environment: release
+    # Keep signed production publication behind the reviewed release
+    # environment. Unsigned testing/development publication uses the
+    # unprotected release-unsigned environment so tag-triggered runs can
+    # complete without unavailable signing secrets or self-review.
+    environment:
+      name: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned' }}
     permissions:
       attestations: write
       contents: write

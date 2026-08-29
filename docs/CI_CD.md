@@ -100,7 +100,13 @@ Release jobs:
   artifact bound to the exact repository, commit, tag, run, attempt, release
   history, and asset names/sizes/SHA-256 values.
 
-The publish job targets the `release` environment. Treat this as the release environment for production publishing, and configure protection rules for it in GitHub if releases should require manual approval.
+The publish job targets the protected `release` environment when
+`REQUIRE_WINDOWS_CODE_SIGNING=true`. When that variable is explicitly false,
+the workflow targets the unprotected `release-unsigned` environment so a
+tag-triggered testing/development release is not rejected by a protected
+branch deployment rule or an unavailable self-review. Configure protection
+rules on the release environment (`release`) for production publishing; unsigned releases remain
+explicitly non-production-trusted.
 
 Release reruns are fail-closed. An updatable existing release is returned to draft state before its assets change; a new release starts as a draft. After the verified local files are uploaded, the workflow enumerates every remote asset page, removes only numeric asset IDs belonging to that exact release whose names are absent locally, checks the exact remote names and metadata, downloads every asset, and compares the bytes with the attested local files. The requested draft or published state is applied only after those checks pass. If immutable releases are enabled, GitHub rejects modification of a published release instead of allowing a partial rerun.
 
