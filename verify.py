@@ -1322,7 +1322,8 @@ def run_ci_cd_workflow_check() -> None:
         ),
         ROOT / ".github" / "workflows" / "release.yml": (
             "workflow_dispatch:",
-            "environment: release",
+            "release-unsigned",
+            "vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned'",
             "contents: write",
             "Validate package version matches release tag",
             "Require release tag to resolve to workflow commit on protected main",

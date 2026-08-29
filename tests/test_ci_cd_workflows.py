@@ -212,7 +212,8 @@ class CiCdWorkflowTests(unittest.TestCase):
         for fragment in (
             '"v*.*.*"',
             "workflow_dispatch:",
-            "environment: release",
+            "release-unsigned",
+            "vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned'",
             "contents: write",
             "python app.py --smoke-test",
             "xvfb-run --auto-servernum python app.py --gui-smoke-test",
