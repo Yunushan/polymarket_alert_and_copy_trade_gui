@@ -293,7 +293,9 @@ class CiCdWorkflowTests(unittest.TestCase):
             "certificate base64 contains internal whitespace",
             "scripts/sign_windows_release.py",
             "gh release create",
-            "gh release upload",
+            "uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}",
+            "--method POST",
+            '--input "${asset_path}"',
             "--target \"${GITHUB_SHA}\"",
             "Smoke install built wheel",
             "--force-reinstall --no-deps",
@@ -344,7 +346,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             for index, line in enumerate(text.splitlines())
             if "gh api --paginate --slurp" in line
         ]
-        self.assertEqual(len(slurp_lines), 6)
+        self.assertEqual(len(slurp_lines), 7)
         lines = text.splitlines()
         for index in slurp_lines:
             with self.subTest(slurp_line=index):
@@ -423,9 +425,15 @@ class CiCdWorkflowTests(unittest.TestCase):
         upload_recheck_index = publish.index(
             "Release identity changed before asset upload; refusing mutation."
         )
-        upload_index = publish.index('gh release upload "${TAG_NAME}"')
+        upload_index = publish.index(
+            "uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}"
+        )
+        self.assertNotIn('gh release upload "${TAG_NAME}"', publish)
         cleanup_plan_index = publish.index("--print-stale-remote-asset-ids")
-        cleanup_index = publish.index('"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"')
+        cleanup_index = publish.index(
+            '"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"',
+            upload_index,
+        )
         remote_verify_index = publish.index("--verify-remote-inventory")
         download_index = publish.index("Draft release assets cannot be downloaded")
         byte_compare_index = publish.index("cmp --")
@@ -492,7 +500,10 @@ class CiCdWorkflowTests(unittest.TestCase):
         validate_target = publish.index(".target_commitish == $target")
         exact_id_patch = publish.index('gh api --method PATCH')
         upload_recheck = publish.index("Release identity changed before asset upload")
-        upload = publish.index('gh release upload "${TAG_NAME}"')
+        upload = publish.index(
+            "uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}"
+        )
+        self.assertNotIn('gh release upload "${TAG_NAME}"', publish)
         self.assertLess(preflight, validate_target)
         self.assertLess(validate_target, exact_id_patch)
         self.assertLess(exact_id_patch, upload_recheck)
@@ -540,6 +551,21 @@ class CiCdWorkflowTests(unittest.TestCase):
             "            owns_published_state=true",
             text,
         )
+
+        # gh api rejects combining --slurp with --jq. Keep reconciliation
+        # pagination and extraction as separate pipeline stages as well.
+        slurp_lines = [
+            index
+            for index, line in enumerate(text.splitlines())
+            if "gh api --paginate --slurp" in line
+        ]
+        self.assertEqual(len(slurp_lines), 2)
+        lines = text.splitlines()
+        for index in slurp_lines:
+            with self.subTest(slurp_line=index):
+                command = "\n".join(lines[index : index + 3])
+                self.assertIn("| jq", command)
+                self.assertNotIn("--jq", command)
 
     def test_release_reconcile_refuses_stale_run_or_release_identity(self) -> None:
         text = (
