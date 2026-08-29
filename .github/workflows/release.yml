@@ -448,6 +448,15 @@ jobs:
             --output-dir "release-assets" `
             --package-only
 
+      - name: Remove WiX debug database
+        shell: pwsh
+        run: |
+          # WiX emits a .wixpdb alongside the MSI by default. It is a build
+          # debug database, not a release asset, so remove it before the exact
+          # release inventory and upload steps run.
+          Get-ChildItem -LiteralPath "release-assets" -File -Filter "*.wixpdb" |
+            Remove-Item -Force
+
       - name: Sign Windows MSI package
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         env:
