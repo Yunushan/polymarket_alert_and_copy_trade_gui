@@ -276,7 +276,9 @@ class CiCdWorkflowTests(unittest.TestCase):
             "--remote-release-json",
             "--remote-assets-json",
             "gh api --paginate --slurp",
-            "gh release download",
+            "release_index_json",
+            "Draft release assets cannot be downloaded",
+            "application/octet-stream",
             "cmp --",
             "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
             "attestations: write",
@@ -400,9 +402,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertIn('[[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]', publish)
         self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"', publish)
         self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100"', publish)
-        preflight_index = publish.index(
-            'if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}"'
-        )
+        preflight_index = publish.index("release_index_json")
         draft_index = publish.index('gh api --method PATCH')
         upload_recheck_index = publish.index(
             "Release identity changed before asset upload; refusing mutation."
@@ -411,7 +411,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         cleanup_plan_index = publish.index("--print-stale-remote-asset-ids")
         cleanup_index = publish.index('"repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"')
         remote_verify_index = publish.index("--verify-remote-inventory")
-        download_index = publish.index('gh release download "${TAG_NAME}"')
+        download_index = publish.index("Draft release assets cannot be downloaded")
         byte_compare_index = publish.index("cmp --")
         release_prepared_index = publish.index('echo "release_prepared=true"')
         final_publish_index = publish.index('"${release_state_flags[@]}"')
@@ -455,6 +455,8 @@ class CiCdWorkflowTests(unittest.TestCase):
         publish = text.split("  publish:\n", 1)[1]
 
         for fragment in (
+            'release_index_json="${RUNNER_TEMP}/market-sentinel-release-index.json"',
+            '"repos/${GITHUB_REPOSITORY}/releases?per_page=100"',
             'release_preflight_json="${RUNNER_TEMP}/market-sentinel-release-preflight.json"',
             'prepared_release_id="$(jq -er \'.id\' "${release_preflight_json}")"',
             ".tag_name == $tag",
@@ -470,9 +472,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, publish)
 
-        preflight = publish.index(
-            'if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}"'
-        )
+        preflight = publish.index("release_index_json")
         validate_target = publish.index(".target_commitish == $target")
         exact_id_patch = publish.index('gh api --method PATCH')
         upload_recheck = publish.index("Release identity changed before asset upload")
