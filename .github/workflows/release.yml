@@ -656,6 +656,7 @@ jobs:
           remote_release_json="${RUNNER_TEMP}/market-sentinel-release.json"
           remote_assets_json="${RUNNER_TEMP}/market-sentinel-release-assets.json"
           stale_asset_ids="${RUNNER_TEMP}/market-sentinel-stale-release-asset-ids.txt"
+          release_index_json="${RUNNER_TEMP}/market-sentinel-release-index.json"
           release_preflight_json="${RUNNER_TEMP}/market-sentinel-release-preflight.json"
           prepared_release_json="${RUNNER_TEMP}/market-sentinel-release-prepared.json"
 
@@ -665,75 +666,84 @@ jobs:
           )
 
           prepared_release_id=""
-          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
-            > "${release_preflight_json}" 2>/dev/null; then
-            if ! jq -e \
-              --arg tag "${TAG_NAME}" \
-              --arg target "${GITHUB_SHA}" \
-              '.id | type == "number" and . > 0' \
-              "${release_preflight_json}" >/dev/null || \
-              ! jq -e \
-                --arg tag "${TAG_NAME}" \
-                --arg target "${GITHUB_SHA}" \
-                '.tag_name == $tag and
-                 .target_commitish == $target and
-                 (.draft | type == "boolean") and
-                 (.prerelease | type == "boolean")' \
-                "${release_preflight_json}" >/dev/null; then
-              echo "Existing release identity, target, or state is not canonical; refusing to mutate it." >&2
-              exit 1
-            fi
-            prepared_release_id="$(jq -er '.id' "${release_preflight_json}")"
-            current_draft="$(jq -er '.draft' "${release_preflight_json}")"
-            current_prerelease="$(jq -er '.prerelease' "${release_preflight_json}")"
-            if [[ "${current_draft}" != "true" &&
-                  "${current_prerelease}" != "${PRERELEASE}" ]]; then
-              echo "Existing published release prerelease state conflicts with ${TAG_NAME}; refusing to unpublish it." >&2
-              exit 1
-            fi
-            # Never expose a mixture of assets from two workflow attempts.
-            gh api --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}" \
-              -F draft=true > "${prepared_release_json}"
-            if ! jq -e \
-              --argjson release_id "${prepared_release_id}" \
-              --arg tag "${TAG_NAME}" \
-              --arg target "${GITHUB_SHA}" \
-              '.id == $release_id and
-               .tag_name == $tag and
-               .target_commitish == $target and
-               .draft == true and
-               (.prerelease | type == "boolean")' \
-              "${prepared_release_json}" >/dev/null; then
-              echo "Existing release changed during draft transition; refusing asset mutation." >&2
-              exit 1
-            fi
-          else
+          # Draft releases are intentionally omitted from the REST
+          # /releases/tags/{tag} endpoint. List releases instead so a failed
+          # attempt can be resumed without creating an orphaned release.
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq 'flatten' > "${release_index_json}"
+          release_match_count="$(jq -er \
+            --arg tag "${TAG_NAME}" \
+            '[.[] | select(.tag_name == $tag)] | length' \
+            "${release_index_json}")"
+
+          if [ "${release_match_count}" = "0" ]; then
             gh release create "${TAG_NAME}" \
               --draft \
               --title "${TAG_NAME}" \
               --notes-file release-assets/RELEASE_NOTES.md \
               --target "${GITHUB_SHA}"
-            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
-              > "${prepared_release_json}"
-            prepared_release_id="$(jq -er '.id | select(type == "number" and . > 0)' \
-              "${prepared_release_json}")"
-            if ! jq -e \
-              --argjson release_id "${prepared_release_id}" \
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq 'flatten' > "${release_index_json}"
+            release_match_count="$(jq -er \
               --arg tag "${TAG_NAME}" \
-              --arg target "${GITHUB_SHA}" \
-              '.id == $release_id and
-               .tag_name == $tag and
-               .target_commitish == $target and
-               .draft == true and
-               .prerelease == false' \
-              "${prepared_release_json}" >/dev/null; then
-              echo "New draft release identity or state is not canonical; refusing asset upload." >&2
-              exit 1
-            fi
+              '[.[] | select(.tag_name == $tag)] | length' \
+              "${release_index_json}")"
           fi
 
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+          if [ "${release_match_count}" != "1" ]; then
+            echo "Expected exactly one release for ${TAG_NAME}, found ${release_match_count}; refusing asset mutation." >&2
+            exit 1
+          fi
+          jq -e \
+            --arg tag "${TAG_NAME}" \
+            'map(select(.tag_name == $tag))[0]' \
+            "${release_index_json}" > "${release_preflight_json}"
+          if ! jq -e \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id | type == "number" and . > 0' \
+            "${release_preflight_json}" >/dev/null || \
+            ! jq -e \
+              --arg tag "${TAG_NAME}" \
+              --arg target "${GITHUB_SHA}" \
+              '.tag_name == $tag and
+               .target_commitish == $target and
+               (.draft | type == "boolean") and
+               (.prerelease | type == "boolean")' \
+              "${release_preflight_json}" >/dev/null; then
+            echo "Existing or new release identity, target, or state is not canonical; refusing to mutate it." >&2
+            exit 1
+          fi
+          prepared_release_id="$(jq -er '.id' "${release_preflight_json}")"
+          release_endpoint="repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}"
+          current_draft="$(jq -er '.draft' "${release_preflight_json}")"
+          current_prerelease="$(jq -er '.prerelease' "${release_preflight_json}")"
+          if [[ "${current_draft}" != "true" &&
+                "${current_prerelease}" != "${PRERELEASE}" ]]; then
+            echo "Existing published release prerelease state conflicts with ${TAG_NAME}; refusing to unpublish it." >&2
+            exit 1
+          fi
+          # Never expose a mixture of assets from two workflow attempts.
+          gh api --method PATCH \
+            "${release_endpoint}" \
+            -F draft=true > "${prepared_release_json}"
+          if ! jq -e \
+            --argjson release_id "${prepared_release_id}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .target_commitish == $target and
+             .draft == true and
+             (.prerelease | type == "boolean")' \
+            "${prepared_release_json}" >/dev/null; then
+            echo "Existing release changed during draft transition; refusing asset mutation." >&2
+            exit 1
+          fi
+
+          gh api "${release_endpoint}" \
             > "${prepared_release_json}"
           if ! jq -e \
             --argjson release_id "${prepared_release_id}" \
@@ -750,7 +760,7 @@ jobs:
           fi
           gh release upload "${TAG_NAME}" release-assets/* --clobber
 
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" > "${remote_release_json}"
+          gh api "${release_endpoint}" > "${remote_release_json}"
           release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
           if [ "${release_id}" != "${prepared_release_id}" ]; then
             echo "Release identity changed during asset upload." >&2
@@ -776,7 +786,7 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
           done < "${stale_asset_ids}"
 
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" > "${remote_release_json}"
+          gh api "${release_endpoint}" > "${remote_release_json}"
           reconciled_release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
           if [ "${reconciled_release_id}" != "${release_id}" ]; then
             echo "Release identity changed during asset reconciliation." >&2
@@ -794,7 +804,21 @@ jobs:
             --verify-remote-inventory
 
           downloaded_assets="$(mktemp -d "${RUNNER_TEMP}/market-sentinel-published-assets.XXXXXX")"
-          gh release download "${TAG_NAME}" --dir "${downloaded_assets}"
+          # Draft release assets cannot be downloaded through gh release
+          # download because that command resolves releases by tag. Download
+          # each asset by its authenticated release-asset endpoint instead.
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]] ||
+               [[ -z "${asset_name}" || "${asset_name}" == */* ||
+                  "${asset_name}" == "." || "${asset_name}" == ".." ]]; then
+              echo "Refusing invalid release asset identity: ${asset_id} ${asset_name}" >&2
+              exit 1
+            fi
+            gh api \
+              -H 'Accept: application/octet-stream' \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+              > "${downloaded_assets}/${asset_name}"
+          done < <(jq -r '.[] | [(.id | tostring), .name] | @tsv' "${remote_assets_json}")
           python scripts/verify_release_assets.py \
             --asset-dir "${downloaded_assets}" \
             --version "${RELEASE_VERSION}" \
