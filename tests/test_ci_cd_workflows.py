@@ -566,6 +566,8 @@ class CiCdWorkflowTests(unittest.TestCase):
                 command = "\n".join(lines[index : index + 3])
                 self.assertIn("| jq", command)
                 self.assertNotIn("--jq", command)
+        self.assertIn("| jq '[.[].artifacts[]?]'", text)
+        self.assertIn("| jq '[.[].jobs[]?]'", text)
 
     def test_release_reconcile_refuses_stale_run_or_release_identity(self) -> None:
         text = (

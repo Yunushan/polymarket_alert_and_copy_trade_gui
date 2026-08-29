@@ -123,7 +123,7 @@ jobs:
             artifacts_json="$(mktemp "${RUNNER_TEMP}/release-evidence-artifacts.XXXXXX")"
             gh api --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
-              | jq '[.[][]?.artifacts[]?]' > "${artifacts_json}"
+              | jq '[.[].artifacts[]?]' > "${artifacts_json}"
 
             while IFS=$'\t' read -r artifact_id artifact_name artifact_run_id artifact_revision; do
               if [[ ! "${artifact_id}" =~ ^[1-9][0-9]*$ ||
@@ -181,7 +181,7 @@ jobs:
           jobs_json="${RUNNER_TEMP}/release-reconcile-jobs.json"
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
-            | jq '[.[][]?.jobs[]?]' > "${jobs_json}"
+            | jq '[.[].jobs[]?]' > "${jobs_json}"
           publish_job_count="$(jq \
             '[.[] | select(.name == "Publish GitHub release")] | length' \
             "${jobs_json}")"
