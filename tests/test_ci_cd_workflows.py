@@ -335,6 +335,22 @@ class CiCdWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+
+        # gh api rejects combining --slurp with --jq. Keep pagination and
+        # flattening as separate pipeline stages so the release job can list
+        # multi-page release/asset inventories successfully.
+        slurp_lines = [
+            index
+            for index, line in enumerate(text.splitlines())
+            if "gh api --paginate --slurp" in line
+        ]
+        self.assertEqual(len(slurp_lines), 6)
+        lines = text.splitlines()
+        for index in slurp_lines:
+            with self.subTest(slurp_line=index):
+                command = "\n".join(lines[index : index + 3])
+                self.assertIn("| jq 'flatten'", command)
+                self.assertNotIn("--jq", command)
         self.assertNotIn("python -m pip install --no-cache-dir build", text)
         self.assertNotIn("cache: pip", text)
         self.assertNotIn("cache-dependency-path", text)

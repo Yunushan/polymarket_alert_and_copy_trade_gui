@@ -671,7 +671,7 @@ jobs:
           # attempt can be resumed without creating an orphaned release.
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq 'flatten' > "${release_index_json}"
+            | jq 'flatten' > "${release_index_json}"
           release_match_count="$(jq -er \
             --arg tag "${TAG_NAME}" \
             '[.[] | select(.tag_name == $tag)] | length' \
@@ -685,7 +685,7 @@ jobs:
               --target "${GITHUB_SHA}"
             gh api --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              --jq 'flatten' > "${release_index_json}"
+              | jq 'flatten' > "${release_index_json}"
             release_match_count="$(jq -er \
               --arg tag "${TAG_NAME}" \
               '[.[] | select(.tag_name == $tag)] | length' \
@@ -768,7 +768,7 @@ jobs:
           fi
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-            --jq 'flatten' > "${remote_assets_json}"
+            | jq 'flatten' > "${remote_assets_json}"
           python scripts/verify_release_assets.py \
             --asset-dir release-assets \
             --version "${RELEASE_VERSION}" \
@@ -794,7 +794,7 @@ jobs:
           fi
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-            --jq 'flatten' > "${remote_assets_json}"
+            | jq 'flatten' > "${remote_assets_json}"
           python scripts/verify_release_assets.py \
             --asset-dir release-assets \
             --version "${RELEASE_VERSION}" \
@@ -872,10 +872,10 @@ jobs:
           release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${evidence_dir}/release.json")"
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-            --jq 'flatten' > "${evidence_dir}/assets.json"
+            | jq 'flatten' > "${evidence_dir}/assets.json"
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq 'flatten' > "${evidence_dir}/history.json"
+            | jq 'flatten' > "${evidence_dir}/history.json"
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             > "${evidence_dir}/run.json"
           python scripts/generate_release_evidence.py \
