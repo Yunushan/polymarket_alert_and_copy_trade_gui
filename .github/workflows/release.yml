@@ -758,7 +758,49 @@ jobs:
             echo "Release identity changed before asset upload; refusing mutation." >&2
             exit 1
           fi
-          gh release upload "${TAG_NAME}" release-assets/* --clobber
+
+          # Draft releases are not addressable by tag through `gh release`.
+          # Upload through the authenticated release-id endpoint instead, so
+          # retries can safely resume the same draft without creating another
+          # release or silently targeting a different one.
+          gh api "${release_endpoint}" > "${remote_release_json}"
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
+          if [ "${release_id}" != "${prepared_release_id}" ]; then
+            echo "Release identity changed during asset upload." >&2
+            exit 1
+          fi
+
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq 'flatten' > "${remote_assets_json}"
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]] ||
+               [[ ! "${asset_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Refusing invalid existing release asset identity: ${asset_id} ${asset_name}" >&2
+              exit 1
+            fi
+            if [[ -f "release-assets/${asset_name}" ]]; then
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            fi
+          done < <(jq -r '.[] | [(.id | tostring), .name] | @tsv' "${remote_assets_json}")
+
+          for asset_path in release-assets/*; do
+            if [[ ! -f "${asset_path}" ]]; then
+              continue
+            fi
+            asset_name="$(basename -- "${asset_path}")"
+            if [[ ! "${asset_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Refusing invalid release asset name: ${asset_name}" >&2
+              exit 1
+            fi
+            gh api --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'Content-Type: application/octet-stream' \
+              --input "${asset_path}" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}" \
+              > /dev/null
+          done
 
           gh api "${release_endpoint}" > "${remote_release_json}"
           release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
