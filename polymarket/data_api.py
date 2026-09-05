@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .endpoints import DATA_ENDPOINTS
-from .http_client import comma_join, request_bytes, request_json
+from .http_client import PolymarketResponseError, comma_join, request_bytes, request_json
+from .leaderboard import LEADERBOARD_MAX_OFFSET
 
 
 def _get_json(endpoint_name: str, *, params: Optional[Mapping[str, Any]] = None, timeout: float = 15.0) -> Any:
@@ -19,6 +20,12 @@ def _list_payload(data: Any, keys: List[str]) -> List[Dict[str, Any]]:
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _history_payload(data: Any, endpoint: str) -> List[Dict[str, Any]]:
+    if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+        raise PolymarketResponseError(f"{endpoint} must return an array of history objects; completeness is unknown.")
+    return data
 
 
 def get_activity(
@@ -65,7 +72,7 @@ def get_activity(
         params["end"] = int(end)
 
     data = _get_json("activity", params=params, timeout=timeout)
-    return data if isinstance(data, list) else []
+    return _history_payload(data, "activity")
 
 
 def get_positions(
@@ -81,7 +88,7 @@ def get_positions(
         "offset": max(0, min(int(offset), 10000)),
     }
     data = _get_json("positions", params=params, timeout=timeout)
-    return data if isinstance(data, list) else []
+    return _history_payload(data, "positions")
 
 
 def get_closed_positions(
@@ -107,7 +114,7 @@ def get_closed_positions(
         "sortDirection": clean_direction,
     }
     data = _get_json("closed_positions", params=params, timeout=timeout)
-    return data if isinstance(data, list) else []
+    return _history_payload(data, "closed_positions")
 
 
 def get_trades(
@@ -123,7 +130,7 @@ def get_trades(
         "offset": max(0, min(int(offset), 10000)),
     }
     data = _get_json("trades", params=params, timeout=timeout)
-    return data if isinstance(data, list) else []
+    return _history_payload(data, "trades")
 
 
 def get_leaderboard(
@@ -140,6 +147,9 @@ def get_leaderboard(
     Data API: /v1/leaderboard
     Returns public trader leaderboard rows.
     """
+    clean_offset = max(0, int(offset))
+    if clean_offset > LEADERBOARD_MAX_OFFSET:
+        raise ValueError(f"Public leaderboard offset must not exceed {LEADERBOARD_MAX_OFFSET}; this endpoint cannot enumerate all accounts.")
     clean_sort = str(sort_by or "PNL").strip().upper()
     if clean_sort not in {"PNL", "VOL"}:
         clean_sort = "PNL"
@@ -154,7 +164,7 @@ def get_leaderboard(
         clean_category = "OVERALL"
     params = {
         "limit": max(1, min(int(limit), 50)),
-        "offset": max(0, int(offset)),
+        "offset": clean_offset,
         "orderBy": clean_sort,
         "sortDirection": clean_direction,
         "timePeriod": clean_period,

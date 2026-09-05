@@ -874,7 +874,8 @@ store_live_validation_report(
             cache_path = Path(tmp) / "cache-directory"
             cache_path.mkdir()
 
-            self.assertEqual(load_analytics_cache(cache_path)["entries"], {})
+            with self.assertRaises(OSError):
+                load_analytics_cache(cache_path)
             self.assertTrue(cache_path.is_dir())
             self.assertFalse(list(cache_path.parent.glob("cache-directory.corrupt-*")))
 
@@ -1029,12 +1030,11 @@ store_live_validation_report(
         self.assertEqual(params["category"], "OVERALL")
         self.assertEqual(mock_get.call_args.kwargs["timeout"], 5)
 
-    def test_leaderboard_request_allows_deep_scan_offsets(self) -> None:
+    def test_leaderboard_request_rejects_offsets_beyond_the_documented_source(self) -> None:
         with patch(HTTP_REQUEST, return_value=FakeResponse({"data": []})) as mock_get:
-            data_api.get_leaderboard(offset=2_500_000)
-
-        params = mock_get.call_args.kwargs["params"]
-        self.assertEqual(params["offset"], 2_500_000)
+            with self.assertRaisesRegex(ValueError, "offset must not exceed 1000"):
+                data_api.get_leaderboard(offset=2_500_000)
+        mock_get.assert_not_called()
 
     def test_closed_positions_request_uses_public_profile_endpoint(self) -> None:
         payload = [{"asset": "token-yes", "realizedPnl": "-12", "timestamp": 10}]
@@ -1088,6 +1088,8 @@ store_live_validation_report(
             "mdd_usd": 50.0,
             "mdd_pct": 25.0,
             "peak_value": 100.0,
+            "points": [{"value": 100.0}, {"value": 50.0}],
+            "points_total": 2,
             "equity_base_usd": 100.0,
             "open_current_value": 40.0,
             "cumulative_realized_pnl": 50.0,

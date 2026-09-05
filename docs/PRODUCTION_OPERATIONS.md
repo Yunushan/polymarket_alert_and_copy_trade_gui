@@ -49,6 +49,19 @@ regional restrictions.
   single-writer/atomic-replace discipline. Existing malformed JSON is preserved
   and rejected rather than silently replaced. Restore a reviewed backup before
   resuming evidence collection after a store-read error.
+- Atomic publication of config, analytics cache, live evidence and text/CSV
+  exports retries Windows access/sharing/lock replacement errors (5, 32, 33)
+  at most ten times, with less than 1.5 seconds of total retry sleep. A held
+  reader or file scanner can temporarily deny replacement. Persistent denial
+  is still reported, and the previous file is not deleted to force success;
+  resolve access/ownership before retrying. Other errors are not retried.
+- Cache read failures are reported without treating an unreadable store as
+  missing or corrupt. Restore access and retry; do not delete a valid cache
+  to clear a read error. Malformed UTF-8/JSON or invalid entry containers are
+  quarantined with their original bytes before an empty cache can be created.
+  Quarantine rename or directory-sync failures are also reported, not hidden
+  as successful recovery. Inspect the active and `.corrupt-*` files before
+  retrying after such a failure.
 - Adapter egress defaults to reviewed HTTPS/WSS endpoints, refuses redirects,
   and rejects private, loopback, link-local, reserved, or mixed-public/private
   DNS destinations. If a reviewed local integration genuinely needs a private
@@ -77,12 +90,13 @@ regional restrictions.
 
 URL validation resolves a configured hostname immediately before a managed
 HTTP or WebSocket request and rejects every non-global answer unless the exact
-origin is explicitly allowed. It is still a preflight: `requests` and
-`websocket-client` perform their own name resolution while opening the socket,
-so the application does not pin the validated address to that connection. TLS
-hostname verification, disabled redirects, and immutable HTTP endpoint settings
-reduce exposure, but they do not eliminate a DNS-rebinding or resolver-race
-window.
+origin is explicitly allowed. The shared adapter runtime pins those addresses
+into direct HTTP connections while preserving the origin hostname for TLS.
+The separate Polymarket HTTP client still calls plain `requests.request` after
+validation, and proxy/WebSocket paths need their own connect-time enforcement.
+Do not infer uniform pinning across all transports from the adapter runtime.
+TLS hostname verification, disabled redirects, and immutable endpoint settings
+reduce exposure but do not remove every validation-to-connect race.
 
 A production host must therefore enforce the destination again at connect time.
 Use a service/cgroup-aware egress firewall or a forward proxy that meets all of

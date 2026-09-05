@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator
 
+from .atomic_files import replace_file
 from .config_security import ConfigSecurityError, assert_no_persisted_secrets
 from .models import AppConfig
 
@@ -88,7 +89,7 @@ def save_config(cfg: AppConfig, path: Path = DEFAULT_CONFIG_PATH) -> None:
                     tmp.write(data)
                     tmp.flush()
                     os.fsync(tmp.fileno())
-                os.replace(tmp_path, path)
+                replace_file(tmp_path, path)
                 # Replacement is the commit point. Keep the object consistent
                 # with the committed bytes even if directory durability fails.
                 setattr(cfg, _STORAGE_REVISION_ATTR, committed_revision)

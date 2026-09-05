@@ -13,6 +13,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
+from core.atomic_files import replace_file
 from .live_report_schema import (
     CREDENTIAL_PROMOTION_CHECKS,
     CREDENTIAL_PROMOTION_SEMANTICS,
@@ -635,7 +636,7 @@ def _write_store_atomic(target: Path, store: Mapping[str, Any]) -> Path:
             handle.write(serialized)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, target)
+        replace_file(temporary, target)
         if isinstance(store, _RevisionedLiveValidationStore):
             setattr(store, _STORE_REVISION_ATTR, content_hash)
         try:

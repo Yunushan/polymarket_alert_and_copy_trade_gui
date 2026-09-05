@@ -21,6 +21,7 @@ from tkinter import ttk, messagebox, filedialog
 
 from dotenv import load_dotenv
 
+from core.atomic_files import atomic_text_writer
 from core.models import (
     AppConfig,
     CopyActivityOutboxEntry,
@@ -2364,7 +2365,7 @@ class App(tk.Tk):
         ttk.Label(hero, text="Polymarket trader analytics", style="HeroTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             hero,
-            text="Rank public leaderboard users by computed ROI %, PnL, volume, or drawdown without opening the web UI.",
+            text="Public leaderboard candidates. PnL/volume is not investment ROI; observed MDD is not verified account-equity risk.",
             style="HeroSubtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
@@ -2377,7 +2378,7 @@ class App(tk.Tk):
         metrics = (
             ("Returned", self.lb_returned_metric_var),
             ("Scanned", self.lb_scanned_metric_var),
-            ("Best ROI", self.lb_best_roi_metric_var),
+            ("Best PnL/vol", self.lb_best_roi_metric_var),
             ("MDD runs", self.lb_mdd_metric_var),
         )
         for idx, (label, var) in enumerate(metrics):
@@ -2391,7 +2392,7 @@ class App(tk.Tk):
         for col in range(10):
             controls.columnconfigure(col, weight=1)
 
-        self.lb_sort_var = tk.StringVar(value="ROI %")
+        self.lb_sort_var = tk.StringVar(value="PnL/volume %")
         self.lb_direction_var = tk.StringVar(value="High to low")
         self.lb_limit_var = tk.StringVar(value="1000")
         self.lb_scan_limit_var = tk.StringVar(value="1000")
@@ -2407,7 +2408,7 @@ class App(tk.Tk):
         self.lb_max_mdd_pct_var = tk.StringVar(value="")
 
         fields = (
-            ("Sort", self.lb_sort_var, ["ROI %", "PnL USD", "Volume USD", "MDD %", "MDD USD"], 0, 0, 14),
+            ("Sort", self.lb_sort_var, ["PnL/volume %", "PnL USD", "Volume USD", "Obs. MDD %", "Obs. MDD USD"], 0, 0, 14),
             ("Direction", self.lb_direction_var, ["High to low", "Low to high"], 0, 1, 12),
             ("Period", self.lb_period_var, ["All", "Day", "Week", "Month"], 0, 2, 10),
             ("Category", self.lb_category_var, ["OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE", "WEATHER", "ECONOMICS", "TECH", "FINANCE"], 0, 3, 14),
@@ -2423,8 +2424,8 @@ class App(tk.Tk):
             ("Returned", self.lb_limit_var, "1", "1000000", 0, 4),
             ("Scanned", self.lb_scan_limit_var, "1", "1000000", 0, 5),
             ("MDD scan", self.lb_mdd_scan_limit_var, "1", "1000000", 1, 4),
-            ("Min ROI %", self.lb_min_roi_var, None, None, 1, 0),
-            ("Max ROI %", self.lb_max_roi_var, None, None, 1, 1),
+            ("Min PnL/volume %", self.lb_min_roi_var, None, None, 1, 0),
+            ("Max PnL/volume %", self.lb_max_roi_var, None, None, 1, 1),
             ("Min MDD %", self.lb_min_mdd_pct_var, None, None, 1, 2),
             ("Max MDD %", self.lb_max_mdd_pct_var, None, None, 1, 5),
         )
@@ -2458,14 +2459,14 @@ class App(tk.Tk):
         ttk.Label(actions, text="Search", style="Muted.TLabel").pack(anchor="w")
         self.lb_fast_roi_btn = ttk.Button(
             actions,
-            text="Best ROI <=20% MDD",
+            text="Top PnL/volume | Observed MDD <=20%",
             style="Accent.TButton",
             command=self.load_fast_polymarket_roi_mdd,
         )
         self.lb_fast_roi_btn.pack(fill="x", pady=(3, 6))
         self.lb_load_btn = ttk.Button(
             actions,
-            text="Load Top ROI",
+            text="Load Top PnL/volume",
             style="Accent.TButton",
             command=self.load_polymarket_leaderboard,
         )
@@ -2508,10 +2509,10 @@ class App(tk.Tk):
             "wallet": "Wallet",
             "pnl": "PnL",
             "volume": "Volume",
-            "roi": "ROI %",
+            "roi": "PnL/vol %",
             "trades": "Trades",
             "mdd_usd": "MDD USD",
-            "mdd_pct": "MDD %",
+            "mdd_pct": "Obs. MDD %",
             "source": "MDD source",
         }
         widths = {
@@ -2561,7 +2562,7 @@ class App(tk.Tk):
             padx=(10, 0),
         )
 
-        self.lb_status_var = tk.StringVar(value="Ready. Set Returned/Scanned and load Polymarket ROI rankings.")
+        self.lb_status_var = tk.StringVar(value="Ready. Public leaderboard candidates; account coverage unverified.")
         ttk.Label(table_card, textvariable=self.lb_status_var, style="Muted.TLabel", wraplength=1160).grid(row=3, column=0, sticky="ew", pady=(8, 0))
 
     @staticmethod
@@ -2569,6 +2570,9 @@ class App(tk.Tk):
         normalized = str(label or "").strip().lower()
         return {
             "roi %": "roi_pct",
+            "pnl/volume %": "roi_pct",
+            "obs. mdd %": "mdd_pct",
+            "obs. mdd usd": "mdd_usd",
             "pnl usd": "pnl_usd",
             "volume usd": "volume_usd",
             "mdd %": "mdd_pct",
@@ -2758,7 +2762,7 @@ class App(tk.Tk):
     def load_fast_polymarket_roi_mdd(self):
         if self._leaderboard_loading:
             return
-        self.lb_sort_var.set("ROI %")
+        self.lb_sort_var.set("PnL/volume %")
         self.lb_direction_var.set("High to low")
         self.lb_period_var.set("All")
         self.lb_category_var.set("OVERALL")
@@ -2873,6 +2877,7 @@ class App(tk.Tk):
                     or row.get("mdd_method")
                     or "fast"
                 )
+                mdd_source += " / " + str(row.get("mdd_history_status") or "history unverified")
             self.leaderboard_tree.insert(
                 "",
                 "end",
@@ -2953,13 +2958,25 @@ class App(tk.Tk):
             "mdd_method",
             "mdd_pct_basis",
             "mdd_audit_cache_key",
+            "pnl_volume_pct",
+            "roi_pct_basis",
+            "mdd_scope",
+            "mdd_account_equity_verified",
+            "mdd_history_status",
+            "mdd_history_coverage",
+            "mdd_source_quality",
+            "mdd_unavailable_reasons",
         ]
         try:
-            with open(path, "w", newline="", encoding="utf-8") as fh:
+            with atomic_text_writer(Path(path), newline="") as fh:
                 writer = csv.DictWriter(fh, fieldnames=fields)
                 writer.writeheader()
                 for row in rows:
-                    writer.writerow({field: row.get(field) for field in fields})
+                    item = {field: row.get(field) for field in fields}
+                    item["mdd_history_coverage"] = json.dumps(row.get("mdd_history_coverage", {}), sort_keys=True)
+                    item["mdd_source_quality"] = json.dumps(row.get("mdd_source_quality", {}), sort_keys=True)
+                    item["mdd_unavailable_reasons"] = json.dumps(row.get("mdd_unavailable_reasons", []))
+                    writer.writerow(item)
         except Exception as exc:
             messagebox.showerror("Polymarket analytics", f"Could not export CSV: {exc}")
             return

@@ -122,8 +122,10 @@ from polymarket.live_reports import (
     store_live_validation_report,
 )
 from polymarket.live_report_schema import LiveValidationReportSchemaError, parse_live_validation_report_json
+from polymarket.leaderboard import LEADERBOARD_MAX_OFFSET, PNL_VOLUME_BASIS, performance_ratio_metadata, wallet_membership_fingerprint
 from polymarket.mdd import (
     DEFAULT_CACHE_TTL_SECONDS as POLYMARKET_MDD_CACHE_TTL_SECONDS,
+    MDD_CALCULATION_VERSION,
     MDD_MARK_REPLAY_ASSUMPTIONS,
     MDD_MARK_REPLAY_LIMITATIONS,
     MDD_ACCOUNTING_ASSUMPTIONS,
@@ -133,6 +135,7 @@ from polymarket.mdd import (
     MDD_PCT_BASIS_V2,
     MDD_V2_ASSUMPTIONS,
     MDD_V2_LIMITATIONS,
+    max_drawdown,
     polymarket_user_mdd_payload_mark_replay,
     polymarket_user_mdd_payload_v2,
 )
@@ -2325,6 +2328,7 @@ def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: 
         "pnl_usd": pnl,
         "volume_usd": volume,
         "roi_pct": roi,
+        **performance_ratio_metadata(roi),
         "trade_count": _safe_int(_leaderboard_lookup(raw, "trades", "tradeCount", "trade_count", "totalTrades"), 0),
         "mdd_usd": mdd_usd,
         "mdd_pct": mdd_pct,
@@ -2392,47 +2396,7 @@ def _fetch_user_closed_positions_all(wallet: str, limit: int = 500) -> List[Dict
 
 
 def _max_drawdown(points: List[Dict[str, Any]], equity_base_usd: Optional[float]) -> Dict[str, Any]:
-    if not points:
-        return {
-            "mdd_usd": 0.0,
-            "mdd_pct": 0.0 if equity_base_usd and equity_base_usd > 0 else None,
-            "peak_value": 0.0,
-            "trough_value": 0.0,
-            "peak_timestamp": None,
-            "trough_timestamp": None,
-        }
-    peak_value = float(points[0]["value"])
-    peak_ts = points[0].get("timestamp")
-    trough_value = peak_value
-    trough_ts = peak_ts
-    max_dd = 0.0
-    max_dd_pct: Optional[float] = 0.0 if equity_base_usd and equity_base_usd > 0 else None
-    max_peak = peak_value
-    max_peak_ts = peak_ts
-    for point in points:
-        value = float(point["value"])
-        timestamp = point.get("timestamp")
-        if value > peak_value:
-            peak_value = value
-            peak_ts = timestamp
-        drawdown = max(0.0, peak_value - value)
-        denominator = (float(equity_base_usd) + peak_value) if equity_base_usd and equity_base_usd > 0 else None
-        drawdown_pct = (drawdown / denominator * 100.0) if denominator and denominator > 0 else None
-        if drawdown > max_dd:
-            max_dd = drawdown
-            max_dd_pct = drawdown_pct
-            max_peak = peak_value
-            max_peak_ts = peak_ts
-            trough_value = value
-            trough_ts = timestamp
-    return {
-        "mdd_usd": max_dd,
-        "mdd_pct": max_dd_pct,
-        "peak_value": max_peak,
-        "trough_value": trough_value,
-        "peak_timestamp": max_peak_ts,
-        "trough_timestamp": trough_ts,
-    }
+    return max_drawdown(points, equity_base_usd)
 
 
 def polymarket_user_mdd_payload(
@@ -2515,6 +2479,7 @@ def polymarket_mdd_audit_params(wallet: str, options: Mapping[str, Any]) -> Dict
     params = dict(options)
     params["wallet"] = normalize_wallet(wallet)
     params["artifact"] = POLYMARKET_MDD_AUDIT_KIND
+    params["calculation_version"] = MDD_CALCULATION_VERSION
     return params
 
 
@@ -2557,6 +2522,8 @@ def polymarket_mdd_export_payload(cache_key: str) -> Dict[str, Any]:
     if loaded is None:
         raise ValueError("Unknown MDD audit cache key.")
     payload, metadata = loaded
+    metadata["calculation_current"] = payload.get("calculation_version") == MDD_CALCULATION_VERSION
+    payload["calculation_current"] = metadata["calculation_current"]
     return {"cache": metadata, "payload": payload, "export": {"format": "json", "source": POLYMARKET_MDD_AUDIT_KIND}}
 
 
@@ -3099,6 +3066,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
     retry_attempts = max(1, int(scan_retry_attempts or 1))
     retry_delay = max(0.0, float(scan_retry_delay_seconds or 0.0))
     seen_page_fingerprints: set[str] = set()
+    seen_wallet_fingerprints: set[str] = set()
     completion_reason = "scan_limit_reached" if scan_limit is not None else "upstream_exhausted"
 
     def fetch_page(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
@@ -3135,6 +3103,12 @@ def _fetch_polymarket_leaderboard_scan_rows(
         message=f"Scanning leaderboard rows {scanned_count}/{_limit_label(scan_limit)} from offset {offset}.",
     )
     while scan_limit is None or scanned_count < scan_limit:
+        if offset > LEADERBOARD_MAX_OFFSET:
+            completion_reason = "upstream_offset_limit"
+            warning = f"Leaderboard scan reached the documented upstream offset limit ({LEADERBOARD_MAX_OFFSET}); not all Polymarket accounts can be enumerated."
+            warnings.append(warning)
+            emit_progress("leaderboard", scanned=scanned_count, message=warning)
+            break
         if is_cancelled():
             cancelled = True
             completion_reason = "cancelled"
@@ -3145,6 +3119,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
         batch_specs: List[Tuple[int, int]] = []
         page_count = concurrency if remaining is None else min(concurrency, max(1, (remaining + POLYMARKET_LEADERBOARD_PAGE_SIZE - 1) // POLYMARKET_LEADERBOARD_PAGE_SIZE))
         for _ in range(page_count):
+            if offset > LEADERBOARD_MAX_OFFSET:
+                break
             if remaining is not None and remaining <= 0:
                 break
             page_limit = POLYMARKET_LEADERBOARD_PAGE_SIZE if remaining is None else min(POLYMARKET_LEADERBOARD_PAGE_SIZE, remaining)
@@ -3199,14 +3175,17 @@ def _fetch_polymarket_leaderboard_scan_rows(
             page_fingerprint = hashlib.sha256(
                 json.dumps(page, default=str, separators=(",", ":"), sort_keys=True).encode("utf-8")
             ).hexdigest()
-            if page_fingerprint in seen_page_fingerprints:
+            wallet_fingerprint = wallet_membership_fingerprint(page)
+            if page_fingerprint in seen_page_fingerprints or (wallet_fingerprint and wallet_fingerprint in seen_wallet_fingerprints):
                 completion_reason = "repeated_page"
-                warning = f"Leaderboard scan stopped at offset {page_offset}: upstream repeated a previously returned full page."
+                warning = f"Leaderboard scan stopped at offset {page_offset}: upstream repeated a previously returned page or wallet membership."
                 warnings.append(warning)
                 emit_progress("leaderboard", scanned=scanned_count, message=warning)
                 stop_after_batch = True
                 break
             seen_page_fingerprints.add(page_fingerprint)
+            if wallet_fingerprint:
+                seen_wallet_fingerprints.add(wallet_fingerprint)
             scanned_count += len(page)
             if retain_rows:
                 raw_rows.extend(page)
@@ -3234,6 +3213,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
             {
                 "completion_reason": completion_reason,
                 "source_enumeration_complete": completion_reason == "end_of_results",
+                "source_max_offset": LEADERBOARD_MAX_OFFSET,
             }
         )
     return _limit_slice(raw_rows, scan_limit), cancelled
@@ -3441,6 +3421,8 @@ def polymarket_leaderboard_payload(
     computed_mdd = 0
     attempted_mdd = 0
     qualified_mdd = 0
+    unavailable_mdd = 0
+    history_limited_mdd = 0
     if mdd_requested:
         mdd_candidate_rows = list(prefiltered)
         if sort not in {"mdd_usd", "mdd_pct"}:
@@ -3486,7 +3468,7 @@ def polymarket_leaderboard_payload(
             mdd_options: Dict[str, Any],
             exc: Optional[BaseException],
         ) -> bool:
-            nonlocal attempted_mdd, computed_mdd, qualified_mdd
+            nonlocal attempted_mdd, computed_mdd, qualified_mdd, unavailable_mdd, history_limited_mdd
             attempted_mdd += 1
             if not wallet:
                 emit_progress(
@@ -3529,7 +3511,18 @@ def polymarket_leaderboard_payload(
                 {
                     "mdd_usd": mdd["mdd_usd"],
                     "mdd_pct": mdd["mdd_pct"],
-                    "mdd_available": True,
+                    "mdd_available": mdd.get("mdd_available", True),
+                    "mdd_scope": mdd.get("mdd_scope", "observed_public_pnl"),
+                    "mdd_account_equity_verified": False,
+                    "mdd_history_status": mdd.get("mdd_history_status", "unknown"),
+                    "mdd_history_coverage": mdd.get("mdd_history_coverage", {}),
+                    "mdd_source_quality": mdd.get("mdd_source_quality", {}),
+                    "mdd_unavailable_reasons": mdd.get("mdd_unavailable_reasons", []),
+                    "mdd_calculation_version": mdd.get("calculation_version"),
+                    "mdd_pct_peak_value": mdd.get("pct_peak_value"),
+                    "mdd_pct_trough_value": mdd.get("pct_trough_value"),
+                    "mdd_pct_peak_timestamp": mdd.get("pct_peak_timestamp"),
+                    "mdd_pct_trough_timestamp": mdd.get("pct_trough_timestamp"),
                     "mdd_method": mdd["mdd_method"],
                     "mdd_pct_basis": mdd["mdd_pct_basis"],
                     "mdd_points": len(mdd["points"]),
@@ -3556,7 +3549,9 @@ def polymarket_leaderboard_payload(
                 }
             )
             computed_mdd += 1
-            if _number_in_range(row["mdd_usd"], min_mdd_usd, max_mdd_usd) and _number_in_range(row["mdd_pct"], min_mdd_pct, max_mdd_pct):
+            unavailable_mdd += int(not row["mdd_available"])
+            history_limited_mdd += int(row["mdd_history_status"] == "limit_reached")
+            if row["mdd_available"] and _number_in_range(row["mdd_usd"], min_mdd_usd, max_mdd_usd) and _number_in_range(row["mdd_pct"], min_mdd_pct, max_mdd_pct):
                 qualified_mdd += 1
             emit_progress(
                 "mdd",
@@ -3613,6 +3608,8 @@ def polymarket_leaderboard_payload(
             if rate_limited:
                 break
 
+    if unavailable_mdd:
+        warnings.append(f"Excluded {unavailable_mdd} unavailable MDD result(s); {history_limited_mdd} reached a history limit.")
     filtered: List[Dict[str, Any]] = []
     for row in prefiltered:
         if mdd_requested:
@@ -3639,6 +3636,8 @@ def polymarket_leaderboard_payload(
             "mdd_attempted": attempted_mdd,
             "mdd_computed": computed_mdd,
             "mdd_qualified": qualified_mdd,
+            "mdd_unavailable": unavailable_mdd,
+            "mdd_history_limited": history_limited_mdd,
         },
         "sort": sort,
         "direction": direction,
@@ -3680,10 +3679,12 @@ def polymarket_leaderboard_payload(
         "source": "polymarket_data_api_leaderboard",
         "cancelled": cancelled,
         "source_sort": remote_sort,
+        "roi_pct_basis": PNL_VOLUME_BASIS,
         "wallet_observation_policy": "first_observation_per_normalized_wallet",
         "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
         "completion_reason": str(scan_summary.get("completion_reason") or "unknown"),
         "source_enumeration_complete": bool(scan_summary.get("source_enumeration_complete")),
+        "source_max_offset": LEADERBOARD_MAX_OFFSET,
         "source_scope_note": (
             "Results cover only rows exposed by the public Polymarket leaderboard for the selected period and category; "
             "they do not establish coverage of every Polymarket account."
@@ -3697,7 +3698,7 @@ def polymarket_leaderboard_payload(
         "mdd_method": MDD_METHOD_MARK_REPLAY if mdd_mode == "mark_replay" else MDD_METHOD_V2,
         "mdd_pct_basis": MDD_PCT_BASIS_V2,
         "mdd_note": (
-            "MDD mark replay is opt-in and uses CLOB price history for trade-derived token inventory; rows without reconstructable marks fall back to v2."
+            "Observed MDD uses sampled CLOB prices and fetched inventory, not verified account equity. Incomplete replay or capped history is excluded; fast fallback is diagnostic only."
             if mdd_mode == "mark_replay"
             else "MDD v2 uses public closed-position realized PnL, public trade/activity capital basis, and the current open-position snapshot; complete account-equity MDD still requires cash-flow ledger and historical mark replay."
         ),

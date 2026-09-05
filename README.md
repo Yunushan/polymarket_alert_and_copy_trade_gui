@@ -39,7 +39,7 @@ A local multi-market prediction-market command center for:
 - MDD USD/% v2 can be computed from a public-data historical equity curve: closed-position realized PnL, public activity/trade capital basis, and the current open-position snapshot
 - MDD v2 supports min/max filters, MDD sorting, pagination controls for closed positions/activity/trades/open positions, and an optional `equity_base_usd` override
 - Optional `mdd_mode=mark_replay` replays trade-derived token inventory against public CLOB batch price history for deeper sampled unrealized drawdown checks
-- Mark replay is capped to 20 asset ids per request, reports missing/clipped/unreconstructable rows, and falls back to MDD v2 when replay cannot be built
+- Mark replay is capped to 20 asset ids per request and reports missing/clipped/unreconstructable rows as unknown risk; MDD v2 fallback is diagnostic only
 - Optional accounting snapshot reconciliation parses the public ZIP of CSVs, uses max equity as the strongest available MDD percentage base, and reports position/cash-flow gaps
 - Optional audit caching stores bounded per-wallet MDD artifacts locally, reports retention/health metadata, supports targeted purge controls, and exposes JSON/CSV export links without rerunning expensive public API calls
 - Leaderboard and MDD payloads report Polymarket rate-limit/backoff metadata instead of hiding upstream 429 failures as generic errors
@@ -433,7 +433,7 @@ market-sentinel polymarket-mdd-cache list
 market-sentinel serve --host 127.0.0.1 --port 8765 --frontend-dir frontend/dist
 ```
 
-Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. `markets support` is the canonical full-catalog support contract: every operation is explicitly `supported`, `guarded`, `unsupported`, or `blocked`, with exact authenticated account/order allow-lists, safety requirements, blocker references, and adapter-audit status. The read-only `markets events`, `contracts`, `price`, `orderbook`, `trades`, and `candles` commands use the same enabled-market settings and adapter configuration as the web API, normalize records to the shared schemas, and fail closed with a market-specific unsupported error when an official feed is not available. `trades` accepts optional Unix `--before`/`--after` bounds; `candles` accepts `--resolution`, `--from`, and `--to` bounds. `doctor` is read-only: it checks configuration integrity and storage access, installed dependencies, React build availability, and the selected market's live-safety state without printing secrets. Use `doctor --strict` in service deployment automation to fail on warnings such as an armed live-trading configuration; it always fails on corrupt configuration, unwritable storage, or missing dependencies. `paper marks` persists CLI-only computed marks in an atomic sidecar beside the selected config (or `--marks-file`) so refresh, show, and clear work across separate CLI processes; the file and its parent directory are synced on POSIX after replacement, it contains no credentials, and it is ignored by Git. `polymarket-live-reports`, `polymarket-live-decisions`, and `polymarket-promotion-proposal` expose the same local redacted report/review/decision/proposal artifacts as Live Safety; they never derive credentials, perform network actions, or place orders, and Markdown is available only for existing review exports. Unlimited scans run until the public leaderboard API returns no more rows, a repeated full page is detected, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--state-db path.sqlite3 --resume` plus retry flags: every fetched page, normalized row, and completed MDD audit is committed to SQLite, so a transient SSL/API failure only loses the current page batch and a later invocation resumes from the durable state. Add `--resume-on-failure` to keep a `nohup` scan alive after transient Polymarket HTTP/SSL failures; it resumes SQLite state after exponential backoff, with `--resume-max-restarts 0` meaning retry until interrupted. Run `market-sentinel polymarket-leaderboard-status --state-db path.sqlite3 --pid-file polymarket-scan.pid` at any time for a read-only JSON status with rows/pages, MDD done/error/pending counts, next offset, timestamps, stop reason, saved scan signature, and optional PID-file liveness. Use `market-sentinel polymarket-leaderboard-export --state-db path.sqlite3 --require-mdd --max-mdd-pct 20 --format csv --output current.csv` to write a sorted partial result snapshot without rerunning API or MDD calls; its JSON output identifies whether the export is still partial. A repeated page is recorded as `stop_reason=repeated_page`; it is an upstream pagination boundary, not proof that every Polymarket account exists in the public leaderboard. The CSV/JSON output is streamed from SQLite rather than rebuilding all rows in RAM. `--checkpoint` remains available as a lightweight JSONL checkpoint for shorter scans, but cannot be combined with `--state-db`. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
+Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. `markets support` is the canonical full-catalog support contract: every operation is explicitly `supported`, `guarded`, `unsupported`, or `blocked`, with exact authenticated account/order allow-lists, safety requirements, blocker references, and adapter-audit status. The read-only `markets events`, `contracts`, `price`, `orderbook`, `trades`, and `candles` commands use the same enabled-market settings and adapter configuration as the web API, normalize records to the shared schemas, and fail closed with a market-specific unsupported error when an official feed is not available. `trades` accepts optional Unix `--before`/`--after` bounds; `candles` accepts `--resolution`, `--from`, and `--to` bounds. `doctor` is read-only: it checks configuration integrity and storage access, installed dependencies, React build availability, and the selected market's live-safety state without printing secrets. Use `doctor --strict` in service deployment automation to fail on warnings such as an armed live-trading configuration; it always fails on corrupt configuration, unwritable storage, or missing dependencies. `paper marks` persists CLI-only computed marks in an atomic sidecar beside the selected config (or `--marks-file`) so refresh, show, and clear work across separate CLI processes; the file and its parent directory are synced on POSIX after replacement, it contains no credentials, and it is ignored by Git. `polymarket-live-reports`, `polymarket-live-decisions`, and `polymarket-promotion-proposal` expose the same local redacted report/review/decision/proposal artifacts as Live Safety; they never derive credentials, perform network actions, or place orders, and Markdown is available only for existing review exports. Unlimited scans run until the documented upstream offset limit is reached, the public leaderboard API returns no more rows, a repeated page or wallet membership is detected, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--state-db path.sqlite3 --resume` plus retry flags: every fetched page, normalized row, and completed MDD audit is committed to SQLite, so a transient SSL/API failure only loses the current page batch and a later invocation resumes from the durable state. Add `--resume-on-failure` to keep a `nohup` scan alive after transient Polymarket HTTP/SSL failures; it resumes SQLite state after exponential backoff, with `--resume-max-restarts 0` meaning retry until interrupted. Run `market-sentinel polymarket-leaderboard-status --state-db path.sqlite3 --pid-file polymarket-scan.pid` at any time for a read-only JSON status with rows/pages, MDD done/error/pending counts, next offset, timestamps, stop reason, saved scan signature, and optional PID-file liveness. Use `market-sentinel polymarket-leaderboard-export --state-db path.sqlite3 --require-mdd --max-mdd-pct 20 --format csv --output current.csv` to write a sorted partial result snapshot without rerunning API or MDD calls; its JSON output identifies whether the export is still partial. A repeated page is recorded as `stop_reason=repeated_page`; it is an upstream pagination boundary, not proof that every Polymarket account exists in the public leaderboard. The CSV/JSON output is streamed from SQLite rather than rebuilding all rows in RAM. `--checkpoint` remains available as a lightweight JSONL checkpoint for shorter scans, but cannot be combined with `--state-db`. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
 The `serve --frontend-dir` value is normalized and must remain beneath the
 deployment resource root; this keeps the custom static build option useful
 without allowing an arbitrary path to become an HTTP file root. `health`,
@@ -450,6 +450,16 @@ writer, retaining the earliest page/index observation and original page counts.
 Status/export open in read-only mode and refuse a legacy schema until a scan
 has resumed once to migrate it.
 
+`unlimited` removes local row/enrichment budgets, not upstream restrictions.
+The [public leaderboard API](https://docs.polymarket.com/api-reference/core/get-trader-leaderboard-rankings)
+currently permits request offsets through 1,000 and pages through 50 rows.
+The scanner never requests beyond that offset and records
+`completion_reason=upstream_offset_limit`, with
+`source_enumeration_complete=false`, when it reaches the boundary. A repeated
+set of identified wallets also stops pagination even when order, ranks or PnL
+change. These results cannot enumerate every Polymarket account or millions of
+users; the original unlimited settings remain unchanged.
+
 Saved MDD calculations are bound to their normalized calculation options and
 algorithm version. On `--resume`, changing mode, history limits, equity basis,
 replay settings, or accounting options clears only MDD enrichment and recomputes
@@ -459,6 +469,55 @@ filters, MDD scan budget, or cache TTL does not invalidate matching calculations
 JSON scan/export output and SQLite status include `mdd_signature` for provenance.
 An unchanged resume deliberately retains its previous observations; start a new
 scan without `--resume` when a fresh leaderboard and current MDD are required.
+
+The legacy API/CLI key `roi_pct` means `pnl_usd / volume_usd * 100`, not return
+on invested capital. Interfaces label it **PnL/volume %**; API/JSON/CSV rows
+also include `pnl_volume_pct` and `roi_pct_basis`. Existing sort/filter flags
+remain compatible. This ratio ranks only the fetched public candidates.
+
+MDD calculation version 5 independently maximizes dollar loss and percentage
+loss over the sampled PnL curve. The observed window starts from a constructed
+zero-PnL baseline, so its initial loss is included. No PnL observations means
+unavailable MDD, not zero risk. `peak_value`/`trough_value` and their timestamps
+refer to the dollar maximum; `pct_peak_value`/`pct_trough_value` and their
+timestamps refer to the percentage maximum. Audit JSON/CSV retain this
+provenance and `calculation_version`. Exported older audit records are preserved
+but marked `calculation_current=false`. Accounting rebasing uses every retained
+drawdown episode, not just the biggest dollar loss or the displayed point tail.
+An incomplete legacy summary is not silently rebased.
+
+Every fetched trade and normalized mark contributes to replay; the replay
+point limit only bounds retained output. Incomplete inventory/marks return
+unknown top-level risk, with the partial calculation retained as diagnostics.
+`mdd_history_coverage` records each source's row count, limit, observed timestamp
+range, and whether it reached a limit, ended its results, or was not requested.
+A full final page conservatively counts as `limit_reached`: more history has
+not been ruled out. Such results cannot pass MDD filters, including after
+accounting reconciliation, persisted resume, or required-MDD export. A source
+window ending is not proof of lifetime history: all current public calculations
+carry `mdd_scope=observed_public_pnl` and `mdd_account_equity_verified=false`.
+Excluding a source is recorded, never silently represented as full history.
+
+Malformed financial rows, invalid timestamps and ambiguous same-timestamp
+ordering make risk unavailable. `mdd_source_quality` records rejected-row
+counts/reasons; `mdd_unavailable_reasons` survives API, CLI, desktop CSV and
+SQLite exports. Invalid sources stop mark replay before price requests and
+cannot qualify through accounting rebasing or diagnostic fallback. Version 5
+also invalidates prior durable MDD enrichment when a scan resumes.
+
+Accounting ZIP imports stream their CSV members. Limits are 16 MiB compressed,
+8 MiB per CSV member, 32 MiB aggregate expanded reads, 20 CSV files, 1,000 ZIP
+members, 20,000 rows per file, 50,000 rows total, 64 columns, and 65,536 characters
+per logical record. Oversized/malformed inputs fail closed. Row-limited parses
+are marked partial and cannot supply a new percentage base. These are parser
+input/retention bounds, not a guarantee of total process RSS.
+
+The process-local MDD input and price-history caches each retain at most 128
+entries, with stored JSON key/payload budgets of 16 MiB and 8 MiB respectively.
+Expired entries are evicted, oversized entries are not retained, and cached
+values are isolated between callers. These are cache-storage budgets, not total
+process-memory limits; active requests, parsed histories and other app state
+still consume memory. `--mdd-cache-ttl-seconds 0` bypasses cache reads/writes.
 
 Only one scan writer may own a state database at a time. A second scan fails
 before modifying it; use a different `--state-db` for an independent run.
@@ -711,7 +770,7 @@ This runs:
 - frontend build readiness checks; the build is skipped unless `frontend/node_modules` exists
 - optional Live Safety report-history browser smoke checks when `--frontend-live-smoke` is supplied
 - offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
-- enforced branch-coverage floors of 65% across the full Python application and 74% across the headless/backend surface; `python verify.py` fails when either floor regresses
+- enforced combined statement/branch-coverage floors of 65% across the full Python application and 74% across the headless/backend surface; `python verify.py` fails when either floor regresses
 
 Install `requirements-test.lock` before running the pytest suite:
 ```bash
@@ -771,9 +830,13 @@ for the 100-point model and reviewed evidence-manifest contract. A green CI
 matrix is not treated as proof that an external runner or production host has
 completed its required checks.
 
-Current audit result (2026-08-28): the repository's repeatable local checklist
-is **83/100**, while the independent deployment-oriented assessment is
-**57/100 — NO-GO**. Schema-v2 hosted collectors now provide a structural path
+Latest local verification (2026-09-05): **1,346 tests ran, seven skipped on
+Windows**, and the repeatable local checklist reports **83/100, not_ready**.
+The latest independent review assessed the preceding working tree at **70/100**.
+Its cache read-error defect is now fixed and regression-tested; that does not
+automatically raise the production score or establish external acceptance.
+These are local checks, not acceptance of the published release or production
+host. Schema-v2 hosted collectors provide a structural path
 to all 100 formal points, but none of their external points is awarded without
 a clean exact revision, successful trusted workflow/job, uploaded artifact,
 and exact-byte attestation. The funded workflow also remains fail-closed until

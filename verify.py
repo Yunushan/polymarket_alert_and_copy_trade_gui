@@ -1550,6 +1550,41 @@ def run_tkinter_smoke_check() -> None:
     print("[ok] Tkinter smoke")
 
 
+def frontend_install_issues(frontend: Path) -> list[str]:
+    """Check installed package versions against the committed npm graph, offline."""
+    try:
+        package = json.loads((frontend / "package.json").read_text(encoding="utf-8"))
+        lock = json.loads((frontend / "package-lock.json").read_text(encoding="utf-8"))
+        packages = lock["packages"]
+        root = packages[""]
+        if not isinstance(packages, dict) or not isinstance(root, dict):
+            raise ValueError("invalid package graph")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [f"Cannot verify frontend lockfile: {type(exc).__name__}"]
+    issues = []
+    for group in ("dependencies", "devDependencies", "optionalDependencies"):
+        if package.get(group, {}) != root.get(group, {}):
+            issues.append(f"package.json {group} differs from package-lock.json")
+    modules = (frontend / "node_modules").resolve()
+    for relative, expected in packages.items():
+        if not relative:
+            continue
+        installed_path = (frontend / relative / "package.json").resolve()
+        if not installed_path.is_relative_to(modules) or not isinstance(expected, dict) or expected.get("link"):
+            issues.append(f"Unverifiable locked package: {relative}")
+            continue
+        if not installed_path.exists() and expected.get("optional"):
+            continue
+        try:
+            installed = json.loads(installed_path.read_text(encoding="utf-8"))
+            actual_version = installed.get("version")
+        except (OSError, ValueError, AttributeError):
+            actual_version = None
+        if not expected.get("version") or actual_version != expected["version"]:
+            issues.append(f"{relative}: expected {expected.get('version')}, installed {actual_version or 'missing'}")
+    return issues
+
+
 def run_frontend_build_check(strict: bool = False) -> None:
     frontend = ROOT / "frontend"
     package_path = frontend / "package.json"
@@ -1568,6 +1603,10 @@ def run_frontend_build_check(strict: bool = False) -> None:
             raise SystemExit(message)
         print(f"[skip] {message}")
         return
+
+    install_issues = frontend_install_issues(frontend)
+    if install_issues:
+        raise SystemExit("Frontend installation does not match the lockfile; run npm ci --ignore-scripts in frontend.\n" + "\n".join(install_issues))
 
     result = subprocess.run(
         [npm_command(), "run", "build"],
@@ -1661,7 +1700,7 @@ def run_unit_tests() -> None:
         if result.returncode != 0:
             raise SystemExit(result.returncode)
     print(
-        f"[ok] unit tests ({test_count} tests); branch coverage "
+        f"[ok] unit tests ({test_count} tests); combined statement/branch coverage "
         f">= {MIN_TOTAL_BRANCH_COVERAGE:g}% overall and >= {MIN_BACKEND_BRANCH_COVERAGE:g}% backend"
     )
 

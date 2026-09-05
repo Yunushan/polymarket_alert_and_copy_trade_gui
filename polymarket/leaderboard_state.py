@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Iterator, Mapping, Optional
 
+from .leaderboard import LEADERBOARD_MAX_OFFSET, performance_ratio_metadata, wallet_membership_fingerprint
+
 
 _SORT_COLUMNS = {
     "roi_pct": "roi_pct",
@@ -124,6 +126,7 @@ class LeaderboardStateStore:
                 page_limit INTEGER NOT NULL,
                 row_count INTEGER NOT NULL,
                 fingerprint TEXT NOT NULL DEFAULT '',
+                wallet_fingerprint TEXT NOT NULL DEFAULT '',
                 saved_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS rows (
@@ -161,7 +164,11 @@ class LeaderboardStateStore:
         }
         if "fingerprint" not in page_columns:
             self.connection.execute("ALTER TABLE pages ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
+        migrate_memberships = "wallet_fingerprint" not in page_columns
+        if migrate_memberships:
+            self.connection.execute("ALTER TABLE pages ADD COLUMN wallet_fingerprint TEXT NOT NULL DEFAULT ''")
         self.connection.execute("CREATE INDEX IF NOT EXISTS pages_fingerprint_idx ON pages(fingerprint)")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS pages_wallet_fingerprint_idx ON pages(wallet_fingerprint)")
         wallet_index = self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'rows_wallet_unique_idx'"
         ).fetchone()
@@ -183,6 +190,14 @@ class LeaderboardStateStore:
                 self.connection.execute(
                     "CREATE UNIQUE INDEX rows_wallet_unique_idx ON rows(wallet) WHERE wallet != ''"
                 )
+        if migrate_memberships:
+            # Only reconstruct complete retained pages within the documented source window.
+            for page in self.connection.execute("SELECT page_offset, row_count FROM pages WHERE page_offset <= ?", (LEADERBOARD_MAX_OFFSET,)):
+                rows = [dict(row) for row in self.connection.execute("SELECT wallet FROM rows WHERE page_offset = ?", (page["page_offset"],))]
+                if len(rows) == page["row_count"]:
+                    self.connection.execute("UPDATE pages SET wallet_fingerprint = ? WHERE page_offset = ?", (
+                        wallet_membership_fingerprint(rows), page["page_offset"],
+                    ))
         self.connection.commit()
 
     def prepare(self, signature: Mapping[str, Any], *, resume: bool) -> None:
@@ -251,6 +266,9 @@ class LeaderboardStateStore:
         done = int(
             self.connection.execute("SELECT COUNT(*) AS count FROM rows WHERE mdd_status = 'done'").fetchone()["count"]
         )
+        available = int(self.connection.execute(
+            "SELECT COUNT(*) FROM rows WHERE mdd_status = 'done' AND (mdd_usd IS NOT NULL OR mdd_pct IS NOT NULL)"
+        ).fetchone()[0])
         failed = int(
             self.connection.execute("SELECT COUNT(*) AS count FROM rows WHERE mdd_status = 'error'").fetchone()["count"]
         )
@@ -271,6 +289,8 @@ class LeaderboardStateStore:
             "duplicate_rows": max(0, scanned_count - row_count),
             "pages": page_count,
             "mdd_done": done,
+            "mdd_available": available,
+            "mdd_unavailable": done - available,
             "mdd_errors": failed,
             "mdd_pending": max(0, row_count - done - failed),
             "next_offset": next_offset,
@@ -305,6 +325,7 @@ class LeaderboardStateStore:
         clean_offset = max(0, int(offset))
         clean_limit = max(1, int(limit))
         fingerprint = self._page_fingerprint(rows)
+        wallet_fingerprint = wallet_membership_fingerprint(rows)
         with self.connection:
             saved_page = self.connection.execute(
                 "SELECT fingerprint FROM pages WHERE page_offset = ?", (clean_offset,)
@@ -314,8 +335,8 @@ class LeaderboardStateStore:
                     raise ValueError("Cannot overwrite an already saved leaderboard page with different observations.")
                 return True
             duplicate = self.connection.execute(
-                "SELECT page_offset FROM pages WHERE fingerprint = ? AND page_offset != ? LIMIT 1",
-                (fingerprint, clean_offset),
+                "SELECT page_offset FROM pages WHERE (fingerprint = ? OR (? != '' AND wallet_fingerprint = ?)) AND page_offset != ? LIMIT 1",
+                (fingerprint, wallet_fingerprint, wallet_fingerprint, clean_offset),
             ).fetchone()
             if rows and duplicate is not None:
                 self._set_metadata("scan_complete", "1")
@@ -325,8 +346,8 @@ class LeaderboardStateStore:
                 self._set_metadata("last_updated_at", str(int(time.time())))
                 return False
             self.connection.execute(
-                "INSERT OR REPLACE INTO pages(page_offset, page_limit, row_count, fingerprint, saved_at) VALUES (?, ?, ?, ?, ?)",
-                (clean_offset, clean_limit, len(rows), fingerprint, int(time.time())),
+                "INSERT OR REPLACE INTO pages(page_offset, page_limit, row_count, fingerprint, wallet_fingerprint, saved_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (clean_offset, clean_limit, len(rows), fingerprint, wallet_fingerprint, int(time.time())),
             )
             self.connection.executemany(
                 """
@@ -357,6 +378,12 @@ class LeaderboardStateStore:
                 self._set_metadata("stop_reason", "")
             self._set_metadata("last_updated_at", str(int(time.time())))
         return True
+
+    def stop_at_upstream_limit(self) -> None:
+        with self.connection:
+            self._set_metadata("scan_complete", "1")
+            self._set_metadata("stop_reason", "upstream_offset_limit")
+            self._set_metadata("last_updated_at", str(int(time.time())))
 
     @staticmethod
     def _page_fingerprint(rows: list[Mapping[str, Any]]) -> str:
@@ -398,6 +425,8 @@ class LeaderboardStateStore:
             return
 
         summary = self._mdd_summary(payload)
+        if summary.get("mdd_available") is False:
+            summary.update(mdd_usd=None, mdd_pct=None)
         mark_replay = summary.get("mark_replay") or {}
         accounting = summary.get("accounting_snapshot") or {}
         source = str(
@@ -430,11 +459,20 @@ class LeaderboardStateStore:
         """Keep result/provenance fields required for resume and export, not full point history."""
         keys = (
             "version",
+            "calculation_version",
             "mdd_usd",
             "mdd_pct",
             "mdd_available",
             "mdd_method",
             "mdd_pct_basis",
+            "mdd_scope",
+            "mdd_account_equity_verified",
+            "mdd_history_status",
+            "mdd_history_coverage",
+            "mdd_history_capped_sources",
+            "mdd_history_excluded_sources",
+            "mdd_source_quality",
+            "mdd_unavailable_reasons",
             "equity_base_usd",
             "equity_base_source",
             "public_capital_basis_usd",
@@ -442,6 +480,12 @@ class LeaderboardStateStore:
             "trough_value",
             "peak_timestamp",
             "trough_timestamp",
+            "pct_drawdown_usd",
+            "pct_peak_value",
+            "pct_trough_value",
+            "pct_peak_timestamp",
+            "pct_trough_timestamp",
+            "drawdown_baseline",
             "points_total",
             "data_counts",
             "assumptions",
@@ -453,7 +497,12 @@ class LeaderboardStateStore:
             if isinstance(value, Mapping):
                 summary[key] = {
                     item_key: value.get(item_key)
-                    for item_key in ("status", "source", "available", "warning_count", "warnings", "limitations")
+                    for item_key in (
+                        "status", "source", "available", "warning_count", "warnings", "limitations",
+                        "incomplete_reasons", "trade_events_replayed", "trades_without_timestamp",
+                        "trades_without_size_or_price", "negative_inventory_events", "timeline_truncated",
+                        "display_points_truncated", "complete",
+                    )
                     if item_key in value
                 }
         return summary
@@ -500,6 +549,7 @@ class LeaderboardStateStore:
                 values.append(maximum)
         if require_mdd:
             clauses.append("mdd_status = 'done'")
+            clauses.append("(mdd_usd IS NOT NULL OR mdd_pct IS NOT NULL)")
             for column, minimum_key, maximum_key in (
                 ("mdd_usd", "min_mdd_usd", "max_mdd_usd"),
                 ("mdd_pct", "min_mdd_pct", "max_mdd_pct"),
@@ -532,6 +582,7 @@ class LeaderboardStateStore:
             "pnl_usd": row["pnl_usd"],
             "volume_usd": row["volume_usd"],
             "roi_pct": row["roi_pct"],
+            **performance_ratio_metadata(row["roi_pct"]),
             "trade_count": row["trade_count"],
             "mdd_usd": row["mdd_usd"],
             "mdd_pct": row["mdd_pct"],

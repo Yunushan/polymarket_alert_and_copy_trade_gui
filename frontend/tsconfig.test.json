@@ -11,6 +11,7 @@
     "src/api.ts",
     "src/formatting.ts",
     "src/live-preflight-audit.tsx",
+    "src/mdd-history-coverage.tsx",
     "src/types.ts",
     "src/vite-env.d.ts"
   ]

@@ -2,9 +2,25 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, TextIO
+
+
+def replace_file(source: Path, target: Path) -> None:
+    """Atomically replace a file, tolerating briefly held Windows file handles."""
+    for attempt in range(10):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as error:
+            # Windows can report access denied instead of sharing violation
+            # while a reader or scanner holds the destination without delete
+            # sharing. Permanent denial still fails after this bounded retry.
+            if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 9:
+                raise
+            time.sleep(min(0.025 * (2 ** attempt), 0.2))
 
 
 def fsync_parent_directory(path: Path) -> None:
@@ -30,7 +46,7 @@ def atomic_text_writer(path: Path, *, newline: str | None = None) -> Iterator[Te
             yield handle
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
         fsync_parent_directory(path)
     except BaseException:
         temporary.unlink(missing_ok=True)

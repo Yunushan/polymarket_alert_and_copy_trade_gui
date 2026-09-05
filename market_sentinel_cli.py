@@ -117,6 +117,14 @@ LEADERBOARD_FIELDS = [
     "mdd_method",
     "mdd_pct_basis",
     "mdd_source",
+    "pnl_volume_pct",
+    "roi_pct_basis",
+    "mdd_scope",
+    "mdd_account_equity_verified",
+    "mdd_history_status",
+    "mdd_history_coverage",
+    "mdd_source_quality",
+    "mdd_unavailable_reasons",
 ]
 
 SORT_ALIASES = {
@@ -320,6 +328,9 @@ def _csv_rows(rows: Iterable[Mapping[str, Any]]) -> Iterable[Dict[str, Any]]:
     for row in rows:
         item = {field: row.get(field, "") for field in LEADERBOARD_FIELDS}
         item["mdd_source"] = _row_mdd_source(row)
+        item["mdd_history_coverage"] = json.dumps(row.get("mdd_history_coverage", {}), sort_keys=True, separators=(",", ":"))
+        item["mdd_source_quality"] = json.dumps(row.get("mdd_source_quality", {}), sort_keys=True, separators=(",", ":"))
+        item["mdd_unavailable_reasons"] = json.dumps(row.get("mdd_unavailable_reasons", []), separators=(",", ":"))
         yield item
 
 
@@ -573,6 +584,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 normalized = [normalize_polymarket_leaderboard_row(row, offset + index + 1) for index, row in enumerate(page)]
                 return store.record_page(offset, _limit, normalized)
 
+            scan_summary: Dict[str, Any] = {}
             _fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=scan_limit,
                 scan_start_offset=int(state["next_offset"]),
@@ -589,7 +601,10 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 emit_progress=emit,
                 warnings=warnings,
                 page_callback=save_page,
+                scan_summary=scan_summary,
             )
+            if scan_summary.get("completion_reason") == "upstream_offset_limit":
+                store.stop_at_upstream_limit()
 
         if mdd_requested:
             scanned_rows = int(store.progress()["scanned"])
@@ -690,7 +705,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             "source": "polymarket_data_api_leaderboard",
             "source_sort": remote_sort,
             "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_durable_local_state",
-            "mdd_available": final_state["mdd_done"] > 0,
+            "mdd_available": final_state["mdd_available"] > 0,
             "warnings": warnings,
         }
         _write_streamed_leaderboard_payload(
@@ -2936,9 +2951,9 @@ def build_parser() -> argparse.ArgumentParser:
         "polymarket-leaderboard",
         aliases=["leaderboard", "polymarket-analytics"],
         parents=[common],
-        help="Run the Polymarket ROI/PnL/volume/MDD leaderboard scan without a GUI.",
+        help="Rank public Polymarket candidates by PnL/volume, PnL, volume, or observed MDD without a GUI.",
     )
-    leaderboard.add_argument("--sort", default="roi_pct", help="roi_pct, pnl_usd, volume_usd, mdd_pct, or mdd_usd.")
+    leaderboard.add_argument("--sort", default="roi_pct", help="roi_pct (PnL/volume %%, not investment ROI), pnl_usd, volume_usd, mdd_pct, or mdd_usd (observed public PnL drawdown).")
     leaderboard.add_argument("--direction", default="DESC", choices=["ASC", "DESC"])
     leaderboard.add_argument("--period", default="all")
     leaderboard.add_argument("--category", default="OVERALL")
@@ -2953,7 +2968,7 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--mdd-trade-limit", default="1000")
     leaderboard.add_argument("--mdd-open-limit", default="500")
     leaderboard.add_argument("--mdd-mark-replay-token-limit", default="10")
-    leaderboard.add_argument("--mdd-mark-replay-point-limit", default="5000")
+    leaderboard.add_argument("--mdd-mark-replay-point-limit", default="5000", help="Retained replay points; all fetched trades and marks still contribute to MDD.")
     leaderboard.add_argument("--mdd-mark-replay-interval", default="1h")
     leaderboard.add_argument("--mdd-mark-replay-fidelity", default="60")
     leaderboard.add_argument("--mdd-include-accounting", action="store_true")
@@ -3021,7 +3036,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export current durable leaderboard rows without starting, resuming, or changing a scan.",
     )
     leaderboard_export.add_argument("--state-db", required=True, help="Existing SQLite state database created by polymarket-leaderboard.")
-    leaderboard_export.add_argument("--sort", default="roi_pct", help="roi_pct, pnl_usd, volume_usd, mdd_pct, or mdd_usd.")
+    leaderboard_export.add_argument("--sort", default="roi_pct", help="roi_pct (PnL/volume %%, not investment ROI), pnl_usd, volume_usd, mdd_pct, or mdd_usd (observed public PnL drawdown).")
     leaderboard_export.add_argument("--direction", default="DESC", choices=["ASC", "DESC"])
     leaderboard_export.add_argument("--returned", "--limit", default="unlimited", help="Rows to export; use unlimited, all, 0, or -1 for no local cap.")
     leaderboard_export.add_argument("--require-mdd", action="store_true", help="Export only rows with completed MDD calculations.")
@@ -3574,7 +3589,7 @@ def build_parser() -> argparse.ArgumentParser:
     user_mdd.add_argument("--max-points", default="50")
     user_mdd.add_argument("--cache-ttl-seconds", default="0")
     user_mdd.add_argument("--mark-replay-token-limit", default="10")
-    user_mdd.add_argument("--mark-replay-point-limit", default="5000")
+    user_mdd.add_argument("--mark-replay-point-limit", default="5000", help="Retained replay points; all fetched trades and marks still contribute to MDD.")
     user_mdd.add_argument("--mark-replay-interval", default="1h")
     user_mdd.add_argument("--mark-replay-fidelity", default="60")
     user_mdd.add_argument("--include-accounting", action="store_true")

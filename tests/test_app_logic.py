@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import csv
 import json
 import queue
 import sys
@@ -796,6 +797,47 @@ class AppLogicTests(unittest.TestCase):
 
         App.copy_selected_leaderboard_user(harness)
         self.assertEqual(harness.clipboard, ["alpha-trader"])
+
+    def test_desktop_leaderboard_export_preserves_unknown_risk_and_source_diagnostics(self) -> None:
+        harness = AnalyticsHarness()
+        quality = {"status": "invalid", "sources": {"closed_positions": {"invalid_rows": 1}}}
+        reasons = ["invalid_source_data:closed_positions:invalid_timestamp"]
+        harness._last_leaderboard_payload = {"rows": [{
+            "wallet": WALLET, "display_name": "Trader", "roi_pct": 10,
+            "pnl_volume_pct": 10, "roi_pct_basis": "PnL / volume, not investment ROI",
+            "mdd_usd": None, "mdd_pct": None, "mdd_history_status": "invalid_source_data",
+            "mdd_source_quality": quality, "mdd_unavailable_reasons": reasons,
+            "mdd_account_equity_verified": False,
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "leaderboard.csv"
+            with patch("app.filedialog.asksaveasfilename", return_value=str(target)), patch("app.messagebox.showerror") as error:
+                App.export_polymarket_leaderboard(harness)
+            error.assert_not_called()
+            with target.open(encoding="utf-8", newline="") as stream:
+                row, = csv.DictReader(stream)
+            self.assertEqual(row["wallet"], WALLET)
+            self.assertEqual(row["mdd_pct"], "")
+            self.assertEqual(row["mdd_history_status"], "invalid_source_data")
+            self.assertEqual(json.loads(row["mdd_source_quality"]), quality)
+            self.assertEqual(json.loads(row["mdd_unavailable_reasons"]), reasons)
+            self.assertIn("not investment ROI", row["roi_pct_basis"])
+            self.assertIn("Exported 1 rows", harness.lb_status_var.get())
+
+    def test_desktop_leaderboard_export_failure_keeps_previous_complete_file(self) -> None:
+        harness = AnalyticsHarness()
+        harness._last_leaderboard_payload = {"rows": [
+            {"wallet": WALLET}, {"wallet": WALLET, "mdd_source_quality": {"invalid": object()}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "leaderboard.csv"
+            target.write_text("previous complete export", encoding="utf-8")
+            with patch("app.filedialog.asksaveasfilename", return_value=str(target)), patch("app.messagebox.showerror") as error:
+                App.export_polymarket_leaderboard(harness)
+            error.assert_called_once()
+            self.assertEqual(target.read_text(), "previous complete export")
+            self.assertFalse(list(target.parent.glob(f".{target.name}.*.tmp")))
+            self.assertEqual(harness.logged, [])
 
     def test_desktop_polymarket_leaderboard_action_sets_up_copy_trading_follow(self) -> None:
         harness = AnalyticsHarness()

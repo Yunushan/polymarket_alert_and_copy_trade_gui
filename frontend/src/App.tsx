@@ -99,6 +99,7 @@ import {
 import type { MarketPatch } from "./api";
 import { formatAuditValue, formatNumber } from "./formatting";
 import { LivePreflightAudit } from "./live-preflight-audit";
+import { MddHistoryCoverage } from "./mdd-history-coverage";
 import type {
   AlertForm,
   AlertsPayload,
@@ -5191,11 +5192,12 @@ function PolymarketAnalyticsView({
         {mddPayload ? (
           <>
             <div className="metrics-grid four">
-              <Metric label="MDD USD" value={formatUsd(mddPayload.mdd_usd)} tone={mddPayload.mdd_available ? "warn" : "neutral"} />
-              <Metric label="MDD %" value={formatPercent(mddPayload.mdd_pct)} />
+              <Metric label="Observed MDD USD" value={formatUsd(mddPayload.mdd_usd)} tone={mddPayload.mdd_available ? "warn" : "neutral"} />
+              <Metric label="Observed MDD %" value={formatPercent(mddPayload.mdd_pct)} />
               <Metric label="Peak" value={formatUsd(mddPayload.peak_value)} />
               <Metric label="Trough" value={formatUsd(mddPayload.trough_value)} />
             </div>
+            <MddHistoryCoverage payload={mddPayload} />
             <div className="audit-summary">
               <div>
                 <span>Method</span>
@@ -5367,11 +5369,11 @@ function PolymarketAnalyticsView({
           <label>
             <span>Sort</span>
             <select value={filters.sort} onChange={(event) => updateFilter("sort", event.target.value as PolymarketLeaderboardSort)}>
-              <option value="roi_pct">ROI %</option>
+              <option value="roi_pct">PnL/volume %</option>
               <option value="pnl_usd">PnL USD</option>
               <option value="volume_usd">Volume USD</option>
-              <option value="mdd_pct">MDD %</option>
-              <option value="mdd_usd">MDD USD</option>
+              <option value="mdd_pct">Observed MDD %</option>
+              <option value="mdd_usd">Observed MDD USD</option>
             </select>
           </label>
           <label>
@@ -5537,11 +5539,11 @@ function PolymarketAnalyticsView({
             <input inputMode="decimal" value={filters.max_volume_usd} onChange={(event) => updateFilter("max_volume_usd", event.target.value)} />
           </label>
           <label>
-            <span>Min ROI %</span>
+            <span>Min PnL/volume %</span>
             <input inputMode="decimal" value={filters.min_roi_pct} onChange={(event) => updateFilter("min_roi_pct", event.target.value)} />
           </label>
           <label>
-            <span>Max ROI %</span>
+            <span>Max PnL/volume %</span>
             <input inputMode="decimal" value={filters.max_roi_pct} onChange={(event) => updateFilter("max_roi_pct", event.target.value)} />
           </label>
           <label>
@@ -5587,10 +5589,10 @@ function PolymarketAnalyticsView({
                     <th>User</th>
                     <th className="numeric">PnL</th>
                     <th className="numeric">Volume</th>
-                    <th className="numeric">ROI</th>
+                    <th className="numeric" title="PnL / trading volume * 100; not investment ROI">PnL/volume %</th>
                     <th className="numeric">Trades</th>
-                    <th className="numeric">MDD USD</th>
-                    <th className="numeric">MDD %</th>
+                    <th className="numeric">Observed MDD USD</th>
+                    <th className="numeric">Observed MDD %</th>
                     <th>MDD source</th>
                     <th>Audit</th>
                   </tr>
@@ -5610,6 +5612,7 @@ function PolymarketAnalyticsView({
                       <td className="numeric">{row.mdd_available ? formatUsd(row.mdd_usd) : "-"}</td>
                       <td className="numeric">{row.mdd_available ? formatPercent(row.mdd_pct) : "-"}</td>
                       <td>
+                        <small>{(row.mdd_history_status ?? "history unverified").replaceAll("_", " ")}</small>
                         {row.mdd_available
                           ? row.mdd_accounting_status ?? row.mdd_mark_replay_status ?? (row.mdd_method?.includes("mark") ? "mark replay" : "fast")
                           : "-"}
@@ -5657,11 +5660,12 @@ function PolymarketAnalyticsView({
             {auditCacheKey ? <StatusPill tone="good">cached</StatusPill> : <StatusPill>direct</StatusPill>}
           </div>
           <div className="metrics-grid four">
-            <Metric label="MDD USD" value={formatUsd(auditPayload.mdd_usd)} tone={auditPayload.mdd_available ? "warn" : "neutral"} />
-            <Metric label="MDD %" value={formatPercent(auditPayload.mdd_pct)} />
+            <Metric label="Observed MDD USD" value={formatUsd(auditPayload.mdd_usd)} tone={auditPayload.mdd_available ? "warn" : "neutral"} />
+            <Metric label="Observed MDD %" value={formatPercent(auditPayload.mdd_pct)} />
             <Metric label="Equity base" value={formatUsd(auditPayload.equity_base_usd)} />
             <Metric label="Points" value={auditPayload.points_total ?? auditPayload.points?.length ?? 0} />
           </div>
+          <MddHistoryCoverage payload={auditPayload} />
           <div className="audit-summary">
             <div>
               <span>Wallet</span>

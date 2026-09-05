@@ -2,17 +2,70 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 import zipfile
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from . import data_api
+from .drawdown import max_drawdown, percentage_drawdown
 from .util import normalize_wallet
 
 
 MAX_ACCOUNTING_CSV_FILES = 20
 MAX_ACCOUNTING_ROWS_PER_FILE = 20000
+MAX_ACCOUNTING_TOTAL_ROWS = 50000
+MAX_ACCOUNTING_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_ACCOUNTING_MEMBER_BYTES = 8 * 1024 * 1024
+MAX_ACCOUNTING_EXPANDED_BYTES = 32 * 1024 * 1024
+MAX_ACCOUNTING_ARCHIVE_MEMBERS = 1000
+MAX_ACCOUNTING_COLUMNS = 64
+MAX_ACCOUNTING_RECORD_CHARS = 65536
+
+
+class AccountingSnapshotLimitError(ValueError):
+    """The snapshot exceeds a bounded parsing resource budget."""
+
+
+class _BoundedArchiveReader(io.RawIOBase):
+    def __init__(self, source: Any, budget: Dict[str, int]) -> None:
+        super().__init__()
+        self.source = source
+        self.budget = budget
+        self.bytes_read = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        remaining = min(MAX_ACCOUNTING_MEMBER_BYTES - self.bytes_read, self.budget["remaining"])
+        chunk = self.source.read(min(len(buffer), max(remaining + 1, 1)))
+        if len(chunk) > remaining:
+            raise AccountingSnapshotLimitError("Accounting CSV expanded-byte limit exceeded.")
+        self.bytes_read += len(chunk)
+        self.budget["remaining"] -= len(chunk)
+        buffer[:len(chunk)] = chunk
+        return len(chunk)
+
+
+class _BoundedCsvLines:
+    def __init__(self, source: Any) -> None:
+        self.source = source
+        self.record_chars = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        remaining = MAX_ACCOUNTING_RECORD_CHARS - self.record_chars
+        line = self.source.readline(remaining + 1)
+        if not line:
+            raise StopIteration
+        if len(line) > remaining:
+            raise AccountingSnapshotLimitError("Accounting CSV logical record is too large.")
+        self.record_chars += len(line)
+        return line
 
 EQUITY_VALUE_KEYS = (
     "equity",
@@ -59,7 +112,8 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
             return default
         if text.startswith("(") and text.endswith(")"):
             text = "-" + text[1:-1]
-        return float(text)
+        number = float(text)
+        return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
 
@@ -99,32 +153,44 @@ def _parse_timestamp(value: Any) -> Optional[int]:
     return int(parsed.timestamp())
 
 
-def _normalize_row(row: Mapping[str, Any]) -> Dict[str, Any]:
-    normalized: Dict[str, Any] = {}
-    for key, value in row.items():
-        normalized[_normalize_key(str(key))] = value
-    return normalized
-
-
-def _decode_csv(data: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
-
-
-def _read_csv_rows(raw: bytes, max_rows: int) -> List[Dict[str, Any]]:
-    text = _decode_csv(raw)
-    reader = csv.DictReader(io.StringIO(text))
+def _read_csv_rows(source: Any, max_rows: int) -> tuple[List[Dict[str, Any]], bool]:
+    lines = _BoundedCsvLines(source)
+    reader = csv.reader(lines, strict=True)
+    headers = next(reader, [])
+    if len(headers) > MAX_ACCOUNTING_COLUMNS:
+        raise AccountingSnapshotLimitError("Accounting CSV has too many columns.")
+    keys = [_normalize_key(header) for header in headers]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Accounting CSV contains ambiguous duplicate column names.")
     rows: List[Dict[str, Any]] = []
-    for index, row in enumerate(reader):
-        if index >= max_rows:
-            break
-        if row:
-            rows.append(_normalize_row(row))
-    return rows
+    while True:
+        lines.record_chars = 0
+        row = next(reader, None)
+        if row is None:
+            return rows, False
+        if not row:
+            continue
+        if len(row) > len(keys):
+            raise ValueError("Accounting CSV row contains more fields than its header.")
+        if len(rows) >= max_rows:
+            return rows, True
+        # Reuse normalized header strings across rows instead of duplicating them.
+        rows.append(dict(zip(keys, row + [None] * (len(keys) - len(row)), strict=True)))
+
+
+def _read_member_rows(
+    archive: zipfile.ZipFile, member: zipfile.ZipInfo, max_rows: int, budget: Dict[str, int]
+) -> tuple[List[Dict[str, Any]], bool]:
+    for encoding in ("utf-8-sig", "latin-1"):
+        try:
+            with archive.open(member) as source:
+                reader = io.BufferedReader(_BoundedArchiveReader(source, budget))
+                with io.TextIOWrapper(reader, encoding=encoding, newline="") as text:
+                    return _read_csv_rows(text, max_rows)
+        except UnicodeDecodeError:
+            if encoding == "latin-1":
+                raise
+    raise ValueError("Accounting CSV could not be decoded.")
 
 
 def _timestamp_from_row(row: Mapping[str, Any]) -> Optional[int]:
@@ -226,6 +292,13 @@ def _summarize_positions(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def parse_accounting_snapshot_zip(raw: bytes, *, max_rows_per_file: int = MAX_ACCOUNTING_ROWS_PER_FILE) -> Dict[str, Any]:
+    if len(raw) > MAX_ACCOUNTING_ARCHIVE_BYTES:
+        raise AccountingSnapshotLimitError("Accounting ZIP exceeds the compressed-byte limit.")
+    if max_rows_per_file < 1:
+        raise ValueError("Accounting CSV row limit must be positive.")
+    row_limit = min(int(max_rows_per_file), MAX_ACCOUNTING_ROWS_PER_FILE)
+    budget = {"remaining": MAX_ACCOUNTING_EXPANDED_BYTES}
+    complete = True
     warnings: List[str] = []
     csv_files: List[Dict[str, Any]] = []
     equity_rows: List[Dict[str, Any]] = []
@@ -233,14 +306,29 @@ def parse_accounting_snapshot_zip(raw: bytes, *, max_rows_per_file: int = MAX_AC
     all_rows: List[Dict[str, Any]] = []
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
-            if len(names) > MAX_ACCOUNTING_CSV_FILES:
-                warnings.append(f"Snapshot contains {len(names)} CSV files; only first {MAX_ACCOUNTING_CSV_FILES} were parsed.")
-                names = names[:MAX_ACCOUNTING_CSV_FILES]
-            for name in names:
-                rows = _read_csv_rows(archive.read(name), max_rows_per_file)
+            members = archive.infolist()
+            if len(members) > MAX_ACCOUNTING_ARCHIVE_MEMBERS:
+                raise AccountingSnapshotLimitError("Accounting ZIP has too many members.")
+            csv_members = [member for member in members if not member.is_dir() and member.filename.lower().endswith(".csv")]
+            if len(csv_members) > MAX_ACCOUNTING_CSV_FILES:
+                raise AccountingSnapshotLimitError("Accounting ZIP has too many CSV files.")
+            if any(member.file_size > MAX_ACCOUNTING_MEMBER_BYTES for member in csv_members):
+                raise AccountingSnapshotLimitError("Accounting CSV exceeds the expanded member-byte limit.")
+            if sum(member.file_size for member in csv_members) > MAX_ACCOUNTING_EXPANDED_BYTES:
+                raise AccountingSnapshotLimitError("Accounting ZIP exceeds the total expanded-byte limit.")
+            names = [member.filename.casefold() for member in csv_members]
+            if len(names) != len(set(names)):
+                raise ValueError("Accounting ZIP contains duplicate CSV member names.")
+            for member in csv_members:
+                name = member.filename
+                rows, truncated = _read_member_rows(
+                    archive, member, min(row_limit, MAX_ACCOUNTING_TOTAL_ROWS - len(all_rows)), budget
+                )
+                if truncated:
+                    complete = False
+                    warnings.append(f"CSV row budget reached for {name}; snapshot is incomplete.")
                 lower_name = name.lower()
-                file_info = {"name": name, "rows": len(rows)}
+                file_info = {"name": name, "rows": len(rows), "truncated": truncated}
                 csv_files.append(file_info)
                 all_rows.extend(rows)
                 if "equity" in lower_name:
@@ -250,6 +338,7 @@ def parse_accounting_snapshot_zip(raw: bytes, *, max_rows_per_file: int = MAX_AC
     except zipfile.BadZipFile:
         return {
             "status": "invalid_zip",
+            "complete": False,
             "files": [],
             "equity": _summarize_equity([]),
             "positions": _summarize_positions([]),
@@ -269,9 +358,20 @@ def parse_accounting_snapshot_zip(raw: bytes, *, max_rows_per_file: int = MAX_AC
         ]
         if position_rows:
             warnings.append("No positions-named CSV was found; position values were inferred from available numeric columns.")
-    status = "ok" if csv_files else "empty"
+    status = ("ok" if complete else "partial") if csv_files else "empty"
     return {
         "status": status,
+        "complete": complete and bool(csv_files),
+        "expanded_bytes_read": MAX_ACCOUNTING_EXPANDED_BYTES - budget["remaining"],
+        "limits": {
+            "archive_bytes": MAX_ACCOUNTING_ARCHIVE_BYTES,
+            "member_bytes": MAX_ACCOUNTING_MEMBER_BYTES,
+            "expanded_bytes": MAX_ACCOUNTING_EXPANDED_BYTES,
+            "rows_per_file": row_limit,
+            "total_rows": MAX_ACCOUNTING_TOTAL_ROWS,
+            "columns": MAX_ACCOUNTING_COLUMNS,
+            "record_chars": MAX_ACCOUNTING_RECORD_CHARS,
+        },
         "files": csv_files,
         "equity": _summarize_equity(equity_rows),
         "positions": _summarize_positions(position_rows),
@@ -289,16 +389,6 @@ def download_and_parse_accounting_snapshot(wallet: str, *, timeout: float = 30.0
     return payload
 
 
-def _pct_from_drawdown(mdd_usd: Any, peak_value: Any, equity_base_usd: Any) -> Optional[float]:
-    drawdown = _safe_float(mdd_usd, None)
-    peak = _safe_float(peak_value, 0.0)
-    base = _safe_float(equity_base_usd, None)
-    if drawdown is None or base is None or base <= 0:
-        return None
-    denominator = base + float(peak or 0.0)
-    return drawdown / denominator * 100.0 if denominator > 0 else None
-
-
 def reconcile_mdd_payload_with_accounting(payload: Mapping[str, Any], snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     result = dict(payload)
     equity = snapshot.get("equity") if isinstance(snapshot.get("equity"), Mapping) else {}
@@ -306,12 +396,20 @@ def reconcile_mdd_payload_with_accounting(payload: Mapping[str, Any], snapshot: 
     base = _safe_float(equity.get("base_equity_usd"), None)
     previous_base = result.get("equity_base_usd")
     previous_pct = result.get("mdd_pct")
-    if base and base > 0:
-        result["equity_base_usd"] = base
-        result["equity_base_source"] = "accounting_snapshot_max_equity"
-        recalculated_pct = _pct_from_drawdown(result.get("mdd_usd"), result.get("peak_value"), base)
-        if recalculated_pct is not None:
-            result["mdd_pct"] = recalculated_pct
+    percentage_recalculated = False
+    if base and base > 0 and snapshot.get("complete", True) and snapshot.get("status", "ok") == "ok":
+        episodes = result.get("drawdown_episodes")
+        points = result.get("points")
+        recalculated = None
+        if isinstance(episodes, list) and result.get("mdd_available"):
+            recalculated = percentage_drawdown(episodes, base)
+        elif result.get("mdd_available") is not False and isinstance(points, list) and points and result.get("points_total") == len(points):
+            recalculated = max_drawdown(points, base)
+        if recalculated is not None:
+            result.update(recalculated)
+            result["equity_base_usd"] = base
+            result["equity_base_source"] = "accounting_snapshot_max_equity"
+            percentage_recalculated = True
     open_current_value = _safe_float(result.get("open_current_value"), None)
     snapshot_current_value = _safe_float(positions.get("current_value_usd"), None)
     current_delta = (
@@ -338,6 +436,7 @@ def reconcile_mdd_payload_with_accounting(payload: Mapping[str, Any], snapshot: 
     ]
     result["accounting_snapshot"] = {
         "status": snapshot.get("status", "unknown"),
+        "complete": snapshot.get("complete"),
         "files": list(snapshot.get("files", [])) if isinstance(snapshot.get("files"), list) else [],
         "warnings": list(snapshot.get("warnings", [])) if isinstance(snapshot.get("warnings"), list) else [],
         "equity": {
@@ -355,7 +454,11 @@ def reconcile_mdd_payload_with_accounting(payload: Mapping[str, Any], snapshot: 
             "status": "reconciled_with_gaps" if material_gaps else "reconciled",
             "previous_equity_base_usd": previous_base,
             "previous_mdd_pct": previous_pct,
-            "mdd_pct_uses_accounting_base": bool(base and base > 0),
+            "mdd_pct_uses_accounting_base": percentage_recalculated,
+            "percentage_recalculation_status": (
+                "recalculated_from_all_observed_drawdown_episodes" if percentage_recalculated
+                else "unavailable_without_complete_snapshot_positive_base_and_complete_curve_summary"
+            ),
             "open_current_value_delta_usd": current_delta,
             "realized_pnl_delta_usd": realized_delta,
             "cash_flow_gap_usd": cash_flows.get("cash_flow_gap_usd"),

@@ -165,7 +165,7 @@ os._exit(17)
             store.connection.execute(
                 "INSERT INTO rows(page_offset, page_index, rank, display_name, wallet, raw_json) VALUES (1, 0, 2, 'duplicate', ' 0xAAA ', '{}')"
             )
-            store.connection.execute("INSERT INTO pages VALUES (1, 1, 1, 'legacy', 1)")
+            store.connection.execute("INSERT INTO pages(page_offset, page_limit, row_count, fingerprint, saved_at) VALUES (1, 1, 1, 'legacy', 1)")
             store.connection.commit()
             store.close()
             for _ in range(2):

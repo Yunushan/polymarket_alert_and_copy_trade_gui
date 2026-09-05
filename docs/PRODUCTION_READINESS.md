@@ -7,14 +7,20 @@ GitHub repository.
 
 ## Improvement Status: 2026-09-05
 
-The independent review of the source tree at `1a4d8c2` assessed deployed-product
-readiness at **62/100**. That assessment is separate from the formal checklist
-below. Subsequent local improvements must not be treated as a new production
-certification or as evidence of a successful release/deployment.
+The latest independent review assessed the preceding working tree at **70/100**,
+with a passing local gate and **83/100 formal checklist**. It reproduced a
+cache read-error defect: valid data could be quarantined and replaced by an
+empty active cache after a temporary read failure. That defect is now fixed
+and regression-tested, without automatically awarding more readiness points.
+An earlier 68/100 review had a failing local gate (49/100 formal checklist)
+before replay-test and Windows replacement integration. None of these results
+is production certification or acceptance of protected main or published artifacts.
 
 The current working-tree scan fixes have passed
-`python -B verify.py --frontend-build --frontend-live-smoke`: **1,214 tests ran,
-7 skipped**, with 73% overall and 75% backend branch-enabled coverage. Verified
+`python -B verify.py --frontend-build --frontend-live-smoke`: **1,346 tests ran,
+7 skipped on Windows**, with 73% overall and 76% backend combined
+statement/branch coverage. Overall statement coverage is 78% and branch coverage
+is 60%; the combined percentage is not the percentage of branches exercised. Verified
 changes include:
 
 - MDD resume binds completed enrichment to normalized calculation options and
@@ -36,6 +42,54 @@ changes include:
   replacement. Database/journal/lock paths cannot be used as export targets.
 - Active-scan backup/restore tests omit lock/journal sidecars and restore the
   committed database. Failed scan resets roll back rather than erasing state.
+- Dollar and percentage MDD have independent maxima/provenance, include the
+  initial observed-window loss, and return unknown risk for empty PnL histories.
+  A deterministic all-prior-points reference checks 150 random curves at three
+  equity bases. API/CLI tests reject the reproduced 25%-drawdown wallet.
+- Calculation version 5 invalidates old durable enrichment. Accounting rebasing
+  uses all observed drawdown episodes even when displayed points are truncated;
+  legacy audit exports remain available but explicitly marked non-current.
+- Process MDD input/history caches use thread-safe TTL/LRU eviction, entry and
+  serialized-data byte budgets, oversized-entry rejection and copy isolation.
+- Serial/concurrent scans stop at the documented public leaderboard offset
+  boundary without changing unlimited settings. Stable wallet membership detects
+  repeats despite changed ranks/PnL/order and survives SQLite resume/migration.
+- Replay computes all fetched trade/mark events before retaining bounded output;
+  missing inventory/history cannot qualify through a diagnostic fast fallback.
+- Accounting imports bound compressed/expanded bytes, member/file counts, rows,
+  columns and record length. Partial snapshots cannot rebase percentage risk.
+- PnL/volume replaces investment-ROI wording in controls; legacy `roi_pct` keys
+  remain compatible, with explicit formula metadata in API/CSV/JSON results.
+- Per-source history limits/windows persist through caches, SQLite and exports.
+  Reaching a source cap yields unknown top-level risk, including after accounting
+  reconciliation or resume. Exhausted public windows remain account-unverified.
+- Frontend coverage tables expose source counts, limits and observed timestamps;
+  component tests cover capped, legacy, malformed-timestamp and invalid-source
+  diagnostic states, including escaped labels and rejected-row counts.
+- Required PnL/time fields, optional financial values, duplicate position
+  observations and ambiguous same-timestamp ordering are validated before risk
+  is calculated. Invalid source history returns unknown MDD and cannot qualify
+  via API/CLI/desktop exports, accounting rebasing or resumed SQLite results.
+- Invalid source history stops mark replay before price requests; malformed or
+  conflicting price points cannot be silently dropped to keep a valid subset.
+- Atomic config/cache/evidence/export publication retries only specific Windows
+  replacement errors, at most ten attempts with under 1.5 seconds total sleep.
+  Persistent denial still raises and preserves the prior file. Tests exercise
+  both injected failures and a real Windows reader without delete sharing.
+- Desktop CSV export now preserves its previous complete output if a later row
+  cannot be serialized, and retains unknown-risk diagnostics as JSON columns.
+- Cache reads distinguish missing files from I/O failures and malformed bytes.
+  Read-denied stores are not quarantined, overwritten, or reported as empty.
+  Genuine corruption is preserved before recovery; failed quarantine or sync
+  is reported. API/CLI regression tests verify explicit errors and recovery
+  without losing artifacts or overwriting previous exports.
+
+The frontend has 12 focused tests. Current synthetic capped/invalid-history
+browser checks passed in headless Edge at 1440x1000 and 390x844; those checks do
+not establish physical mobile-device or full cross-browser acceptance. The
+concurrent Windows report-writer test also passed ten consecutive reruns after
+the bounded retry change; this is evidence of improvement, not a claim that
+every possible filesystem failure is eliminated.
 
 A synthetic offline SQLite check ingested 100,000 rows containing 10,000
 duplicates in 2.324 seconds on the audit machine and verified 90,000 distinct
@@ -44,7 +98,7 @@ eight-million-wallet performance, production-host resource use, or durability
 under machine failure.
 
 Remaining acceptance work includes financial metric/history completeness,
-reference datasets and changing-page pagination boundaries; a successful
+independent reference datasets and full-account source coverage; a successful
 current-version release and installation of its actual
 artifacts; production-host restore/rollback and sustained-load exercises;
 broader UI/native browser acceptance; and explicitly authorized credentialed
@@ -90,23 +144,24 @@ check does not receive local test or security points.
 
 ## Score Model (Formal Scorer)
 
-| Area | Points | Current verified | Remaining proof required |
+| Area | Points | Local checklist earned | Remaining proof required |
 | --- | ---: | ---: | --- |
 | Architecture and scope | 18 | 18 | None beyond the repository contract |
-| Tests and correctness | 18 | 18 | None |
+| Tests and correctness | 18 | 18 | No additional formal points; independent financial correctness and user-workflow acceptance remain required |
 | Security and safety | 17 | 16 | Dispatch the implemented governance collector on a clean protected-main revision with the required admin-read token and supply its exact attested artifact |
 | CI/CD and release | 17 | 14 | Exact live release-environment evidence plus a fresh GitHub-attested release report |
-| Operations and recovery | 15 | 12 | Run and supply cryptographically attested real-host deployment evidence for `v1.0.11`; the protected-main workflow is implemented but has not been dispatched |
+| Operations and recovery | 15 | 12 | Run and supply cryptographically attested real-host deployment evidence for the final current-version release; none was supplied to this local assessment |
 | Platform evidence | 10 | 5 | Dispatch the implemented platform collector against a successful exact-revision CI run and supply both exact attested artifacts |
 | Live acceptance | 5 | 0 | Reachable public endpoints plus the implemented credentialed/funded collectors' exact attested artifacts; funded execution also requires deliberate promotion of the offline-tested V2 mutation gate |
 
-The latest completed full local audit on 2026-08-28 is **83/100 (not ready)** when no external
+The latest completed full local audit on 2026-09-05 is **83/100 (not ready)** when no external
 evidence manifests are supplied. Local verification covers the adapter catalog
 (68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
 files, documentation, workflows, secret hygiene, frontend build/browser smoke,
-and packaging checks. The current verifier passed 1,188 tests (7 intentionally
-skipped on Windows), achieved 73% all-source and 75% backend branch coverage,
-satisfied the 65% overall and 74% backend floors, and passed Ruff. Counts are reported
+and packaging checks. The current verifier ran 1,346 tests (1,339 passed and 7
+intentionally skipped on Windows), achieved 73% all-source and 76% backend
+combined statement/branch coverage, satisfied the 65% overall and 74% backend
+combined coverage floors, and passed Ruff. Counts are reported
 from this run rather than carried forward from an older artifact.
 The canonical capability snapshot is 55 price/paper adapters, 33 orderbook
 adapters, 35 trade-history adapters, 39 candle-history adapters, and 23 guarded
@@ -132,21 +187,23 @@ evidence, not a production certification.
 
 ## Independent Production Assessment
 
-The stricter deployment-oriented assessment is **57/100 — NO-GO**. It discounts
+The latest deployment-oriented assessment was **70/100 - not ready**. It discounts
 repository-design points that the formal scorer awards before an exact clean
 revision, signed release, real production host, recovery exercise, and live
-venue behavior are proven.
+venue behavior are proven. The table records that review before the cache
+recovery fix above; a new independent score requires another review of the
+final revision and its acceptance evidence.
 
 | Area | Independent score | Maximum | Main deduction |
 | --- | ---: | ---: | --- |
-| Architecture and capability honesty | 12 | 18 | Monolithic single-node design; Polymarket CLOB V2 mutations are unavailable |
-| Correctness and testing | 14 | 18 | Strong offline/local coverage and a passing hosted matrix, but frontend behavioral coverage and real production-host behavior remain unproven |
-| Security and safety | 11 | 17 | Good fail-closed controls; production secrets/environment, signed-commit enforcement, and independent review are absent |
-| CI/CD and release | 9 | 17 | No published `v1.0.11`; signing/release-approval evidence is incomplete |
-| Operations and recovery | 6 | 15 | Evidence collectors now require independent probing and drills, but no real deployment, restore, off-host backup, or rollback proof exists |
-| Platform evidence | 5 | 10 | Repository matrix exists, but full attested platform evidence is absent |
-| Live acceptance | 0 | 5 | Public probes did not establish reachability; credentialed/funded acceptance is absent |
-| **Total** | **57** | **100** | **Production launch is not approved** |
+| Architecture and correctness | 16 | 18 | Financial capital/history definitions and full-account discovery still need independent validation |
+| Tests and validation | 16 | 18 | The reviewed snapshot passed local verification; workflow and real-host acceptance were incomplete |
+| Security and safeguards | 14 | 17 | Fail-closed controls and bounded parsing; actual production secrets, egress and governance evidence remain unverified |
+| CI/CD and release | 8 | 17 | Current local fixes need exact-revision CI and a published, install-tested current-version release |
+| Operations and recovery | 10 | 15 | Durable state and recovery tooling; actual-host restore, rollback, sustained load and alert delivery remain unproven |
+| Platform evidence | 6 | 10 | Hosted matrix passes for the pushed head, but current native packages and real client-browser acceptance are incomplete |
+| Live acceptance | 0 | 5 | Exact-revision authenticated/funded acceptance is absent; Polymarket mutations remain disabled |
+| **Total** | **70** | **100** | **Historical assessment; unattended real-money production is not approved** |
 
 Hand-authored schema-v1 repository-settings, release-environment, platform-CI,
 platform, credentialed, and funded manifests are diagnostic inputs only. They
@@ -154,7 +211,7 @@ never award points. Schema-v2 governance, platform, and Polymarket collectors
 now provide a structural path to the full formal 100, but every external point
 remains withheld until a clean protected-main revision produces the exact
 successful hosted workflow/job, artifact, and exact-byte attestation required
-for that evidence type. This is separate from the independent 57/100 assessment. A
+for that evidence type. This is separate from the independent assessment above. A
 published stable release also remains unscored without fresh exact attested
 release evidence. The independent release-evidence reconciliation workflow
 re-drafts such a release after its Release run completes, including failed or
@@ -167,7 +224,7 @@ recollected for every final commit; it does not transfer merely because an old
 manifest or workflow run exists.
 
 The local pass is not a claim that every production failure mode has been
-eliminated. The independent production assessment is **57/100 (NO-GO)** because
+eliminated. The independent production assessment remains below the checklist because
 several formal categories award repository design points before real deployment
 behavior is proven. The hardening tree now pins
 durable stores below `/var/lib/market-sentinel`, verifies backup coverage,
@@ -179,7 +236,7 @@ persists copy-activity dispatch intent before a live venue call.
 
 The remaining risks are evidence and deployment boundaries. Every candidate
 revision must pass exact-revision CI and security before its external points are
-re-awarded; version `1.0.11` has no published, signed release and the
+re-awarded; source version `1.0.12` has no published, installed release proof and the
 previous release attempt failed its Windows-signing policy; no real host has
 proved deployment, restore, backup age, monitoring, or rollback; no current
 platform matrix evidence is bound to this tree; and public, credentialed, and
@@ -188,15 +245,17 @@ relayer submissions, and funded verification are additionally disabled until a
 durable external recovery journal and exact credentialed/funded acceptance make
 the reviewed V2-only implementation safe to promote.
 The architecture is still a monolithic,
-single-node application. DNS validation also cannot eliminate the
-validation-to-connect race in the current HTTP/WebSocket libraries, so the
-production host must enforce allow-listed egress with a firewall or controlled
-forward proxy. A venue copy dispatch has no end-to-end venue idempotency token:
+single-node application. Direct HTTP connections in the shared adapter runtime
+pin validated destination addresses, but the separate Polymarket HTTP client
+and proxy/WebSocket paths do not establish that same uniform boundary. The
+production host must enforce allow-listed connect-time egress with a firewall
+or controlled forward proxy. A venue copy dispatch has no end-to-end venue idempotency token:
 ambiguous outcomes deliberately require manual venue-history reconciliation,
 and the in-memory conflict cache is not a global durable deduplication system.
-Branch protection currently requires one approving review, dismisses stale
-approvals, requires approval after the last push, enforces the rules for
-administrators, and does not require signed commits. Signed-commit enforcement
+The historical governance snapshot required one approving review, dismissed stale
+approvals, required approval after the last push, enforced the rules for
+administrators, and did not require signed commits. Revalidate current settings
+before using that snapshot. Signed-commit enforcement
 and independent review evidence remain separate controls before external
 evidence can support a 100/100 decision.
 

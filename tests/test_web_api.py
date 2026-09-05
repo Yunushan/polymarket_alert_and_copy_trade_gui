@@ -4903,6 +4903,52 @@ class WebApiTests(unittest.TestCase):
         self.assertIn(fresh["key"], deleted["deleted_keys"])
         self.assertEqual(deleted["counts"]["entries"], 0)
 
+    def test_polymarket_cache_read_denial_is_an_error_and_preserves_cached_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            cache_path = root / "analytics-cache.json"
+            frontend_dir.mkdir()
+            save_config(AppConfig(), config_path)
+            with patch.dict(os.environ, {"POLYMARKET_ANALYTICS_CACHE_PATH": str(cache_path)}):
+                metadata = store_analytics_artifact(POLYMARKET_MDD_AUDIT_KIND, {"wallet": WALLET}, {"wallet": WALLET})
+                original_read = Path.read_bytes
+                previous_bytes = original_read(cache_path)
+
+                def deny_read(path: Path) -> bytes:
+                    if path == cache_path:
+                        raise PermissionError("private filesystem detail")
+                    return original_read(path)
+
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    routes = (
+                        ("GET", "/api/polymarket/users/mdd/cache", None),
+                        ("GET", "/api/polymarket/users/mdd/cache/health", None),
+                        ("GET", f"/api/polymarket/users/mdd/export.json?key={metadata['key']}", None),
+                        ("POST", "/api/polymarket/users/mdd/cache/purge", {"all": True}),
+                        ("DELETE", f"/api/polymarket/users/mdd/cache/{metadata['key']}", None),
+                    )
+                    with patch.object(Path, "read_bytes", deny_read):
+                        for method, route, request in routes:
+                            with self.subTest(method=method, route=route):
+                                status, payload = self._request_json(base_url, route, method=method, payload=request)
+                                self.assertEqual(status, 500)
+                                self.assertEqual(payload["error"]["code"], "internal_error")
+                                self.assertNotIn("private filesystem detail", json.dumps(payload))
+                                self.assertEqual(original_read(cache_path), previous_bytes)
+                    status, listing = self._request_json(base_url, "/api/polymarket/users/mdd/cache")
+                    self.assertEqual(status, 200)
+                    self.assertEqual(listing["counts"]["entries"], 1)
+                    self.assertEqual(listing["entries"][0]["key"], metadata["key"])
+                    self.assertEqual(cache_path.read_bytes(), previous_bytes)
+                    self.assertFalse(list(root.glob("analytics-cache.json.corrupt-*")))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
     def test_polymarket_user_search_payload_returns_profile_rows(self) -> None:
         with patch(
             "web_api.gamma.search_profiles",
