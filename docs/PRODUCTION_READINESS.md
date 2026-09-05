@@ -7,7 +7,29 @@ GitHub repository.
 
 ## Improvement Status: 2026-09-05
 
-The latest independent review assessed the preceding working tree at **70/100**,
+The subsequent clean-commit review of `b068de1` scored **73/100**, with the
+**83/100 formal local checklist** and passing exact-commit CI/Security. It
+credited the cache correction and hosted checks but reproduced stale DNS
+address retention in shared connection pools. This is still an assessment of
+an unmerged branch, not approval of a production release or funded execution.
+
+The following transport hardening now keys pools by both their normal TLS/origin
+configuration and their validated destination addresses, and routes direct
+Polymarket HTTP through the shared managed session. New regressions cover DNS
+changes and rebinding, TLS hostname/certificate verification, redirect rejection
+before body consumption, response/session cleanup, and mutation retry limits.
+On this Windows audit machine, Avast replaces the ephemeral local TLS server's
+certificate with an untrusted interception certificate. The client rejects it;
+the Windows candidate run has two errors among 1,364 cases (seven skipped).
+Independent Ubuntu WSL execution passes all 12 HTTP transport tests, including
+positive TLS, untrusted/wrong-host certificates and DNS rotation. Broad WSL
+discovery passes 1,232 cases but has three module-import errors because Tkinter
+is absent, plus two skips; it is not a full-suite pass. The Linux CLI starts
+without Tkinter. Verification has not been disabled and TLS tests are not skipped.
+Do not carry the baseline local pass or external evidence forward to this
+candidate merely because the earlier commit passed.
+
+An earlier independent review assessed the preceding working tree at **70/100**,
 with a passing local gate and **83/100 formal checklist**. It reproduced a
 cache read-error defect: valid data could be quarantined and replaced by an
 empty active cache after a temporary read failure. That defect is now fixed
@@ -16,7 +38,7 @@ An earlier 68/100 review had a failing local gate (49/100 formal checklist)
 before replay-test and Windows replacement integration. None of these results
 is production certification or acceptance of protected main or published artifacts.
 
-The current working-tree scan fixes have passed
+The baseline scan/cache fixes at `b068de1` passed
 `python -B verify.py --frontend-build --frontend-live-smoke`: **1,346 tests ran,
 7 skipped on Windows**, with 73% overall and 76% backend combined
 statement/branch coverage. Overall statement coverage is 78% and branch coverage
@@ -96,6 +118,14 @@ duplicates in 2.324 seconds on the audit machine and verified 90,000 distinct
 wallets and next offset 100,000. This does not measure network/MDD throughput,
 eight-million-wallet performance, production-host resource use, or durability
 under machine failure.
+
+The latest candidate review remains **73/100**. It credits the tested direct
+transport improvements but reproduced a separate overall-deadline gap: a
+loopback server sending one byte every 0.1 seconds completed an 11-byte response
+in 1.094 seconds despite a 0.25-second socket timeout. Requests' inactivity
+timeout is not a wall-clock deadline. HTTP body reads/retries and scan batch
+waiting still require end-to-end deadline and cancellation handling; byte caps
+alone do not bound elapsed time.
 
 Remaining acceptance work includes financial metric/history completeness,
 independent reference datasets and full-account source coverage; a successful
@@ -187,23 +217,24 @@ evidence, not a production certification.
 
 ## Independent Production Assessment
 
-The latest deployment-oriented assessment was **70/100 - not ready**. It discounts
+The latest deployment-oriented assessment was **73/100 - not ready**. It discounts
 repository-design points that the formal scorer awards before an exact clean
 revision, signed release, real production host, recovery exercise, and live
-venue behavior are proven. The table records that review before the cache
-recovery fix above; a new independent score requires another review of the
-final revision and its acceptance evidence.
+venue behavior are proven. This candidate includes uncommitted direct-transport
+fixes; its baseline CI pass cannot stand in for exact-candidate hosted checks.
+The table includes the separately reproduced overall-deadline gap and must be
+reassessed against the final revision and its acceptance evidence.
 
 | Area | Independent score | Maximum | Main deduction |
 | --- | ---: | ---: | --- |
 | Architecture and correctness | 16 | 18 | Financial capital/history definitions and full-account discovery still need independent validation |
 | Tests and validation | 16 | 18 | The reviewed snapshot passed local verification; workflow and real-host acceptance were incomplete |
-| Security and safeguards | 14 | 17 | Fail-closed controls and bounded parsing; actual production secrets, egress and governance evidence remain unverified |
-| CI/CD and release | 8 | 17 | Current local fixes need exact-revision CI and a published, install-tested current-version release |
-| Operations and recovery | 10 | 15 | Durable state and recovery tooling; actual-host restore, rollback, sustained load and alert delivery remain unproven |
+| Security and safeguards | 15 | 17 | Direct pinning and TLS tests improved; proxy/WebSocket egress and actual production controls remain unverified |
+| CI/CD and release | 10 | 17 | Baseline CI is green; current fixes need exact-revision CI and a published, install-tested current-version release |
+| Operations and recovery | 10 | 15 | Overall response deadlines/cancellation and actual-host restore, rollback, sustained load and alert delivery remain unproven |
 | Platform evidence | 6 | 10 | Hosted matrix passes for the pushed head, but current native packages and real client-browser acceptance are incomplete |
 | Live acceptance | 0 | 5 | Exact-revision authenticated/funded acceptance is absent; Polymarket mutations remain disabled |
-| **Total** | **70** | **100** | **Historical assessment; unattended real-money production is not approved** |
+| **Total** | **73** | **100** | **Reviewed candidate; unattended real-money production is not approved** |
 
 Hand-authored schema-v1 repository-settings, release-environment, platform-CI,
 platform, credentialed, and funded manifests are diagnostic inputs only. They
@@ -246,8 +277,8 @@ durable external recovery journal and exact credentialed/funded acceptance make
 the reviewed V2-only implementation safe to promote.
 The architecture is still a monolithic,
 single-node application. Direct HTTP connections in the shared adapter runtime
-pin validated destination addresses, but the separate Polymarket HTTP client
-and proxy/WebSocket paths do not establish that same uniform boundary. The
+and Polymarket HTTP client pin validated destination addresses, but
+proxy/WebSocket paths do not establish that same uniform boundary. The
 production host must enforce allow-listed connect-time egress with a firewall
 or controlled forward proxy. A venue copy dispatch has no end-to-end venue idempotency token:
 ambiguous outcomes deliberately require manual venue-history reconciliation,

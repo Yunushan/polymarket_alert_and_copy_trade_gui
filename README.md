@@ -830,11 +830,12 @@ for the 100-point model and reviewed evidence-manifest contract. A green CI
 matrix is not treated as proof that an external runner or production host has
 completed its required checks.
 
-Latest local verification (2026-09-05): **1,346 tests ran, seven skipped on
+Baseline Windows verification (`b068de1`, 2026-09-05): **1,346 tests ran, seven skipped on
 Windows**, and the repeatable local checklist reports **83/100, not_ready**.
-The latest independent review assessed the preceding working tree at **70/100**.
-Its cache read-error defect is now fixed and regression-tested; that does not
-automatically raise the production score or establish external acceptance.
+The subsequent independent review of that clean commit scored **73/100**,
+crediting its cache recovery correction and passing hosted CI/Security.
+Follow-on transport hardening and its real-TLS acceptance are tracked in the
+readiness document; the baseline pass is not proof of the changed candidate.
 These are local checks, not acceptance of the published release or production
 host. Schema-v2 hosted collectors provide a structural path
 to all 100 formal points, but none of their external points is awarded without

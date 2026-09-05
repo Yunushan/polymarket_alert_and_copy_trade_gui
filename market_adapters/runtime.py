@@ -85,10 +85,9 @@ class _PinnedConnectionMixin:
         if not addresses:
             return super()._new_conn()
 
-        # urllib3 keeps the origin hostname in ``host``/``server_hostname``
-        # for certificate validation, while ``_dns_host`` is the value passed
-        # to socket.create_connection.  Temporarily replacing only the latter
-        # pins the socket without changing HTTP Host or TLS SNI.
+        # urllib3's ``host`` property reads ``_dns_host``. Restore it before
+        # connect() performs TLS verification and before HTTP headers are sent;
+        # only the raw socket connection uses the validated numeric address.
         original_dns_host = getattr(self, "_dns_host", getattr(self, "host", ""))
         last_error: Optional[BaseException] = None
         try:
@@ -132,14 +131,7 @@ class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
 
 
 class _PinnedPoolManager(urllib3.PoolManager):
-    """Pool manager that passes request pins into newly-created pools.
-
-    ``pinned_addresses`` is transport metadata, not part of urllib3's
-    ``PoolKey``.  Removing it only while constructing the key avoids a
-    version-dependent ``PoolKey`` failure; the first validated address set for
-    an origin is retained by that origin's pool.  A later request is still
-    validated immediately before dispatch, so a private rebind fails closed.
-    """
+    """Isolate pools by both urllib3's TLS/origin key and validated addresses."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -151,10 +143,13 @@ class _PinnedPoolManager(urllib3.PoolManager):
 
     def connection_from_context(self, request_context: dict[str, Any]):
         context = dict(request_context)
-        pinned_addresses = context.pop("pinned_addresses", ())
+        pinned_addresses = tuple(sorted({str(address) for address in context.pop("pinned_addresses", ())}))
         pool_key = self.key_fn_by_scheme[context["scheme"].lower()](context)
         context["pinned_addresses"] = pinned_addresses
-        return self.connection_from_pool_key(pool_key, request_context=context)
+        # Retain every standard TLS key field without passing our metadata to
+        # urllib3's version-specific PoolKey constructor. Its bounded LRU now
+        # evicts obsolete address sets instead of reusing a stale pinned pool.
+        return self.connection_from_pool_key((pool_key, pinned_addresses), request_context=context)
 
 
 class _PinnedHTTPAdapter(HTTPAdapter):
@@ -176,7 +171,14 @@ class _PinnedHTTPAdapter(HTTPAdapter):
         pins = tuple(getattr(request, "_market_sentinel_pinned_addresses", ()) or ())
         self._market_sentinel_active_pins.addresses = pins
         try:
-            return super().send(request, **kwargs)
+            response = super().send(request, **kwargs)
+            # Requests prepares response.next even with allow_redirects=False,
+            # which can eagerly read an unbounded redirect body. Reject it
+            # before it reaches Session.send's redirect preparation.
+            if 300 <= response.status_code < 400:
+                response.close()
+                raise requests.TooManyRedirects("Outbound redirects are disabled.", response=response)
+            return response
         finally:
             try:
                 del self._market_sentinel_active_pins.addresses
@@ -267,6 +269,11 @@ class _ValidatingSession(requests.Session):
         return response
 
 
+def create_managed_http_session(*, outbound_policy: Optional[OutboundEndpointPolicy] = None) -> requests.Session:
+    """Create an owned session with validation, direct socket pins and no redirects."""
+    return _ValidatingSession(outbound_policy or OutboundEndpointPolicy.from_environment())
+
+
 class AdapterRuntime:
     """Shared runtime helpers for market adapters.
 
@@ -289,7 +296,7 @@ class AdapterRuntime:
         self.market_id = str(market_id or "").strip().lower()
         self.config: Dict[str, Any] = dict(config or {})
         self.outbound_policy = outbound_policy or OutboundEndpointPolicy.from_environment()
-        self.session = session or _ValidatingSession(self.outbound_policy)
+        self.session = session or create_managed_http_session(outbound_policy=self.outbound_policy)
         self._resolve_outbound_addresses_override = resolve_outbound_addresses
         self.user_agent = str(self.config.get("user_agent") or user_agent)
         self.timeout_seconds = float(

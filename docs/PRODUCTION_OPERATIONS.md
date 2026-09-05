@@ -92,9 +92,13 @@ URL validation resolves a configured hostname immediately before a managed
 HTTP or WebSocket request and rejects every non-global answer unless the exact
 origin is explicitly allowed. The shared adapter runtime pins those addresses
 into direct HTTP connections while preserving the origin hostname for TLS.
-The separate Polymarket HTTP client still calls plain `requests.request` after
-validation, and proxy/WebSocket paths need their own connect-time enforcement.
-Do not infer uniform pinning across all transports from the adapter runtime.
+The Polymarket HTTP client uses the same managed direct transport, with one
+owned session spanning each bounded retry/body-read operation. Pools include
+the validated address set in their identity, so a DNS change cannot reuse a
+pool pinned to retired addresses. Redirect responses are closed before
+Requests can eagerly consume their bodies while preparing a next request.
+Proxy/WebSocket paths still need their own connect-time enforcement; do not
+infer uniform pinning across all transports from direct HTTP coverage.
 TLS hostname verification, disabled redirects, and immutable endpoint settings
 reduce exposure but do not remove every validation-to-connect race.
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TypeVar
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, TypeVar
 
 import requests
 
@@ -194,6 +195,51 @@ def _request(
     retry_policy: RetryPolicy,
     json_fallback: bool = False,
 ) -> bytes:
+    with _request_transport() as transport:
+        return _request_with_transport(
+            endpoint,
+            transport=transport,
+            path=path,
+            params=params,
+            payload=payload,
+            headers=headers,
+            timeout=timeout,
+            retry_policy=retry_policy,
+            json_fallback=json_fallback,
+        )
+
+
+@contextmanager
+def _request_transport() -> Iterator[Callable[..., Any]]:
+    # Lazy imports avoid the adapter registry's import cycle. One owned session
+    # spans retries and streamed body reads, and is closed on every exit path.
+    from market_adapters.errors import MarketConfigurationError
+    from market_adapters.runtime import create_managed_http_session
+
+    try:
+        if requests.request is not _ORIGINAL_REQUEST:
+            # Preserve the injected offline transport contract; endpoint syntax
+            # and literal-address validation still apply in this path.
+            yield requests.request
+        else:
+            with create_managed_http_session() as session:
+                yield session.request
+    except MarketConfigurationError as exc:
+        raise PolymarketValidationError(str(exc)) from exc
+
+
+def _request_with_transport(
+    endpoint: PolymarketEndpoint,
+    *,
+    transport: Callable[..., Any],
+    path: Optional[str],
+    params: Optional[Mapping[str, Any]],
+    payload: Optional[Any],
+    headers: Optional[Mapping[str, str]],
+    timeout: float,
+    retry_policy: RetryPolicy,
+    json_fallback: bool,
+) -> bytes:
     method = endpoint.method.upper()
     url = _validated_endpoint_url(endpoint, path)
     request_headers = dict(headers or {})
@@ -206,7 +252,7 @@ def _request(
 
     for attempt in range(1, attempts + 1):
         try:
-            response = requests.request(
+            response = transport(
                 method,
                 url,
                 params=compact_params(params or {}),
@@ -216,6 +262,16 @@ def _request(
                 allow_redirects=False,
                 stream=True,
             )
+        except requests.TooManyRedirects as exc:
+            # The managed session already closed the redirect response. Never
+            # retry or follow it, including when it came from a safe GET.
+            raise PolymarketHTTPError(
+                f"{endpoint.service} {method} {url} returned a redirect, but redirects are disabled.",
+                service=endpoint.service,
+                method=method,
+                url=url,
+                status_code=exc.response.status_code if exc.response is not None else None,
+            ) from exc
         except requests.RequestException as exc:
             last_exc = exc
             if attempt < attempts:
@@ -345,7 +401,9 @@ def _validated_endpoint_url(endpoint: PolymarketEndpoint, path: Optional[str]) -
         return validate_outbound_url(
             url,
             setting_key=f"Polymarket {endpoint.service} endpoint",
-            resolve_addresses=requests.request is _ORIGINAL_REQUEST,
+            # Managed sessions validate DNS again for each attempt and carry
+            # that address set through to the socket, including after prepare.
+            resolve_addresses=False,
         )
     except MarketConfigurationError as exc:
         raise PolymarketValidationError(str(exc)) from exc
