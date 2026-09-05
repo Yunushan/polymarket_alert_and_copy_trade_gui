@@ -439,6 +439,44 @@ deployment resource root; this keeps the custom static build option useful
 without allowing an arbitrary path to become an HTTP file root. `health`,
 `state`, and `doctor` accept the same safe deployment-relative directory.
 
+Leaderboard results keep the first observation of each normalized wallet,
+before local filtering or MDD calculation. JSON counts distinguish `scanned`
+upstream rows, `unique_wallets`, and `duplicate_rows`; SQLite status `rows`
+is the retained result-row count. Missing-wallet rows remain separate and do
+not count as unique wallets. Pagination offsets and `--scanned` budgets use
+upstream row counts, so deduplication cannot rewind or extend a finite scan.
+Older SQLite databases are migrated transactionally when opened by a scan
+writer, retaining the earliest page/index observation and original page counts.
+Status/export open in read-only mode and refuse a legacy schema until a scan
+has resumed once to migrate it.
+
+Saved MDD calculations are bound to their normalized calculation options and
+algorithm version. On `--resume`, changing mode, history limits, equity basis,
+replay settings, or accounting options clears only MDD enrichment and recomputes
+the selected candidates; downloaded leaderboard pages are retained. Legacy
+MDD results without a settings signature are also recomputed. Changing result
+filters, MDD scan budget, or cache TTL does not invalidate matching calculations.
+JSON scan/export output and SQLite status include `mdd_signature` for provenance.
+An unchanged resume deliberately retains its previous observations; start a new
+scan without `--resume` when a fresh leaderboard and current MDD are required.
+
+Only one scan writer may own a state database at a time. A second scan fails
+before modifying it; use a different `--state-db` for an independent run.
+Ownership uses an OS-held sibling `.writer.lock` file and is released when the
+process exits, including an abrupt exit. Do not delete or replace that file
+while a scan is running; its presence alone does not mean the process is alive.
+Use local storage with working filesystem locks, and stop older app versions
+before upgrading a scan database. Status and export remain available while
+the writer runs and read one consistent SQLite snapshot.
+
+CSV/JSON file exports use an exclusive temporary file and atomic replacement,
+so an interrupted export leaves the previous destination intact. stdout is
+streamed directly and has no atomic-file guarantee. Export paths cannot target
+the source database, its SQLite journals or writer lock. JSON partial exports
+remain marked `partial=true` at repeated-page boundaries and while required
+MDD is pending or has errors. Backups omit the writer lock and SQLite journals
+and capture the database using SQLite's online backup API.
+
 Keep long-scan state, exports, progress logs, PID files, and the default MDD
 analytics cache under `data/`. The repository ignores those generated
 operational artifacts (`data/*.sqlite*`, `data/*.jsonl`, `data/*.csv`,

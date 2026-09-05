@@ -39,6 +39,7 @@ data/.polymarket_analytics_cache.json.lock
 data/polymarket_analytics_cache.json.corrupt-*
 data/.polymarket_analytics_cache.json.*.tmp
 data/*.sqlite*
+data/.*.writer.lock
 data/*.jsonl
 data/*.csv
 data/*.log

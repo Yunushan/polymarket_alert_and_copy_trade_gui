@@ -5,6 +5,53 @@ readiness score. It reports a score out of 100 and separates repeatable local
 proof from evidence that can only be collected on a real host, account, or
 GitHub repository.
 
+## Improvement Status: 2026-09-05
+
+The independent review of the source tree at `1a4d8c2` assessed deployed-product
+readiness at **62/100**. That assessment is separate from the formal checklist
+below. Subsequent local improvements must not be treated as a new production
+certification or as evidence of a successful release/deployment.
+
+The current working-tree scan fixes have passed
+`python -B verify.py --frontend-build --frontend-live-smoke`: **1,214 tests ran,
+7 skipped**, with 73% overall and 75% backend branch-enabled coverage. Verified
+changes include:
+
+- MDD resume binds completed enrichment to normalized calculation options and
+  algorithm version. Changed settings or legacy results without calculation
+  metadata invalidate only MDD, retaining fetched pages; matching calculations
+  survive filter changes.
+- Web/API and SQLite scan results keep the first observation per normalized
+  wallet before filtering/MDD. Raw scanned rows and unique wallets are counted
+  separately; legacy database migration preserves pagination progress.
+- Page retries preserve existing MDD, and conflicting page rewrites fail closed.
+- Progress logging no longer queries aggregate database counts per MDD result.
+- Regression tests cover mode/equity/history/accounting changes, rollback,
+  legacy migration, overlapping wallets and resumed finite scan budgets.
+- An OS-held writer lock prevents concurrent scan resets/enrichment and is
+  released after abrupt process exit; separate-process tests verify ownership.
+- Status/export use read-only SQLite snapshots. Export metadata and rows stay
+  consistent while the scan writer commits additional pages.
+- Interrupted CSV/JSON file exports preserve the previous file via atomic
+  replacement. Database/journal/lock paths cannot be used as export targets.
+- Active-scan backup/restore tests omit lock/journal sidecars and restore the
+  committed database. Failed scan resets roll back rather than erasing state.
+
+A synthetic offline SQLite check ingested 100,000 rows containing 10,000
+duplicates in 2.324 seconds on the audit machine and verified 90,000 distinct
+wallets and next offset 100,000. This does not measure network/MDD throughput,
+eight-million-wallet performance, production-host resource use, or durability
+under machine failure.
+
+Remaining acceptance work includes financial metric/history completeness,
+reference datasets and changing-page pagination boundaries; a successful
+current-version release and installation of its actual
+artifacts; production-host restore/rollback and sustained-load exercises;
+broader UI/native browser acceptance; and explicitly authorized credentialed
+and funded venue validation. Live mutation gates remain disabled. No readiness
+points should be awarded for external acceptance until its matching evidence
+exists and is verified.
+
 ## Current Check
 
 Run the complete local verification profile:

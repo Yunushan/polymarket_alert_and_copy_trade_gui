@@ -4068,6 +4068,31 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["mdd_available"])
         self.assertEqual(payload["source_sort"], "PNL")
 
+    def test_polymarket_leaderboard_deduplicates_wallets_before_filtering_and_mdd(self) -> None:
+        raw_rows = [
+            {"rank": 1, "proxyWallet": WALLET, "pnl": 10, "volume": 100},
+            {"rank": 2, "proxyWallet": WALLET.upper(), "pnl": 50, "volume": 100},
+            {"rank": 3, "proxyWallet": WALLET_2, "pnl": 20, "volume": 100},
+        ]
+        with patch("web_api.data_api.get_leaderboard", return_value=raw_rows), patch(
+            "web_api.polymarket_user_mdd_payload", return_value={
+                "mdd_pct": 10.0, "mdd_usd": 1.0, "mdd_method": "test", "mdd_pct_basis": "test",
+                "points": [], "closed_positions": 1, "open_positions": 0, "equity_base_usd": 10.0,
+                "peak_value": 1.0, "trough_value": 0.0, "peak_timestamp": 1, "trough_timestamp": 2,
+            }
+        ) as mdd:
+            payload = polymarket_leaderboard_payload({"compute_mdd": ["true"], "scan_limit": ["3"]})
+        self.assertEqual(mdd.call_count, 2)
+        self.assertEqual(payload["counts"]["scanned"], 3)
+        self.assertEqual(payload["counts"]["unique_wallets"], 2)
+        self.assertEqual(payload["counts"]["duplicate_rows"], 1)
+        self.assertEqual(payload["counts"]["returned"], 2)
+        self.assertEqual([row["pnl_usd"] for row in payload["rows"]], [20.0, 10.0])
+
+        with patch("web_api.data_api.get_leaderboard", return_value=raw_rows):
+            filtered = polymarket_leaderboard_payload({"min_pnl_usd": ["30"], "scan_limit": ["3"]})
+        self.assertEqual(filtered["counts"]["returned"], 0)
+
     def test_polymarket_leaderboard_payload_uses_full_wallet_display_fallback(self) -> None:
         leaderboard = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
 

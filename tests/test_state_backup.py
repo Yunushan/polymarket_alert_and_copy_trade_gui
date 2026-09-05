@@ -429,6 +429,29 @@ class StateBackupTests(unittest.TestCase):
             finally:
                 restored_connection.close()
 
+    def test_backup_of_active_leaderboard_omits_writer_lock_and_restores_rows(self) -> None:
+        from polymarket.leaderboard_state import LeaderboardStateStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "state"
+            destination = root / "backups"
+            writer = LeaderboardStateStore(source / "scan.sqlite3")
+            try:
+                writer.prepare({}, resume=False)
+                writer.record_page(0, 1, [{"wallet": "0xaaa"}])
+                archive = destination / str(create_backup(source, destination)["archive"])
+                with tarfile.open(archive, "r:gz") as handle:
+                    self.assertEqual(handle.getnames(), ["scan.sqlite3"])
+                restore_backup(archive, root / "restored")
+                recovered = LeaderboardStateStore(root / "restored" / "scan.sqlite3", read_only=True)
+                try:
+                    self.assertEqual(recovered.progress()["rows"], 1)
+                finally:
+                    recovered.close()
+            finally:
+                writer.close()
+
     def test_restore_rejects_unsafe_archive_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

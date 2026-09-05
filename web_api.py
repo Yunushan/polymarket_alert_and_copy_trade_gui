@@ -3420,8 +3420,16 @@ def polymarket_leaderboard_payload(
 
     rate_limit_events: List[Dict[str, Any]] = []
     rows = [normalize_polymarket_leaderboard_row(row, index + 1) for index, row in enumerate(raw_rows)]
+    seen_wallets: set[str] = set()
+    duplicate_rows = 0
     prefiltered: List[Dict[str, Any]] = []
     for row in rows:
+        wallet = str(row.get("wallet") or "").strip().lower()
+        if wallet:
+            if wallet in seen_wallets:
+                duplicate_rows += 1
+                continue
+            seen_wallets.add(wallet)
         if not _number_in_range(row["pnl_usd"], min_pnl, max_pnl):
             continue
         if not _number_in_range(row["volume_usd"], min_volume, max_volume):
@@ -3626,6 +3634,8 @@ def polymarket_leaderboard_payload(
             "returned": len(result_rows),
             "filtered": len(filtered),
             "scanned": len(rows),
+            "unique_wallets": len(seen_wallets),
+            "duplicate_rows": duplicate_rows,
             "mdd_attempted": attempted_mdd,
             "mdd_computed": computed_mdd,
             "mdd_qualified": qualified_mdd,
@@ -3670,6 +3680,7 @@ def polymarket_leaderboard_payload(
         "source": "polymarket_data_api_leaderboard",
         "cancelled": cancelled,
         "source_sort": remote_sort,
+        "wallet_observation_policy": "first_observation_per_normalized_wallet",
         "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
         "completion_reason": str(scan_summary.get("completion_reason") or "unknown"),
         "source_enumeration_complete": bool(scan_summary.get("source_enumeration_complete")),

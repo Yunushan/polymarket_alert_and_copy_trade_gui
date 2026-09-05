@@ -12,6 +12,8 @@ from .util import normalize_wallet
 
 MDD_METHOD_V2 = "public_data_historical_equity_curve_v2"
 MDD_METHOD_MARK_REPLAY = "clob_price_history_inventory_mark_replay_v1"
+# Increment when changing calculations to invalidate durable scan enrichment.
+MDD_CALCULATION_VERSION = 1
 MDD_PCT_BASIS_V2 = "drawdown_usd / (equity_base_usd + peak_pnl_usd)"
 MAX_CLOSED_POSITIONS = 1000
 MAX_OPEN_POSITIONS = 1000

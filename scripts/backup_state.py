@@ -83,6 +83,8 @@ def _is_sqlite_database(path: Path) -> bool:
 
 
 def _is_sqlite_sidecar(path: Path) -> bool:
+    if path.name.startswith(".") and path.name.endswith(".writer.lock"):
+        return True
     for suffix in ("-wal", "-shm", "-journal"):
         if path.name.endswith(suffix):
             return Path(path.name[: -len(suffix)]).suffix.lower() in SQLITE_SUFFIXES

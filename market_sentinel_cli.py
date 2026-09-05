@@ -11,15 +11,18 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TextIO
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, TextIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from core.atomic_files import atomic_text_writer
 from core.storage import ConfigLoadError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
-from polymarket.leaderboard_state import LeaderboardStateStore
+from polymarket.leaderboard_state import LeaderboardStateStore, leaderboard_writer_lock_path
+from polymarket.mdd import MDD_CALCULATION_VERSION
 from polymarket.live_reports import (
     live_validation_coverage_promotion_proposal_markdown,
     live_validation_promotion_proposal_snapshot_diff_markdown,
@@ -354,9 +357,29 @@ def _format_rate(count: int, elapsed_seconds: float) -> str:
     return f"{count / elapsed_seconds:.2f}/s"
 
 
+@contextmanager
+def _leaderboard_output(output: Optional[str]) -> Iterator[TextIO]:
+    if not output or output == "-":
+        yield sys.stdout
+    else:
+        with atomic_text_writer(Path(output).expanduser(), newline="") as stream:
+            yield stream
+
+
+def _validate_leaderboard_output(output: Optional[str], state_path: Path) -> None:
+    if not output or output == "-":
+        return
+    target = Path(output).expanduser().resolve()
+    database = state_path.expanduser().resolve()
+    protected = [database, leaderboard_writer_lock_path(database)]
+    protected.extend(Path(str(database) + suffix) for suffix in ("-wal", "-shm", "-journal"))
+    for source in protected:
+        if target == source or (target.exists() and source.exists() and target.samefile(source)):
+            raise ValueError("Leaderboard output must not overwrite its state database, journal or writer lock.")
+
+
 def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str, output: Optional[str]) -> None:
-    stream, should_close = _open_output(output)
-    try:
+    with _leaderboard_output(output) as stream:
         if output_format == "json":
             json.dump(payload, stream, indent=2, sort_keys=True)
             stream.write("\n")
@@ -365,9 +388,6 @@ def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str,
         writer = csv.DictWriter(stream, fieldnames=LEADERBOARD_FIELDS)
         writer.writeheader()
         writer.writerows(_csv_rows(payload.get("rows") or []))
-    finally:
-        if should_close:
-            stream.close()
 
 
 _UNLIMITED_LIMIT_TOKENS = {"0", "-1", "all", "any", "none", "unlimited", "max"}
@@ -401,8 +421,7 @@ def _write_streamed_leaderboard_payload(
     output_format: str,
     output: Optional[str],
 ) -> None:
-    stream, should_close = _open_output(output)
-    try:
+    with _leaderboard_output(output) as stream:
         if output_format == "csv":
             writer = csv.DictWriter(stream, fieldnames=LEADERBOARD_FIELDS)
             writer.writeheader()
@@ -425,9 +444,6 @@ def _write_streamed_leaderboard_payload(
             stream.write(":")
             json.dump(value, stream, separators=(",", ":"), sort_keys=True)
         stream.write("}\n")
-    finally:
-        if should_close:
-            stream.close()
 
 
 def _disk_backed_mdd_options(args: argparse.Namespace) -> Dict[str, Any]:
@@ -492,13 +508,26 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
     retry_delay = max(0.0, min(_cli_optional_float(args.scan_retry_delay_seconds) or 0.0, 3600.0))
     warnings: List[str] = []
     state_path = Path(args.state_db).expanduser()
+    _validate_leaderboard_output(args.output, state_path)
     store = LeaderboardStateStore(state_path)
     try:
         store.prepare(
             {"remote_sort": remote_sort, "direction": direction, "period": period, "category": category},
             resume=bool(args.resume),
         )
+        mdd_options = _disk_backed_mdd_options(args)
+        if mdd_requested:
+            mdd_signature = {
+                "calculation_version": MDD_CALCULATION_VERSION,
+                "options": {key: value for key, value in mdd_options.items() if key != "cache_ttl_seconds"},
+            }
+            invalidated = store.prepare_mdd(mdd_signature)
+            if invalidated:
+                warnings.append(
+                    f"Recomputing {invalidated} saved MDD results: calculation settings changed or legacy results lack a settings signature."
+                )
         state = store.progress()
+        scanned_rows = int(state["scanned"])
         if not args.quiet:
             print(
                 f"[{_log_timestamp()} pid={os.getpid()} status=starting elapsed=00:00:00 phase=setup] "
@@ -508,9 +537,11 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             )
 
         def emit(phase: str, **values: Any) -> None:
+            nonlocal scanned_rows
+            scanned_rows = int(values.get("scanned", scanned_rows))
             if progress_callback is None:
                 return
-            scanned = int(values.get("scanned", store.progress()["rows"]))
+            scanned = scanned_rows
             if phase == "mdd":
                 total = int(values.get("mdd_total", 0))
                 attempted = int(values.get("mdd_attempted", 0))
@@ -537,7 +568,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 }
             )
 
-        if not state["scan_complete"] and (scan_limit is None or state["rows"] < scan_limit):
+        if not state["scan_complete"] and (scan_limit is None or state["scanned"] < scan_limit):
             def save_page(offset: int, _limit: int, page: List[Dict[str, Any]]) -> bool:
                 normalized = [normalize_polymarket_leaderboard_row(row, offset + index + 1) for index, row in enumerate(page)]
                 return store.record_page(offset, _limit, normalized)
@@ -545,7 +576,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             _fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=scan_limit,
                 scan_start_offset=int(state["next_offset"]),
-                initial_scanned=int(state["rows"]),
+                initial_scanned=int(state["scanned"]),
                 retain_rows=False,
                 remote_sort=remote_sort,
                 direction=direction,
@@ -561,9 +592,9 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             )
 
         if mdd_requested:
+            scanned_rows = int(store.progress()["scanned"])
             candidate_count = store.candidate_count(filters)
             mdd_total = min(candidate_count, mdd_scan_limit) if mdd_scan_limit is not None else candidate_count
-            mdd_options = _disk_backed_mdd_options(args)
             processed = 0
             computed = 0
             rate_limited = False
@@ -604,7 +635,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                         if len(warnings) < 100:
                             warnings.append(f"MDD unavailable for {row.get('wallet')}: {exc}")
                         rate_limited = rate_limited or isinstance(exc, PolymarketRateLimitError)
-                    emit("mdd", scanned=store.progress()["rows"], filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
+                    emit("mdd", scanned=scanned_rows, filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
                          message=f"Computing MDD {processed}/{mdd_total}.")
                 batch = []
                 if rate_limited:
@@ -623,14 +654,18 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                         store.set_mdd(int(row["id"]), None, exc)
                         if len(warnings) < 100:
                             warnings.append(f"MDD unavailable for {row.get('wallet')}: {exc}")
-                    emit("mdd", scanned=store.progress()["rows"], filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
+                    emit("mdd", scanned=scanned_rows, filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
                          message=f"Computing MDD {processed}/{mdd_total}.")
 
         final_state = store.progress()
         qualified = store.result_count(filters, require_mdd=mdd_requested)
         returned = min(qualified, returned_limit) if returned_limit is not None else qualified
         payload: Dict[str, Any] = {
-            "counts": {"returned": returned, "filtered": qualified, "scanned": final_state["rows"], "mdd_attempted": final_state["mdd_done"] + final_state["mdd_errors"], "mdd_computed": final_state["mdd_done"]},
+            "counts": {
+                "returned": returned, "filtered": qualified, "scanned": final_state["scanned"],
+                "unique_wallets": final_state["unique_wallets"], "duplicate_rows": final_state["duplicate_rows"],
+                "mdd_attempted": final_state["mdd_done"] + final_state["mdd_errors"], "mdd_computed": final_state["mdd_done"],
+            },
             "sort": sort,
             "direction": direction,
             "period": period,
@@ -644,6 +679,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             "disk_backed": True,
             "state_db": str(state_path),
             "state": final_state,
+            "mdd_signature": store.status()["mdd_signature"],
+            "wallet_observation_policy": "first_observation_per_normalized_wallet",
             "completion_reason": final_state["stop_reason"] or ("scan_limit_reached" if scan_limit is not None else "unknown"),
             "source_enumeration_complete": final_state["stop_reason"] == "end_of_results",
             "source_scope_note": (
@@ -665,7 +702,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
         if not args.quiet:
             print(
                 f"[{_log_timestamp()} pid={os.getpid()} status=done elapsed={_format_elapsed(time.monotonic() - started_at)} phase=done] "
-                f"Done: returned={returned} filtered={qualified} scanned={final_state['rows']} mdd_computed={final_state['mdd_done']} completion={payload['completion_reason']} warnings={len(warnings)} state_db={state_path}",
+                f"Done: returned={returned} filtered={qualified} scanned={final_state['scanned']} unique_wallets={final_state['unique_wallets']} duplicate_rows={final_state['duplicate_rows']} mdd_computed={final_state['mdd_done']} completion={payload['completion_reason']} warnings={len(warnings)} state_db={state_path}",
                 file=sys.stderr,
             )
         return 0
@@ -899,13 +936,11 @@ def run_polymarket_leaderboard_status(args: argparse.Namespace) -> int:
     state_path = Path(args.state_db).expanduser()
     if not state_path.is_file():
         raise FileNotFoundError(f"Leaderboard state database does not exist: {state_path}")
-    store = LeaderboardStateStore(state_path)
-    try:
+    _validate_leaderboard_output(args.output, state_path)
+    with closing(LeaderboardStateStore(state_path, read_only=True)) as store, store.snapshot():
         payload = store.status()
         payload["process"] = _leaderboard_process_status(getattr(args, "pid_file", ""))
         return _write_command_payload(args, payload)
-    finally:
-        store.close()
 
 
 def _leaderboard_process_status(pid_file_value: Any) -> Dict[str, Any]:
@@ -955,6 +990,7 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
     state_path = Path(args.state_db).expanduser()
     if not state_path.is_file():
         raise FileNotFoundError(f"Leaderboard state database does not exist: {state_path}")
+    _validate_leaderboard_output(args.output, state_path)
     sort = SORT_ALIASES.get(str(args.sort or "roi_pct").strip().lower(), "roi_pct")
     direction = str(args.direction or "DESC").upper()
     returned_limit = _cli_optional_limit(args.returned, 100)
@@ -962,8 +998,7 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
     require_mdd = bool(args.require_mdd) or sort in {"mdd_usd", "mdd_pct"} or any(
         filters[key] is not None for key in ("min_mdd_usd", "max_mdd_usd", "min_mdd_pct", "max_mdd_pct")
     )
-    store = LeaderboardStateStore(state_path)
-    try:
+    with closing(LeaderboardStateStore(state_path, read_only=True)) as store, store.snapshot():
         state = store.progress()
         qualified = store.result_count(filters, require_mdd=require_mdd)
         returned = min(qualified, returned_limit) if returned_limit is not None else qualified
@@ -972,7 +1007,9 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
             "counts": {
                 "returned": returned,
                 "filtered": qualified,
-                "scanned": state["rows"],
+                "scanned": state["scanned"],
+                "unique_wallets": state["unique_wallets"],
+                "duplicate_rows": state["duplicate_rows"],
                 "mdd_computed": state["mdd_done"],
                 "mdd_errors": state["mdd_errors"],
                 "mdd_pending": state["mdd_pending"],
@@ -982,11 +1019,15 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
             "limit": returned_limit,
             "limit_unlimited": returned_limit is None,
             "require_mdd": require_mdd,
-            "partial": not state["scan_complete"] or (require_mdd and state["mdd_pending"] > 0),
+            "partial": state["stop_reason"] != "end_of_results" or (
+                require_mdd and (state["mdd_pending"] > 0 or state["mdd_errors"] > 0)
+            ),
             "completion_reason": completion_reason,
             "state": state,
             "state_db": str(state_path),
             "exported_at": int(time.time()),
+            "mdd_signature": store.status()["mdd_signature"],
+            "wallet_observation_policy": "first_observation_per_normalized_wallet",
             "source": "polymarket_data_api_leaderboard_durable_state",
             "ranking_scope": "computed_from_currently_saved_public_leaderboard_rows",
             "source_scope_note": (
@@ -1001,8 +1042,6 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
             output=args.output,
         )
         return 0
-    finally:
-        store.close()
 
 
 def run_health(args: argparse.Namespace) -> int:
