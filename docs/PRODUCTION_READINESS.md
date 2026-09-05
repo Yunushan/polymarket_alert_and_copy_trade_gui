@@ -7,17 +7,17 @@ GitHub repository.
 
 ## Current Independent Assessment
 
-The latest independently reviewed committed baseline is `4b92ff4`, scored
-**74/100 on 2026-09-05**, not approved for unattended funded production. Its
-exact [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33976653700)
+The latest independently reviewed committed baseline is `75aabb7`, scored
+**75/100 on 2026-09-05**, not approved for unattended funded production. Its
+exact [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33979920122)
 passed 48 jobs with two optional skips, and its exact
-[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33976653697)
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33979920096)
 passed. The candidate remains on open PR #79, not protected main or a published
 release. Earlier 70/73 independent assessments and the 83-point formal local
 checklist below are historical results with different scope, not competing
 current approvals. Missing external acceptance cannot be supplied by a score.
 
-The subsequent browser-workflow candidate applies the saved React theme,
+The accepted browser-workflow baseline applies the saved React theme,
 preserves view navigation through reload/back/forward, names the previously
 unnamed controls, announces alert/wallet results and errors, and clears an edit
 form after its wallet is deleted. Semantic palette variables and responsive form
@@ -30,8 +30,31 @@ as did the 12 existing frontend tests and 24 focused runner/workflow/metadata
 tests. The full Windows verifier ran 1,405 cases with the same three errors,
 one failed assertion and nine skips originating in local TLS trust rejection;
 it is not a full local pass. Source/wheel artifact verification and the npm
-audit (including development dependencies) passed. Candidate-specific hosted CI is still required;
-the 74-point baseline score is not automatically promoted by these changes.
+audit (including development dependencies) passed. Exact-commit hosted CI now
+also passed the 16 browser cases and package build. This supports one point over
+the preceding 74/100 assessment, not acceptance of financial, real-host or
+funded-account behavior.
+
+The response-disconnect follow-up identifies broken pipes, resets and aborts at
+the client output stream. It does not relabel upstream errors as disconnects or
+retry writes to a closed client. Local request logs/metrics use 499 with the
+attempted response status preserved; durable creates retain their commit and
+idempotent replay behavior. This follow-up requires its own exact-commit tests
+and CI before receiving additional credit.
+
+Local follow-up verification passed 10 focused Windows disconnect tests, all 41
+Linux HTTP/deadline/TLS tests and all 16 browser cases. The browser run observed
+four orderly disconnect records and no backend tracebacks. The full Windows
+verifier ran 1,415 cases in 68.867 seconds with the same three TLS errors, one
+TLS-related failed assertion and nine skips; it remains a failed full local run.
+
+The local Windows TLS failure was diagnosed without bypassing verification:
+the peer certificate issuer is `Avast Web/Mail Shield Untrusted Root`, not the
+fixture's ephemeral CA. The certificate-chain rejection is therefore expected
+for the intercepted connection. Keep the original DNS/SNI and negative trust
+tests intact. Run them in a clean Windows VM or runner without HTTPS interception;
+do not trust the interceptor's untrusted root, use `verify=False`, disable
+hostname checks, or skip the cases to manufacture a full local pass.
 
 ## Audit History: 2026-09-05
 

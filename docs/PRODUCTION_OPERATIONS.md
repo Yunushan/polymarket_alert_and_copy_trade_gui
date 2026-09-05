@@ -26,6 +26,13 @@ regional restrictions.
   JSON, text, and static response at 16 MiB before sending response headers.
   The systemd unit retains its 30-second stop deadline as a final process-level
   safeguard.
+- A broken pipe, reset or abort while writing a response is recorded once as
+  `outcome=client_disconnected`, with local log/metric status `499` and the
+  attempted HTTP status in `response_status`. No 499 or replacement 500 response
+  is sent to the closed connection. The request still releases its worker and
+  mutation admission; a committed mutation is not undone. Retry supported
+  durable creates with the same idempotency key to reconcile uncertain delivery.
+  Upstream connection failures remain backend errors, not client disconnects.
 - When an API token is configured, the server permits ten failed token attempts
   per client per minute, then returns `429` with `Retry-After`. A valid token
   immediately clears that client record. This is a backstop for the proxy's

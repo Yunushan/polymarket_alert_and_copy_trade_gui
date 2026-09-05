@@ -5638,6 +5638,40 @@ class ReactGuiServer(ThreadingHTTPServer):
             self.shutdown_request(request)
 
 
+class HttpClientDisconnected(ConnectionError):
+    """The response stream, not an upstream transport, lost its client."""
+
+
+class _ClientResponseWriter:
+    """Identify peer disconnects at the only stream that writes to the client."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._disconnected = False
+
+    def _call(self, operation: Callable[..., Any], *args: Any) -> Any:
+        if self._disconnected:
+            raise HttpClientDisconnected("The HTTP client has disconnected.")
+        try:
+            return operation(*args)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+            self._disconnected = True
+            raise HttpClientDisconnected("The HTTP client has disconnected.") from exc
+
+    def write(self, data: Any) -> Any:
+        return self._call(self._stream.write, data)
+
+    def flush(self) -> None:
+        self._call(self._stream.flush)
+
+    @property
+    def closed(self) -> bool:
+        return self._stream.closed
+
+    def close(self) -> None:
+        self._stream.close()
+
+
 class ReactGuiHandler(BaseHTTPRequestHandler):
     server_version = "PredictionMarketReactGui/0.1"
     _security_headers = (
@@ -5656,6 +5690,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         """Bound each client connection so incomplete requests cannot pin worker threads."""
         super().setup()
+        self.wfile = _ClientResponseWriter(self.wfile)
         self.connection.settimeout(HTTP_CONNECTION_TIMEOUT_SECONDS)
 
     def version_string(self) -> str:
@@ -5673,12 +5708,19 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         started_at = time.monotonic()
         self._request_id = secrets.token_hex(12)
         self._response_status: Optional[int] = None
+        client_disconnected = False
         try:
             super().handle_one_request()
+        except HttpClientDisconnected:
+            client_disconnected = True
+            self.close_connection = True
         finally:
             method = str(getattr(self, "command", "") or "").upper()
             if method:
                 status = self._response_status if self._response_status is not None else HTTPStatus.INTERNAL_SERVER_ERROR
+                if client_disconnected:
+                    # 499 is local accounting only; no second response is sent.
+                    status = 499
                 duration_seconds = time.monotonic() - started_at
                 self.app_server.http_metrics.record(method, int(status), duration_seconds)
                 raw_path = str(getattr(self, "path", "") or "")
@@ -5692,6 +5734,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     "duration_ms": round(max(0.0, duration_seconds) * 1000, 3),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+                if client_disconnected:
+                    event.update(outcome="client_disconnected", response_status=self._response_status)
                 print(json.dumps(event, sort_keys=True, separators=(",", ":")), flush=True)
 
     def send_response(self, code: int, message: Optional[str] = None) -> None:
@@ -6167,6 +6211,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             )
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
+        except HttpClientDisconnected:
+            raise
         except Exception as exc:
             print(f"[web-gui] internal error while handling GET {path}: {type(exc).__name__}")
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")
@@ -6898,6 +6944,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
             return
+        except HttpClientDisconnected:
+            raise
         except Exception as exc:
             print(f"[web-gui] internal error while handling {method} {path}: {type(exc).__name__}")
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")
