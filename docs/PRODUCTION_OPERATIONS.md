@@ -460,6 +460,24 @@ loopback-only staging host, omit `--public-url`; the script will still validate
 the local service and timer, but retain all three expected identity arguments for the
 deployed release.
 
+Production collection also restores the newest verified backup into a private
+temporary directory and boots an isolated read-only application from that copy.
+The backed-up `config.json` must exist and load without dropping durable journal
+records. Known JSON stores must pass the application's readiness checks, and
+restored SQLite files must pass integrity and foreign-key checks. The probe
+requires successful health and state responses, tests that all mutation methods
+are rejected, and compares file hashes before and after startup. Its subprocess
+has a 60-second budget, no inherited credentials or proxies, redirected durable
+store paths, and backend socket/DNS connections denied. It never promotes the
+restored files over running production state.
+
+The resulting restore evidence includes the application version, source and
+frontend fingerprints. Inventory-only restore reports are no longer accepted by
+the reviewer or readiness scorer. This isolated probe is not evidence of
+off-host backup recovery, service-account permissions, full business-workflow
+recovery, measured RPO/RTO, or an actual systemd failover; those operational drills
+still need to be performed on the deployment host.
+
 Review the raw collector output directly; do not translate its results into a
 hand-written readiness manifest. The reviewer recomputes the raw file digest,
 requires a fresh production-mode collection with the exact systemd and public

@@ -7,16 +7,24 @@ GitHub repository.
 
 ## Current Independent Assessment
 
-The latest independent review scored `b7b9b21` plus the local managed-WebSocket
+The latest independent review scored `b7b9b21` plus the managed-WebSocket
 candidate **75/100 on 2026-09-05**, not approved for unattended funded production.
-The committed `b7b9b21` [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33981703520)
+That candidate is now committed as `b548461`; its [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33985401422)
 passed 48 jobs with two optional skips, and its
-[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33981703519)
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33985401417)
 passed. Those results do not validate subsequent local changes. The candidate
 remains on open PR #79, not protected main or a published release. Earlier
 independent assessments and the 83-point formal local checklist below are
 historical results with different scope, not competing current approvals.
 Missing external acceptance cannot be supplied by a score.
+
+The next recovery candidate closes a reproduced false-positive restore check:
+a checksummed backup containing malformed configuration previously passed the
+inventory-only drill. Collection now boots the restored application in an
+isolated read-only child, checks health/state and SQLite integrity, and rejects
+changed bytes or backend egress. Review requires this exact-runtime application
+evidence. Local regression results do not establish actual VPS recovery or raise
+the independent score by themselves.
 
 The accepted browser-workflow baseline applies the saved React theme,
 preserves view navigation through reload/back/forward, names the previously

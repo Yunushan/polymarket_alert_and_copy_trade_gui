@@ -78,6 +78,16 @@ def _unauthorized_errors(*, bodies: list[io.BytesIO] | None = None) -> list[HTTP
 
 
 class ProductionDeploymentTests(unittest.TestCase):
+    def test_restore_drill_rejects_checksummed_but_unreadable_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "state"
+            source.mkdir()
+            (source / "config.json").write_text('{"markets":', encoding="utf-8")
+            create_backup(source, root / "backups")
+            result = deployment.check_restore_drill(root / "backups")
+        self.assertEqual(result["status"], "fail", result)
+
     def test_evidence_includes_a_versioned_utc_collection_timestamp(self) -> None:
         evidence = build_evidence(
             [{"name": "loopback_health", "status": "pass"}],

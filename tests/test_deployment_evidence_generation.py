@@ -42,6 +42,13 @@ class DeploymentEvidenceGenerationTests(unittest.TestCase):
                 "rollback_drill": {"drill_id": "00000000-0000-4000-8000-000000000001", "report_sha256": "a" * 64, "completed_at": "2026-08-26T10:00:00Z", "rollback_revision": "f" * 40, "final_revision": REVISION, "step_count": 5},
             }
             external_review = {"probed_at": "2026-08-26T11:02:00Z", "report_sha256": "f" * 64, "api_version": "1.0.11", "source_revision": REVISION, "frontend_sha256": "b" * 64, "unauthenticated_probes": 5}
+            review["restore_drill"]["application"] = {
+                "schema_version": 1, "config_loaded": True, "health_ready": True,
+                "state_readable": True, "mutations_blocked": True, "outbound_attempts": 0,
+                "files_unchanged": True, "sqlite_databases_checked": 0,
+                "api_version": "1.0.11", "runtime_source_revision": REVISION,
+                "runtime_frontend_sha256": "b" * 64,
+            }
             with (
                 patch("scripts.generate_deployment_evidence.review_deployment_report", return_value=review),
                 patch("scripts.generate_deployment_evidence.review_external_probe_report", return_value=external_review),
@@ -50,6 +57,7 @@ class DeploymentEvidenceGenerationTests(unittest.TestCase):
             self.assertEqual(report["deployment"]["public_origin"], ORIGIN)
             self.assertEqual(report["deployment"]["frontend_sha256"], "b" * 64)
             self.assertEqual(report["deployment"]["external_probe"]["runner_environment"], "github-hosted")
+            self.assertEqual(report["deployment"]["restore_drill"]["application"], review["restore_drill"]["application"])
 
     def test_rejects_origin_or_artifact_name_mutation_before_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

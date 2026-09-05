@@ -43,6 +43,7 @@ if __package__:
         restore_backup,
     )
     from scripts.verify_service_health import check_health
+    from scripts.verify_restored_state import application_check_valid, isolated_environment
 else:  # Supports the documented `python /path/to/scripts/verify_production_deployment.py` invocation.
     from restore_state_backup import (
         DEFAULT_MAX_ARCHIVE_BYTES,
@@ -52,6 +53,7 @@ else:  # Supports the documented `python /path/to/scripts/verify_production_depl
         restore_backup,
     )
     from verify_service_health import check_health
+    from verify_restored_state import application_check_valid, isolated_environment
 
 try:
     import tomllib
@@ -664,8 +666,12 @@ def check_restore_drill(
     backup_directory: Path,
     *,
     clock: Callable[[], float] = time.time,
+    frontend_dir: Path = PROJECT_ROOT / "frontend" / "dist",
+    expected_version: str = "",
+    expected_source_revision: str = "",
+    expected_frontend_sha256: str = "",
 ) -> dict[str, Any]:
-    """Actually restore the newest valid backup into a private isolated directory."""
+    """Restore and boot a read-only application against the isolated backup."""
 
     base = {"name": "verified_restore_drill", "mode": "isolated_full_restore"}
     try:
@@ -710,7 +716,28 @@ def check_restore_drill(
                 or restored_bytes != manifest.get("verified_bytes")
             ):
                 raise RuntimeError("restored file inventory does not match the verified backup manifest")
+            result = subprocess.run(
+                [
+                    sys.executable, "-I", "-B", str(PROJECT_ROOT / "scripts" / "verify_restored_state.py"),
+                    "--state", str(restored), "--frontend-dir", str(frontend_dir.resolve()),
+                ],
+                cwd=temporary, env=isolated_environment(restored),
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            if result.returncode != 0 or len(result.stdout) > 4096:
+                raise RuntimeError("restored application validation failed; backup contents were not promoted")
+            application = json.loads(result.stdout)
+            identity = source_identity()
+            if not application_check_valid(
+                application,
+                version=expected_version or identity["project_version"],
+                revision=expected_source_revision or identity["git_revision"],
+                frontend_sha256=expected_frontend_sha256 or frontend_tree_sha256(frontend_dir),
+            ):
+                raise RuntimeError("restored application validation or runtime identity is invalid")
         completed_at = datetime.fromtimestamp(clock(), timezone.utc).isoformat().replace("+00:00", "Z")
+    except subprocess.TimeoutExpired:
+        return {**base, "status": "fail", "detail": "restored application exceeded the 60-second validation budget"}
     except (OSError, RuntimeError, ValueError, tarfile.TarError) as exc:
         return {**base, "status": "fail", "detail": str(exc)}
     return {
@@ -722,7 +749,8 @@ def check_restore_drill(
         "restored_file_count": restored_files,
         "restored_bytes": restored_bytes,
         "completed_at": completed_at,
-        "detail": "the complete verified backup was restored and inventoried in an isolated private directory",
+        "application": application,
+        "detail": "the complete backup was restored, booted read-only without venue access, and left unchanged",
     }
 
 
@@ -1370,7 +1398,12 @@ def main() -> int:
                             args.host_identity_file,
                         )
                     )
-                    checks.append(check_restore_drill(args.backup_directory))
+                    checks.append(check_restore_drill(
+                        args.backup_directory, frontend_dir=args.frontend_dir,
+                        expected_version=expected_version,
+                        expected_source_revision=expected_source_revision,
+                        expected_frontend_sha256=expected_frontend_sha256,
+                    ))
                     checks.append(
                         check_rollback_drill(
                             args.rollback_drill_report,

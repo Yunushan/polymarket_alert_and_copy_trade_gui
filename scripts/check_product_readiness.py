@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 try:
     from scripts.release_version import normalize_release_tag, normalize_release_version
     from scripts.review_deployment_evidence import DeploymentEvidenceError, review_deployment_report
+    from scripts.verify_restored_state import application_check_valid
     from scripts.trusted_readiness_evidence import (
         REPORT_TYPE as TRUSTED_EVIDENCE_REPORT_TYPE,
         WORKFLOW_CONTRACTS as TRUSTED_EVIDENCE_WORKFLOW_CONTRACTS,
@@ -42,6 +43,7 @@ try:
 except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the repository root, to sys.path.
     from release_version import normalize_release_tag, normalize_release_version
     from review_deployment_evidence import DeploymentEvidenceError, review_deployment_report
+    from verify_restored_state import application_check_valid
     from trusted_readiness_evidence import (
         REPORT_TYPE as TRUSTED_EVIDENCE_REPORT_TYPE,
         WORKFLOW_CONTRACTS as TRUSTED_EVIDENCE_WORKFLOW_CONTRACTS,
@@ -3061,7 +3063,11 @@ def _attested_deployment_report(
     external_probe = deployment.get("external_probe")
     if (
         not isinstance(restore_drill, dict)
-        or set(restore_drill) != {"completed_at", "backup_sha256", "restored_file_count", "restored_bytes"}
+        or set(restore_drill) != {"completed_at", "backup_sha256", "restored_file_count", "restored_bytes", "application"}
+        or not application_check_valid(
+            restore_drill.get("application"), version=expected_version,
+            revision=expected_revision, frontend_sha256=deployment.get("frontend_sha256"),
+        )
         or not isinstance(restore_drill.get("backup_sha256"), str)
         or not _HASH_RE.fullmatch(restore_drill["backup_sha256"])
         or type(restore_drill.get("restored_file_count")) is not int
