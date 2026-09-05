@@ -2112,7 +2112,7 @@ class MarketSentinelCliTests(unittest.TestCase):
         transient_error = PolymarketHTTPError("ssl eof", service="data", method="GET", url="https://data-api.polymarket.com")
 
         with patch("market_sentinel_cli._run_disk_backed_polymarket_leaderboard", side_effect=[transient_error, 0]) as mock_run, patch(
-            "market_sentinel_cli.time.sleep"
+            "core.request_control.RequestControl.sleep"
         ) as mock_sleep:
             exit_code = market_sentinel_cli.run_polymarket_leaderboard(args)
 

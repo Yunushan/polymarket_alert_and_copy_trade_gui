@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.request_control import RequestCancelled, cancellation_scope, request_scope
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -3070,6 +3071,10 @@ def _fetch_polymarket_leaderboard_scan_rows(
     completion_reason = "scan_limit_reached" if scan_limit is not None else "upstream_exhausted"
 
     def fetch_page(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
+        with cancellation_scope(is_cancelled):
+            return fetch_page_with_cancellation(page_offset, page_limit)
+
+    def fetch_page_with_cancellation(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
         for attempt in range(1, retry_attempts + 1):
             try:
                 return data_api.get_leaderboard(
@@ -3080,6 +3085,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
                     period=period,
                     category=category,
                 )
+            except RequestCancelled:
+                raise
             except Exception as exc:
                 if attempt >= retry_attempts:
                     raise
@@ -3094,7 +3101,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
                     message=warning,
                 )
                 if retry_delay:
-                    time.sleep(retry_delay)
+                    with request_scope(retry_delay + 1) as control:
+                        control.sleep(retry_delay)
         return []
 
     emit_progress(
@@ -3134,7 +3142,10 @@ def _fetch_polymarket_leaderboard_scan_rows(
         pages_by_offset: Dict[int, List[Dict[str, Any]]] = {}
         if len(batch_specs) == 1:
             page_offset, page_limit = batch_specs[0]
-            pages_by_offset[page_offset] = fetch_page(page_offset, page_limit)
+            try:
+                pages_by_offset[page_offset] = fetch_page(page_offset, page_limit)
+            except RequestCancelled:
+                cancelled = True
         else:
             with ThreadPoolExecutor(max_workers=len(batch_specs)) as executor:
                 futures = {
@@ -3143,7 +3154,11 @@ def _fetch_polymarket_leaderboard_scan_rows(
                 }
                 for future in as_completed(futures):
                     page_offset, _page_limit = futures[future]
-                    pages_by_offset[page_offset] = future.result()
+                    try:
+                        pages_by_offset[page_offset] = future.result()
+                    except RequestCancelled:
+                        cancelled = True
+                        continue
                     completed = scanned_count + sum(len(page) for page in pages_by_offset.values())
                     progress_scanned = completed if scan_limit is None else min(completed, scan_limit)
                     emit_progress(
@@ -3154,6 +3169,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
 
         stop_after_batch = False
         for page_offset, page_limit in batch_specs:
+            if page_offset not in pages_by_offset:
+                break  # Never checkpoint beyond a cancelled pagination gap.
             page = pages_by_offset.get(page_offset) or []
             if page_callback is not None:
                 try:
@@ -3200,7 +3217,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
             scanned=progress_scanned,
             message=f"Scanning leaderboard rows {progress_scanned}/{_limit_label(scan_limit)}.",
         )
-        if is_cancelled():
+        if cancelled or is_cancelled():
             cancelled = True
             completion_reason = "cancelled"
             warnings.append("Leaderboard scan cancelled by user.")
@@ -3327,7 +3344,7 @@ def polymarket_leaderboard_payload(
         try:
             return bool(cancel_check())
         except Exception:
-            return False
+            return True
 
     def emit_progress(
         phase: str,
@@ -3457,7 +3474,10 @@ def polymarket_leaderboard_payload(
                 return row, "", None, {}, None
             options = build_mdd_options()
             try:
-                return row, wallet, polymarket_user_mdd_payload(wallet, **options), options, None
+                with cancellation_scope(is_cancelled):
+                    return row, wallet, polymarket_user_mdd_payload(wallet, **options), options, None
+            except RequestCancelled:
+                raise
             except Exception as exc:
                 return row, wallet, None, options, exc
 
@@ -3596,15 +3616,25 @@ def polymarket_leaderboard_payload(
                 message=f"Computing MDD {attempted_mdd + 1}/{mdd_total}.",
             )
             if len(batch) == 1:
-                rate_limited = apply_mdd_result(*compute_mdd_for_row(batch[0]))
+                try:
+                    rate_limited = apply_mdd_result(*compute_mdd_for_row(batch[0]))
+                except RequestCancelled:
+                    cancelled = True
             else:
                 with ThreadPoolExecutor(max_workers=len(batch)) as executor:
                     for future in as_completed([executor.submit(compute_mdd_for_row, row) for row in batch]):
-                        if apply_mdd_result(*future.result()):
-                            rate_limited = True
+                        try:
+                            if apply_mdd_result(*future.result()):
+                                rate_limited = True
+                        except RequestCancelled:
+                            cancelled = True
                 if rate_limited:
                     break
             mdd_index += len(batch)
+            if cancelled or is_cancelled():
+                cancelled = True
+                warnings.append("MDD scan cancelled by user.")
+                break
             if rate_limited:
                 break
 

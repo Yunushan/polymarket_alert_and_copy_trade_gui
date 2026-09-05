@@ -127,6 +127,34 @@ with controlled hostnames that return public, mixed public/private, and rebound
 private answers; all but the stable public case must fail without reaching the
 destination.
 
+### HTTP deadlines and scan cancellation
+
+Managed HTTP requests use a monotonic budget shared by DNS admission,
+rate-limiter waits, response headers/body reads, and internal retry backoff.
+The configured `timeout` is the budget for one HTTP operation, including its
+internal retries; it is not the duration limit for an entire unlimited scan.
+Response byte limits remain independent. Socket ownership lasts through
+HTTP/1.0 and `Connection: close` bodies, and a completed request disarms its
+pooled socket before another request can borrow it.
+
+Leaderboard CLI runs handle SIGINT/SIGTERM by requesting cancellation. During
+page/MDD work, cancelled requests are not retried or recorded as valid empty
+history. Committed contiguous SQLite pages and completed MDD remain resumable;
+an interrupted fetch or calculation does not overwrite the previous export.
+Exit status is 130 for SIGINT and 143 for SIGTERM. Resume the same state database
+with `--resume`, or inspect it with `polymarket-leaderboard-status`. Windows
+service termination and forced process kills are not equivalent to POSIX
+SIGTERM; abrupt-exit durability remains a separate contract.
+
+An OS DNS lookup cannot be forcibly interrupted by Python. At most 16 daemon
+DNS helpers may remain outstanding; expired lookups cannot initiate HTTP work.
+Cancellation callbacks must be fast, side-effect-free and thread-safe. Raw
+connect/TLS setup can take up to the remaining transport timeout to unwind;
+body reads and retry/rate-limiter waits are actively interrupted. Custom
+injected transports, SOCKS transports and venue SDKs do not acquire these
+guarantees merely by accepting a timeout argument. Host proxy/WebSocket egress
+acceptance above remains required.
+
 ### Durable state boundary
 
 The bundled production environment pins every non-configuration durable store

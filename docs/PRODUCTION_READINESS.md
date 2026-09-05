@@ -7,7 +7,26 @@ GitHub repository.
 
 ## Improvement Status: 2026-09-05
 
-The subsequent clean-commit review of `b068de1` scored **73/100**, with the
+A subsequent review of the working tree (committed transport baseline
+`cc13dbe`, plus uncommitted deadline/cancellation changes) scored
+**70/100**, not a release approval. It reproduced two concrete candidate bugs:
+HTTP/1.0 and `Connection: close` responses lost their cancellation guard before
+body consumption, and rate-limiter lock acquisition ignored the deadline. The
+slow-TLS regression was still blocked at a 12-second diagnostic cutoff despite
+a 0.5-second budget. This result must not be replaced by the historical formal
+83/100 checklist or the earlier committed candidate's passing CI.
+
+The deadline candidate now preserves guards through nonpersistent responses,
+bounds rate-limiter lock waits, and keeps one monotonic budget across managed
+request retries. Cancellation propagates through concurrent page/MDD work and
+CSV/JSON file publication. A real Linux SIGTERM regression preserves committed
+pages, leaves interrupted MDD pending, keeps the previous export, and exits 143.
+Failed watchdog startup releases its owned socket handle. No live support gate
+has been enabled. Candidate tests are evidence for these specific fixes, not
+financial, deployed-host, signed-release or funded-account acceptance. Exact
+candidate CI and Security must be revalidated before awarding new credit.
+
+An earlier clean-commit review of `b068de1` scored **73/100**, with the
 **83/100 formal local checklist** and passing exact-commit CI/Security. It
 credited the cache correction and hosted checks but reproduced stale DNS
 address retention in shared connection pools. This is still an assessment of
@@ -119,7 +138,7 @@ wallets and next offset 100,000. This does not measure network/MDD throughput,
 eight-million-wallet performance, production-host resource use, or durability
 under machine failure.
 
-The latest candidate review remains **73/100**. It credits the tested direct
+The previous committed candidate review was **73/100**. It credited the tested direct
 transport improvements but reproduced a separate overall-deadline gap: a
 loopback server sending one byte every 0.1 seconds completed an 11-byte response
 in 1.094 seconds despite a 0.25-second socket timeout. Requests' inactivity

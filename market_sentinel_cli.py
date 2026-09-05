@@ -7,17 +7,20 @@ import importlib.metadata as importlib_metadata
 import json
 import math
 import os
+import signal
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, TextIO
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, TextIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from core.atomic_files import atomic_text_writer
+from core.request_control import RequestCancelled, cancellation_scope, request_scope
 from core.storage import ConfigLoadError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
@@ -368,13 +371,33 @@ def _format_rate(count: int, elapsed_seconds: float) -> str:
     return f"{count / elapsed_seconds:.2f}/s"
 
 
+class _CancellableLeaderboardWriter:
+    def __init__(self, stream: TextIO, cancel_check: Callable[[], bool]) -> None:
+        self.stream = stream
+        self.cancel_check = cancel_check
+
+    def check(self) -> None:
+        if self.cancel_check():
+            raise RequestCancelled("Leaderboard export cancelled before publication.")
+
+    def write(self, text: str) -> int:
+        self.check()
+        return self.stream.write(text)
+
+
 @contextmanager
-def _leaderboard_output(output: Optional[str]) -> Iterator[TextIO]:
-    if not output or output == "-":
-        yield sys.stdout
-    else:
-        with atomic_text_writer(Path(output).expanduser(), newline="") as stream:
+def _leaderboard_output(
+    output: Optional[str], cancel_check: Optional[Callable[[], bool]] = None,
+) -> Iterator[TextIO | _CancellableLeaderboardWriter]:
+    context = nullcontext(sys.stdout) if not output or output == "-" else atomic_text_writer(Path(output).expanduser(), newline="")
+    with context as stream:
+        if cancel_check is None:
             yield stream
+        else:
+            writer = _CancellableLeaderboardWriter(stream, cancel_check)
+            writer.check()
+            yield writer
+            writer.check()
 
 
 def _validate_leaderboard_output(output: Optional[str], state_path: Path) -> None:
@@ -389,8 +412,11 @@ def _validate_leaderboard_output(output: Optional[str], state_path: Path) -> Non
             raise ValueError("Leaderboard output must not overwrite its state database, journal or writer lock.")
 
 
-def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str, output: Optional[str]) -> None:
-    with _leaderboard_output(output) as stream:
+def write_leaderboard_payload(
+    payload: Mapping[str, Any], *, output_format: str, output: Optional[str],
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> None:
+    with _leaderboard_output(output, cancel_check) as stream:
         if output_format == "json":
             json.dump(payload, stream, indent=2, sort_keys=True)
             stream.write("\n")
@@ -431,8 +457,9 @@ def _write_streamed_leaderboard_payload(
     *,
     output_format: str,
     output: Optional[str],
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
-    with _leaderboard_output(output) as stream:
+    with _leaderboard_output(output, cancel_check) as stream:
         if output_format == "csv":
             writer = csv.DictWriter(stream, fieldnames=LEADERBOARD_FIELDS)
             writer.writeheader()
@@ -494,7 +521,12 @@ def _leaderboard_filter_values(args: argparse.Namespace) -> Dict[str, Optional[f
     }
 
 
-def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
+def _run_disk_backed_polymarket_leaderboard(
+    args: argparse.Namespace, *, cancel_check: Optional[Callable[[], bool]] = None,
+) -> int:
+    is_cancelled = cancel_check or (lambda: False)
+    if is_cancelled():
+        raise RequestCancelled("Leaderboard scan cancelled.")
     if args.checkpoint:
         raise ValueError("Use either --checkpoint or --state-db. The SQLite state database is already resumable.")
 
@@ -597,7 +629,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 scan_concurrency=scan_concurrency,
                 scan_retry_attempts=retry_attempts,
                 scan_retry_delay_seconds=retry_delay,
-                is_cancelled=lambda: False,
+                is_cancelled=is_cancelled,
                 emit_progress=emit,
                 warnings=warnings,
                 page_callback=save_page,
@@ -605,6 +637,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             )
             if scan_summary.get("completion_reason") == "upstream_offset_limit":
                 store.stop_at_upstream_limit()
+            if is_cancelled() or scan_summary.get("completion_reason") == "cancelled":
+                raise RequestCancelled("Leaderboard scan cancelled; committed pages remain resumable.")
 
         if mdd_requested:
             scanned_rows = int(store.progress()["scanned"])
@@ -619,12 +653,15 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 if not wallet:
                     return row, None, ValueError("Leaderboard row does not contain a wallet.")
                 try:
-                    return row, polymarket_user_mdd_payload(wallet, **mdd_options), None
+                    with cancellation_scope(is_cancelled):
+                        return row, polymarket_user_mdd_payload(wallet, **mdd_options), None
                 except Exception as exc:
                     return row, None, exc
 
             batch: List[Mapping[str, Any]] = []
             for candidate in store.iter_mdd_candidates(filters, sort=sort, direction=direction, limit=mdd_scan_limit):
+                if is_cancelled():
+                    raise RequestCancelled("MDD scan cancelled; committed results remain resumable.")
                 if candidate["mdd_status"] == "done":
                     processed += 1
                     continue
@@ -636,6 +673,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                     futures = [executor.submit(compute, row) for row in batch]
                     results = [future.result() for future in as_completed(futures)]
                 for row, mdd, exc in results:
+                    if isinstance(exc, RequestCancelled):
+                        raise exc
                     processed += 1
                     if exc is None and mdd is not None:
                         attach_polymarket_mdd_audit_cache(
@@ -658,6 +697,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                     break
             if batch and not rate_limited:
                 for row, mdd, exc in [compute(row) for row in batch]:
+                    if isinstance(exc, RequestCancelled):
+                        raise exc
                     processed += 1
                     if exc is None and mdd is not None:
                         attach_polymarket_mdd_audit_cache(
@@ -672,6 +713,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                     emit("mdd", scanned=scanned_rows, filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
                          message=f"Computing MDD {processed}/{mdd_total}.")
 
+        if is_cancelled():
+            raise RequestCancelled("Leaderboard scan cancelled; previous output was preserved.")
         final_state = store.progress()
         qualified = store.result_count(filters, require_mdd=mdd_requested)
         returned = min(qualified, returned_limit) if returned_limit is not None else qualified
@@ -713,6 +756,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             store.iter_results(filters, require_mdd=mdd_requested, sort=sort, direction=direction, limit=returned_limit),
             output_format=args.format,
             output=args.output,
+            cancel_check=is_cancelled,
         )
         if not args.quiet:
             print(
@@ -854,6 +898,37 @@ def _progress_printer(enabled: bool, *, started_at: Optional[float] = None):
 
 
 def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
+    started_at = time.monotonic()
+    cancelled = threading.Event()
+    received_signal = [int(signal.SIGINT)]
+    previous_handlers = {}
+
+    def interrupt(signum, _frame):
+        received_signal[0] = signum
+        cancelled.set()
+
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, interrupt)
+        with cancellation_scope(cancelled.is_set):
+            try:
+                return _run_polymarket_leaderboard(args, cancel_check=cancelled.is_set)
+            except RequestCancelled:
+                print(
+                    f"[{_log_timestamp()} pid={os.getpid()} status=cancelled "
+                    f"elapsed={_format_elapsed(time.monotonic() - started_at)} phase=cancelled] Scan cancelled; "
+                    "committed checkpoints remain resumable; file exports are published only when complete.",
+                    file=sys.stderr, flush=True,
+                )
+                return 128 + received_signal[0]
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
+def _run_polymarket_leaderboard(args: argparse.Namespace, *, cancel_check: Callable[[], bool]) -> int:
     if str(getattr(args, "state_db", "") or "").strip():
         if bool(getattr(args, "resume_on_failure", False)):
             max_restarts = _cli_clamp_int(getattr(args, "resume_max_restarts", 0), 0, 0, 1_000_000)
@@ -861,7 +936,7 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
             restart = 0
             while True:
                 try:
-                    return _run_disk_backed_polymarket_leaderboard(args)
+                    return _run_disk_backed_polymarket_leaderboard(args, cancel_check=cancel_check)
                 except PolymarketHTTPError as exc:
                     restart += 1
                     if max_restarts and restart > max_restarts:
@@ -876,8 +951,9 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
                             flush=True,
                         )
                     args.resume = True
-                    time.sleep(delay)
-        return _run_disk_backed_polymarket_leaderboard(args)
+                    with request_scope(delay + 1) as control:
+                        control.sleep(delay)
+        return _run_disk_backed_polymarket_leaderboard(args, cancel_check=cancel_check)
     if bool(getattr(args, "resume_on_failure", False)):
         raise ValueError("--resume-on-failure requires --state-db so the next attempt has durable scan state.")
 
@@ -887,7 +963,7 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
     checkpoint_path_text = str(getattr(args, "checkpoint", "") or "").strip()
     checkpoint_writer: Optional[_LeaderboardCheckpointWriter] = None
     initial_raw_rows: Optional[List[Mapping[str, Any]]] = None
-    payload_kwargs: Dict[str, Any] = {"progress_callback": progress_callback}
+    payload_kwargs: Dict[str, Any] = {"progress_callback": progress_callback, "cancel_check": cancel_check}
     if not args.quiet:
         checkpoint_label = checkpoint_path_text or "-"
         print(
@@ -925,7 +1001,9 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
     finally:
         if checkpoint_writer is not None:
             checkpoint_writer.close()
-    write_leaderboard_payload(payload, output_format=args.format, output=args.output)
+    if cancel_check() or payload.get("cancelled"):
+        raise RequestCancelled("Leaderboard scan cancelled; previous output was preserved.")
+    write_leaderboard_payload(payload, output_format=args.format, output=args.output, cancel_check=cancel_check)
 
     counts = payload.get("counts") or {}
     warning_count = len(payload.get("warnings") or [])

@@ -8,6 +8,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -19,6 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 import urllib3.util.connection
 
+from core.request_control import RequestCancelled, RequestDeadlineExceeded, cancellation_scope
 from market_adapters.errors import MarketConfigurationError
 from market_adapters.outbound import OutboundEndpointPolicy
 from market_adapters.runtime import create_managed_http_session
@@ -51,11 +53,12 @@ def response_for(status=200, body=b'{"ok":true}', headers=None):
     response._content = body
     response._content_consumed = True
     response.close = Mock(wraps=response.close)
+    response.close_spy = response.close
     return response
 
 
 @contextmanager
-def local_tls_server(directory):
+def local_tls_server(directory, handle_get=None):
     # Trust only an ephemeral CA in the test session. The leaf has a DNS SAN
     # but no IP SAN, so success proves hostname verification survives pinning.
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -107,6 +110,9 @@ def local_tls_server(directory):
         def do_GET(self):  # noqa: N802 - stdlib handler API
             observed["hosts"].append(self.headers.get("Host"))
             observed["paths"].append(self.path)
+            if handle_get is not None:
+                handle_get(self)
+                return
             body = b'{"ok":true}'
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
@@ -203,6 +209,40 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
                     self.assertIsInstance(raised.exception.__cause__, requests.exceptions.SSLError)
             self.assertEqual(observed["hosts"], [])
 
+    def test_real_tls_slow_body_obeys_deadline_and_cancellation(self) -> None:
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                stop = threading.Event()
+                cancelled = threading.Event()
+
+                def handle(handler, cancel=cancel, cancelled=cancelled, stop=stop):
+                    handler.send_response(200)
+                    handler.send_header("Content-Length", "10000")
+                    handler.end_headers()
+                    if cancel:
+                        cancelled.set()
+                    try:
+                        while not stop.wait(0.03):
+                            handler.wfile.write(b"a")
+                            handler.wfile.flush()
+                    except OSError:
+                        pass
+                    handler.close_connection = True
+
+                with tempfile.TemporaryDirectory() as directory, local_tls_server(directory, handle) as (port, certificate, _):
+                    origin = f"https://venue.example.test:{port}"
+                    policy = OutboundEndpointPolicy(private_origins=frozenset({origin}), resolver=resolver_for("127.0.0.1"))
+                    try:
+                        with self.managed_transport(policy, certificate), cancellation_scope(cancelled.is_set):
+                            before = time.monotonic()
+                            with self.assertRaises(RequestCancelled if cancel else PolymarketHTTPError) as raised:
+                                request_json(PolymarketEndpoint("test", "GET", "/data", origin), timeout=2 if cancel else 0.5)
+                            self.assertLess(time.monotonic() - before, 1.5)
+                            if not cancel:
+                                self.assertIsInstance(raised.exception.__cause__, RequestDeadlineExceeded)
+                    finally:
+                        stop.set()
+
     def test_retry_connects_to_newly_validated_dns_address(self) -> None:
         with tempfile.TemporaryDirectory() as directory, local_tls_server(directory) as (port, certificate, observed):
             calls = []
@@ -214,9 +254,16 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
 
             origin = f"https://venue.example.test:{port}"
             policy = OutboundEndpointPolicy(private_origins=frozenset({origin}), resolver=changing_dns)
+            real_connect = urllib3.util.connection.create_connection
+
+            def refuse_retired_address(address, *args, **kwargs):
+                if address[0] == "127.0.0.2":
+                    raise ConnectionRefusedError("retired test address")
+                return real_connect(address, *args, **kwargs)
+
             with (
                 self.managed_transport(policy, certificate) as sessions,
-                patch.object(urllib3.util.connection, "create_connection", wraps=urllib3.util.connection.create_connection) as connect,
+                patch.object(urllib3.util.connection, "create_connection", side_effect=refuse_retired_address) as connect,
             ):
                 result = request_json(
                     PolymarketEndpoint("test", "GET", "/data", origin), timeout=1, retry_policy=self.retry
@@ -281,7 +328,7 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
                     with self.assertRaisesRegex(PolymarketValidationError, "resolved"):
                         request_json(self.endpoint, retry_policy=self.retry)
                     self.assertEqual(send.call_count, 0 if fail_on_attempt == 1 else 1)
-                self.assertEqual(response.close.call_count, 0 if fail_on_attempt == 1 else 1)
+                self.assertEqual(response.close_spy.call_count, 0 if fail_on_attempt == 1 else 1)
 
     def test_retry_response_and_session_lifetimes(self) -> None:
         first = response_for(503, headers={"Retry-After": "0"})
@@ -291,15 +338,15 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
 
             def consume(*args, **kwargs):
                 self.assertFalse(sessions[0].close.called)
-                self.assertTrue(first.close.called)
+                self.assertTrue(first.close_spy.called)
                 yield from original_iter(*args, **kwargs)
 
             second.iter_content = consume
             self.assertEqual(request_json(self.endpoint, retry_policy=self.retry), {"ok": True})
             self.assertEqual(send.call_count, 2)
             self.assertEqual(len(sessions), 1)
-        first.close.assert_called_once_with()
-        second.close.assert_called_once_with()
+        first.close_spy.assert_called_once_with()
+        second.close_spy.assert_called_once_with()
 
     def test_stream_failure_retries_only_safe_methods(self) -> None:
         for method, expected_calls in (("GET", 2), ("POST", 1)):
@@ -315,7 +362,7 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
                         with self.assertRaisesRegex(PolymarketHTTPError, "reading the response"):
                             request_json(endpoint, payload={"value": 1}, retry_policy=self.retry)
                     self.assertEqual(send.call_count, expected_calls)
-                failed.close.assert_called_once_with()
+                failed.close_spy.assert_called_once_with()
 
     def test_post_never_retries_http_or_connection_failures(self) -> None:
         endpoint = PolymarketEndpoint("test", "POST", "/data", self.endpoint.base_url)
@@ -326,7 +373,7 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
                         request_json(endpoint, payload={"value": 1}, retry_policy=self.retry)
                     send.assert_called_once()
                 if isinstance(outcome, requests.Response):
-                    outcome.close.assert_called_once_with()
+                    outcome.close_spy.assert_called_once_with()
 
     def test_response_limits_errors_and_cancellation_close_owned_resources(self) -> None:
         for name in ("declared", "streamed", "http_error", "bad_json", "cancelled", "bytes"):
@@ -356,7 +403,7 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
                         with self.assertRaises(expected):
                             request_json(self.endpoint, retry_policy=self.retry)
                     send.assert_called_once()
-                response.close.assert_called_once_with()
+                response.close_spy.assert_called_once_with()
 
     def test_injected_request_contract_keeps_validation_without_creating_a_session(self) -> None:
         response = response_for()

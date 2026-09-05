@@ -4,6 +4,7 @@ import json
 import inspect
 import math
 import os
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from requests.models import PreparedRequest
 from requests.utils import select_proxy
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
+from core.request_control import controlled_response, current_request, resolve_with_deadline
 from .errors import MarketConfigurationError, MarketHTTPError
 from .outbound import (
     OutboundEndpointPolicy,
@@ -63,14 +65,27 @@ class RateLimiter:
     def wait(self) -> float:
         if self.min_interval_seconds <= 0:
             return 0.0
-        with self._lock:
+        control = current_request()
+        if control is None:
+            self._lock.acquire()
+        else:
+            while not self._lock.acquire(timeout=min(0.05, control.remaining())):
+                control.check()
+        try:
+            if control is not None:
+                control.check()
             now = self._clock()
             delay = max(0.0, self._next_allowed_at - now)
             if delay:
-                self._sleeper(delay)
+                if control is None:
+                    self._sleeper(delay)
+                else:
+                    control.sleep(delay)
                 now = self._clock()
             self._next_allowed_at = max(now, self._next_allowed_at) + self.min_interval_seconds
             return delay
+        finally:
+            self._lock.release()
 
 
 class _PinnedConnectionMixin:
@@ -78,10 +93,44 @@ class _PinnedConnectionMixin:
 
     def __init__(self, *args: Any, pinned_addresses: Iterable[str] = (), **kwargs: Any) -> None:
         self._market_sentinel_pinned_addresses = tuple(str(address) for address in pinned_addresses)
+        self._request_control = None
+        self._request_socket_guard = None
         super().__init__(*args, **kwargs)
+
+    def bind_request_control(self, control) -> None:
+        self.release_request_control()
+        self._request_control = control
+        if control is not None and self.sock is not None:
+            self._request_socket_guard = control.watch_socket(self.sock)
+
+    def release_request_control(self) -> None:
+        if self._request_control is not None and self._request_socket_guard is not None:
+            self._request_control.unwatch_socket(self._request_socket_guard)
+        self._request_control = None
+        self._request_socket_guard = None
+
+    def close(self) -> None:
+        # http.client closes the connection before returning a non-keepalive
+        # response, whose makefile still owns the socket. The request must
+        # retain that guard until the response body is consumed or closed.
+        self._request_control = None
+        self._request_socket_guard = None
+        super().close()
+
+    def connect(self) -> None:
+        super().connect()
+        control = self._request_control
+        if control is not None:
+            if self._request_socket_guard is not None:
+                control.unwatch_socket(self._request_socket_guard)
+            self._request_socket_guard = control.watch_socket(self.sock)
 
     def _new_conn(self):
         addresses = self._market_sentinel_pinned_addresses
+        control = self._request_control
+        if control is not None and not addresses:
+            records = resolve_with_deadline(socket.getaddrinfo, self._dns_host, self.port, type=socket.SOCK_STREAM)
+            addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records))
         if not addresses:
             return super()._new_conn()
 
@@ -89,16 +138,32 @@ class _PinnedConnectionMixin:
         # connect() performs TLS verification and before HTTP headers are sent;
         # only the raw socket connection uses the validated numeric address.
         original_dns_host = getattr(self, "_dns_host", getattr(self, "host", ""))
+        original_timeout = self.timeout
         last_error: Optional[BaseException] = None
         try:
             for address in addresses:
                 self._dns_host = address
+                if control is not None:
+                    self.timeout = min(float(original_timeout), control.remaining()) if original_timeout is not None else control.remaining()
                 try:
-                    return super()._new_conn()
+                    sock = super()._new_conn()
+                    if control is not None:
+                        try:
+                            # TCP connection time must not restart the TLS
+                            # handshake's remaining timeout budget.
+                            sock.settimeout(min(float(self.timeout), control.remaining()))
+                            self._request_socket_guard = control.watch_socket(sock)
+                        except BaseException:
+                            sock.close()
+                            raise
+                    return sock
                 except Exception as exc:  # pragma: no cover - urllib3 version-specific errors
+                    if control is not None:
+                        control.check()
                     last_error = exc
         finally:
             self._dns_host = original_dns_host
+            self.timeout = original_timeout
         if last_error is not None:
             raise last_error
         return super()._new_conn()
@@ -112,7 +177,24 @@ class _PinnedHTTPSConnection(_PinnedConnectionMixin, urllib3.connection.HTTPSCon
     pass
 
 
-class _PinnedHTTPConnectionPool(HTTPConnectionPool):
+class _RequestControlPoolMixin:
+    def _get_conn(self, timeout=None):
+        connection = super()._get_conn(timeout=timeout)
+        try:
+            connection.bind_request_control(current_request())
+        except BaseException:
+            connection.close()
+            super()._put_conn(None)
+            raise
+        return connection
+
+    def _put_conn(self, connection) -> None:
+        if connection is not None:
+            connection.release_request_control()
+        super()._put_conn(connection)
+
+
+class _PinnedHTTPConnectionPool(_RequestControlPoolMixin, HTTPConnectionPool):
     ConnectionCls = _PinnedHTTPConnection
 
     def __init__(self, host: str, port: Optional[int] = None, *, pinned_addresses: Iterable[str] = (), **kwargs: Any) -> None:
@@ -121,7 +203,7 @@ class _PinnedHTTPConnectionPool(HTTPConnectionPool):
         super().__init__(host, port, **kwargs)
 
 
-class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
+class _PinnedHTTPSConnectionPool(_RequestControlPoolMixin, HTTPSConnectionPool):
     ConnectionCls = _PinnedHTTPSConnection
 
     def __init__(self, host: str, port: Optional[int] = None, *, pinned_addresses: Iterable[str] = (), **kwargs: Any) -> None:
@@ -168,6 +250,14 @@ class _PinnedHTTPAdapter(HTTPAdapter):
         )
 
     def send(self, request: PreparedRequest, **kwargs: Any):
+        control = current_request()
+        if control is not None:
+            timeout = kwargs.get("timeout")
+            remaining = control.remaining()
+            if isinstance(timeout, tuple):
+                kwargs["timeout"] = tuple(min(float(value), remaining) if value is not None else remaining for value in timeout)
+            elif timeout is None or isinstance(timeout, (float, int)):
+                kwargs["timeout"] = min(float(timeout), remaining) if timeout is not None else remaining
         pins = tuple(getattr(request, "_market_sentinel_pinned_addresses", ()) or ())
         self._market_sentinel_active_pins.addresses = pins
         try:
@@ -184,6 +274,13 @@ class _PinnedHTTPAdapter(HTTPAdapter):
                 del self._market_sentinel_active_pins.addresses
             except AttributeError:
                 pass
+
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any):
+        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+        if not proxy.lower().startswith("socks"):
+            manager.pool_classes_by_scheme = dict(manager.pool_classes_by_scheme)
+            manager.pool_classes_by_scheme.update(http=_PinnedHTTPConnectionPool, https=_PinnedHTTPSConnectionPool)
+        return manager
 
     def _direct_pinned_connection(self, url: str, pins: Iterable[str]):
         return self.poolmanager.connection_from_url(
@@ -235,6 +332,12 @@ class _ValidatingSession(requests.Session):
         self.mount("https://", _PinnedHTTPAdapter())
 
     def send(self, request: PreparedRequest, **kwargs: Any) -> requests.Response:
+        timeout = kwargs.get("timeout", DEFAULT_TIMEOUT_SECONDS)
+        if isinstance(timeout, tuple):
+            timeout = sum(float(value) for value in timeout if value is not None) or DEFAULT_TIMEOUT_SECONDS
+        return controlled_response(DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout, self._send, request, **kwargs)
+
+    def _send(self, request: PreparedRequest, **kwargs: Any) -> requests.Response:
         safe_url, addresses = validate_outbound_url_with_addresses(
             request.url,
             setting_key="outbound_url",
@@ -252,6 +355,12 @@ class _ValidatingSession(requests.Session):
                 pass
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        timeout = kwargs.get("timeout", DEFAULT_TIMEOUT_SECONDS)
+        if isinstance(timeout, tuple):
+            timeout = sum(float(value) for value in timeout if value is not None) or DEFAULT_TIMEOUT_SECONDS
+        return controlled_response(DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout, self._request, method, url, **kwargs)
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         already_validated = bool(kwargs.pop("_market_sentinel_url_validated", False))
         if not already_validated:
             url = validate_outbound_url(
@@ -418,6 +527,28 @@ class AdapterRuntime:
         yield bytes(content)
 
     def request_response(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        json_body: Any = None,
+        data: Any = None,
+        headers: Optional[Mapping[str, str]] = None,
+        max_response_bytes: Optional[int] = None,
+        error_context: Optional[str] = None,
+    ) -> requests.Response:
+        """Return a bounded response whose deadline lasts until close()."""
+        try:
+            return controlled_response(
+                self.timeout_seconds, self._request_response, method, url,
+                params=params, json_body=json_body, data=data, headers=headers,
+                max_response_bytes=max_response_bytes, error_context=error_context,
+            )
+        except requests.RequestException as exc:
+            raise MarketHTTPError(f"{error_context or self.market_id} HTTP request failed: {exc}") from exc
+
+    def _request_response(
         self,
         method: str,
         url: str,

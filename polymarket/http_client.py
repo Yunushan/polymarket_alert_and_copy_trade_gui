@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 import requests
 
+from core.request_control import current_request, request_scope
 from .endpoints import PolymarketEndpoint
 
 
@@ -195,18 +196,24 @@ def _request(
     retry_policy: RetryPolicy,
     json_fallback: bool = False,
 ) -> bytes:
-    with _request_transport() as transport:
-        return _request_with_transport(
-            endpoint,
-            transport=transport,
-            path=path,
-            params=params,
-            payload=payload,
-            headers=headers,
-            timeout=timeout,
-            retry_policy=retry_policy,
-            json_fallback=json_fallback,
-        )
+    try:
+        with request_scope(timeout), _request_transport() as transport:
+            return _request_with_transport(
+                endpoint,
+                transport=transport,
+                path=path,
+                params=params,
+                payload=payload,
+                headers=headers,
+                timeout=timeout,
+                retry_policy=retry_policy,
+                json_fallback=json_fallback,
+            )
+    except requests.Timeout as exc:
+        raise PolymarketHTTPError(
+            f"{endpoint.service} {endpoint.method} request deadline exceeded.",
+            service=endpoint.service, method=endpoint.method, url=endpoint_url(endpoint, path),
+        ) from exc
 
 
 @contextmanager
@@ -251,6 +258,9 @@ def _request_with_transport(
     last_exc: Optional[BaseException] = None
 
     for attempt in range(1, attempts + 1):
+        control = current_request()
+        if control is not None:
+            control.check()
         try:
             response = transport(
                 method,
@@ -273,6 +283,8 @@ def _request_with_transport(
                 status_code=exc.response.status_code if exc.response is not None else None,
             ) from exc
         except requests.RequestException as exc:
+            if control is not None:
+                control.check()
             last_exc = exc
             if attempt < attempts:
                 _sleep_before_retry(attempt, retry_policy)
@@ -349,6 +361,8 @@ def _request_with_transport(
             _close_response(response)
 
         if read_error is not None:
+            if control is not None:
+                control.check()
             last_exc = read_error
             if attempt < attempts:
                 _sleep_before_retry(attempt, retry_policy)
@@ -375,7 +389,12 @@ def _request_with_transport(
 def _sleep_before_retry(attempt: int, retry_policy: RetryPolicy, *, response: Optional[requests.Response] = None) -> None:
     retry_after = _retry_after_seconds(response)
     delay = retry_after if retry_after is not None else retry_policy.backoff_seconds * (2 ** max(0, attempt - 1))
-    time.sleep(min(max(0.0, delay), retry_policy.max_sleep_seconds))
+    delay = min(max(0.0, delay), retry_policy.max_sleep_seconds)
+    control = current_request()
+    if control is None:
+        time.sleep(delay)
+    else:
+        control.sleep(delay)
 
 
 def _retry_after_seconds(response: Optional[requests.Response]) -> Optional[float]:

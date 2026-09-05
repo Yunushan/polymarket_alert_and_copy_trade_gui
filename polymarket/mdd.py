@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from core.request_control import RequestCancelled
 from . import clob_rest, data_api
 from .accounting import download_and_parse_accounting_snapshot, reconcile_mdd_payload_with_accounting
 from .drawdown import max_drawdown
@@ -838,6 +839,8 @@ def _apply_accounting_snapshot_if_requested(
         return payload
     try:
         snapshot = download_and_parse_accounting_snapshot(wallet, timeout=accounting_timeout)
+    except RequestCancelled:
+        raise
     except Exception as exc:
         result = dict(payload)
         result["accounting_snapshot"] = {
@@ -934,6 +937,8 @@ def build_mark_replay_mdd_payload(
             fidelity=fidelity,
             cache_ttl_seconds=cache_ttl_seconds,
         )
+    except RequestCancelled:
+        raise
     except Exception as exc:
         base.update(
             {

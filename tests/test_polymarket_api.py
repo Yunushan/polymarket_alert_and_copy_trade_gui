@@ -1252,7 +1252,7 @@ store_live_validation_report(
 
     def test_shared_client_retries_transient_public_reads_and_raises_rate_limit(self) -> None:
         with (
-            patch("polymarket.http_client.time.sleep") as mock_sleep,
+            patch("core.request_control.RequestControl.sleep") as mock_sleep,
             patch(
                 HTTP_REQUEST,
                 side_effect=[
@@ -1279,7 +1279,7 @@ store_live_validation_report(
         self.assertTrue(response.closed)
 
         with (
-            patch("polymarket.http_client.time.sleep"),
+            patch("core.request_control.RequestControl.sleep"),
             patch(
                 HTTP_REQUEST,
                 side_effect=[
