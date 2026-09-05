@@ -5,7 +5,35 @@ readiness score. It reports a score out of 100 and separates repeatable local
 proof from evidence that can only be collected on a real host, account, or
 GitHub repository.
 
-## Improvement Status: 2026-09-05
+## Current Independent Assessment
+
+The latest independently reviewed committed baseline is `4b92ff4`, scored
+**74/100 on 2026-09-05**, not approved for unattended funded production. Its
+exact [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33976653700)
+passed 48 jobs with two optional skips, and its exact
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33976653697)
+passed. The candidate remains on open PR #79, not protected main or a published
+release. Earlier 70/73 independent assessments and the 83-point formal local
+checklist below are historical results with different scope, not competing
+current approvals. Missing external acceptance cannot be supplied by a score.
+
+The subsequent browser-workflow candidate applies the saved React theme,
+preserves view navigation through reload/back/forward, names the previously
+unnamed controls, announces alert/wallet results and errors, and clears an edit
+form after its wallet is deleted. Semantic palette variables and responsive form
+columns prevent light-only surfaces and cramped alert selectors. The committed
+Playwright acceptance gate uses isolated temporary backend state with outbound
+connections forbidden, covers desktop/mobile widths in both themes, and retains
+screenshots/traces in CI. See [Browser Acceptance](BROWSER_ACCEPTANCE.md) for
+scope, commands and limitations. All 16 local Edge acceptance cases passed,
+as did the 12 existing frontend tests and 24 focused runner/workflow/metadata
+tests. The full Windows verifier ran 1,405 cases with the same three errors,
+one failed assertion and nine skips originating in local TLS trust rejection;
+it is not a full local pass. Source/wheel artifact verification and the npm
+audit (including development dependencies) passed. Candidate-specific hosted CI is still required;
+the 74-point baseline score is not automatically promoted by these changes.
+
+## Audit History: 2026-09-05
 
 The committed transport follow-up `981a2e0` passed exact-commit hosted
 [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33975571723)
@@ -175,7 +203,7 @@ and funded venue validation. Live mutation gates remain disabled. No readiness
 points should be awarded for external acceptance until its matching evidence
 exists and is verified.
 
-## Current Check
+## Running the Scorer
 
 Run the complete local verification profile:
 
@@ -186,8 +214,10 @@ python scripts/check_product_readiness.py \
 ```
 
 `--full-local` runs `verify.py --skip-pip-check --frontend-build
---frontend-live-smoke`. This command produced the latest **83/100 formal local
-checklist** result. It is not the deployment-oriented production score and does
+--frontend-live-smoke`. A prior clean baseline produced an **83/100 formal local
+checklist** result. Rerun the command for a new candidate; that historical pass
+does not replace the locally failing Windows TLS run described above. It is not
+the deployment-oriented production score and does
 not prove an exact deployed revision, release, external platform, or live venue.
 
 Run the no-credentials public Polymarket probe separately when external network
@@ -223,11 +253,12 @@ check does not receive local test or security points.
 | Platform evidence | 10 | 5 | Dispatch the implemented platform collector against a successful exact-revision CI run and supply both exact attested artifacts |
 | Live acceptance | 5 | 0 | Reachable public endpoints plus the implemented credentialed/funded collectors' exact attested artifacts; funded execution also requires deliberate promotion of the offline-tested V2 mutation gate |
 
-The latest completed full local audit on 2026-09-05 is **83/100 (not ready)** when no external
+The recorded full local audit of baseline `b068de1` on 2026-09-05 was
+**83/100 (not ready)** when no external
 evidence manifests are supplied. Local verification covers the adapter catalog
 (68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
 files, documentation, workflows, secret hygiene, frontend build/browser smoke,
-and packaging checks. The current verifier ran 1,346 tests (1,339 passed and 7
+and packaging checks. That verifier ran 1,346 tests (1,339 passed and 7
 intentionally skipped on Windows), achieved 73% all-source and 76% backend
 combined statement/branch coverage, satisfied the 65% overall and 74% backend
 combined coverage floors, and passed Ruff. Counts are reported
@@ -254,9 +285,9 @@ remain unawarded. No live evidence is invented to compensate for that gap. The
 score therefore reflects repeatable repository proof plus explicitly supplied
 evidence, not a production certification.
 
-## Independent Production Assessment
+## Historical Independent Assessment
 
-The latest deployment-oriented assessment was **73/100 - not ready**. It discounts
+This earlier deployment-oriented assessment was **73/100 - not ready**. It discounts
 repository-design points that the formal scorer awards before an exact clean
 revision, signed release, real production host, recovery exercise, and live
 venue behavior are proven. This candidate includes uncommitted direct-transport
@@ -412,8 +443,9 @@ score-eligible schema-v2 artifacts, but its credentialed tier requires real
 secrets and eligible-account reads, and its funded tier intentionally fails
 closed until the offline-tested V2 mutation support is deliberately promoted
 and a bounded post-only order/immediate-cancel audit is explicitly approved.
-The scorer has no remaining structural ceiling below 100; current evidence,
-rather than missing scorer code, is what keeps the result at 83.
+The scorer has no remaining structural ceiling below 100. The historical
+83-point result lacked external evidence; every new candidate must revalidate
+local checks and supply its own qualifying external evidence.
 
 ```json
 {

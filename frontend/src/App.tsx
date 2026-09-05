@@ -844,6 +844,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (config?.theme) {
+      document.documentElement.dataset.theme = config.theme;
+    }
+  }, [config?.theme]);
+
+  useEffect(() => {
+    const restoreTab = () => setTab(initialTabFromUrl());
+    window.addEventListener("popstate", restoreTab);
+    return () => window.removeEventListener("popstate", restoreTab);
+  }, []);
+
+  function navigateTab(next: Tab) {
+    if (next === tab) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", next);
+    window.history.pushState(null, "", url);
+    setTab(next);
+  }
+
+  useEffect(() => {
     if (config?.selected_market_id) {
       setPaperForm((current) => ({ ...current, market_id: current.market_id || config.selected_market_id }));
       setAlertForm((current) => ({ ...current, market_id: current.market_id || config.selected_market_id }));
@@ -1953,6 +1973,10 @@ export default function App() {
         const payload = await deleteWallet(wallet.id);
         setWallets(payload);
         setWalletMessage("Wallet watch deleted.");
+        if (editingWalletId === wallet.id) {
+          setEditingWalletId(null);
+          setWalletForm(emptyWalletForm());
+        }
       } else if (action === "poll") {
         const payload = await pollWallets();
         setWallets(payload.wallets);
@@ -2372,28 +2396,28 @@ export default function App() {
           </div>
         </div>
         <nav className="nav-list" aria-label="Primary">
-          <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>
+          <button className={tab === "overview" ? "active" : ""} aria-current={tab === "overview" ? "page" : undefined} onClick={() => navigateTab("overview")}>
             <BarChart3 size={18} /> Overview
           </button>
-          <button className={tab === "markets" ? "active" : ""} onClick={() => setTab("markets")}>
+          <button className={tab === "markets" ? "active" : ""} aria-current={tab === "markets" ? "page" : undefined} onClick={() => navigateTab("markets")}>
             <SlidersHorizontal size={18} /> Markets
           </button>
-          <button className={tab === "analytics" ? "active" : ""} onClick={() => setTab("analytics")}>
+          <button className={tab === "analytics" ? "active" : ""} aria-current={tab === "analytics" ? "page" : undefined} onClick={() => navigateTab("analytics")}>
             <Trophy size={18} /> Analytics
           </button>
-          <button className={tab === "live" ? "active" : ""} onClick={() => setTab("live")}>
+          <button className={tab === "live" ? "active" : ""} aria-current={tab === "live" ? "page" : undefined} onClick={() => navigateTab("live")}>
             <ShieldCheck size={18} /> Live Safety
           </button>
-          <button className={tab === "alerts" ? "active" : ""} onClick={() => setTab("alerts")}>
+          <button className={tab === "alerts" ? "active" : ""} aria-current={tab === "alerts" ? "page" : undefined} onClick={() => navigateTab("alerts")}>
             <Bell size={18} /> Alerts
           </button>
-          <button className={tab === "wallets" ? "active" : ""} onClick={() => setTab("wallets")}>
+          <button className={tab === "wallets" ? "active" : ""} aria-current={tab === "wallets" ? "page" : undefined} onClick={() => navigateTab("wallets")}>
             <Wallet size={18} /> Wallets
           </button>
-          <button className={tab === "paper" ? "active" : ""} onClick={() => setTab("paper")}>
+          <button className={tab === "paper" ? "active" : ""} aria-current={tab === "paper" ? "page" : undefined} onClick={() => navigateTab("paper")}>
             <Activity size={18} /> Paper
           </button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
+          <button className={tab === "settings" ? "active" : ""} aria-current={tab === "settings" ? "page" : undefined} onClick={() => navigateTab("settings")}>
             <Settings size={18} /> Settings
           </button>
         </nav>
@@ -2418,7 +2442,7 @@ export default function App() {
           </button>
         </header>
 
-        {error ? <div className="error-banner">{error}</div> : null}
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
 
         {tab === "overview" ? (
           <OverviewView alerts={alerts} config={config} copy={copyState} health={health} markets={markets} paper={paper} wallets={wallets} loading={loading} />
@@ -2738,12 +2762,13 @@ function MarketsView({
         <label className="search-box">
           <Search size={17} />
           <input
+            aria-label="Search markets"
             value={marketQuery}
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder="Search markets, ids, capabilities"
           />
         </label>
-        <select value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
+        <select aria-label="Selected market" value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
           {(markets?.markets ?? []).map((market) => (
             <option key={market.market_id} value={market.market_id}>
               {market.display_name}
@@ -5859,7 +5884,7 @@ function LiveSafetyView({
             <ShieldCheck size={18} />
             <h2>Gate Controls</h2>
           </div>
-          <select value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
+          <select aria-label="Selected market" value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
             {(markets?.markets ?? []).map((market) => (
               <option key={market.market_id} value={market.market_id}>
                 {market.display_name}
@@ -6587,7 +6612,7 @@ function PromotionProposalPreview({
           <p>Read-only manual patch proposal from accepted ledger decisions.</p>
         </div>
         <div className="button-row compact">
-          <select value={targetTier} onChange={(event) => onTargetTierChange(event.target.value)}>
+          <select aria-label="Promotion target tier" value={targetTier} onChange={(event) => onTargetTierChange(event.target.value)}>
             <option value="">all target tiers</option>
             <option value="credential_live_verified">credential_live_verified</option>
             <option value="funded_live_verified">funded_live_verified</option>
@@ -7108,7 +7133,7 @@ function AlertsView({
           </button>
         </div>
       </form>
-      {message ? <div className="info-banner">{message}</div> : null}
+      {message ? <div className="info-banner" role="status">{message}</div> : null}
       <div className="metrics-grid four">
         <Metric label="Alerts" value={alerts?.counts.total ?? 0} />
         <Metric label="Enabled" value={alerts?.counts.enabled ?? 0} tone="good" />
@@ -7290,7 +7315,7 @@ function WalletsCopyView({
             </button>
           </div>
         </div>
-        {message ? <div className="info-banner">{message}</div> : null}
+        {message ? <div className="info-banner" role="status">{message}</div> : null}
         <div className="table-wrap">
           <table>
             <thead>

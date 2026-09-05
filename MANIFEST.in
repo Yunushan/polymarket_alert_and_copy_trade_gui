@@ -18,8 +18,11 @@ recursive-include assets *.ico *.png *.svg
 recursive-include data *.json
 recursive-include deploy *
 recursive-include docs *.md
-recursive-include frontend *.css *.html *.json *.png *.ts *.tsx
+recursive-include frontend *.css *.html *.json *.mjs *.png *.ts *.tsx
 recursive-include scripts *.py
 recursive-include tests *.csv *.json *.py *.txt
 prune frontend/dist
 prune frontend/node_modules
+prune frontend/.test-dist
+prune frontend/test-results
+prune frontend/playwright-report
