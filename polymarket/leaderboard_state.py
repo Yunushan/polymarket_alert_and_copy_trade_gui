@@ -113,10 +113,19 @@ class LeaderboardStateStore:
                 self.connection.rollback()
 
     def _create_schema(self) -> None:
+        # A successful page/MDD commit must request a storage sync, not wait
+        # until a later WAL checkpoint. Verify settings before any migration.
+        for setting, value, expected in (
+            ("journal_mode", "WAL", "wal"),
+            ("synchronous", "FULL", 2),
+            ("fullfsync", "ON", 1),
+        ):
+            self.connection.execute(f"PRAGMA {setting}={value}")
+            row = self.connection.execute(f"PRAGMA {setting}").fetchone()
+            if row is None or row[0] != expected:
+                raise RuntimeError(f"Leaderboard state requires SQLite {setting}={value}; refusing to write with weaker durability.")
         self.connection.executescript(
             """
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL

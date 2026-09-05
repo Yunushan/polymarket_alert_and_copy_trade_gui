@@ -24,6 +24,118 @@ class LeaderboardStateStoreTests(unittest.TestCase):
     def row(wallet: str, rank: int = 1) -> dict:
         return {"wallet": wallet, "rank": rank, "pnl_usd": float(rank), "volume_usd": 100.0, "roi_pct": float(rank)}
 
+    def test_every_writer_requires_wal_full_sync_and_preserves_existing_data(self) -> None:
+        store = self.make_store()
+        store.record_page(0, 1, [self.row("0xaaa")])
+        self.assertEqual(store.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        self.assertEqual(store.connection.execute("PRAGMA synchronous").fetchone()[0], 2)
+        self.assertEqual(store.connection.execute("PRAGMA fullfsync").fetchone()[0], 1)
+        store.close()
+        reopened = LeaderboardStateStore(store.path)
+        try:
+            self.assertEqual(reopened.connection.execute("PRAGMA synchronous").fetchone()[0], 2)
+            self.assertEqual(reopened.connection.execute("PRAGMA fullfsync").fetchone()[0], 1)
+            self.assertEqual(reopened.progress()["rows"], 1)
+        finally:
+            reopened.close()
+
+    def test_durability_downgrade_fails_before_schema_writes_and_releases_lock(self) -> None:
+        connect = sqlite3.connect
+        for setting, requested, downgraded in (
+            ("journal_mode", "WAL", "DELETE"),
+            ("synchronous", "FULL", "NORMAL"),
+            ("fullfsync", "ON", "OFF"),
+        ):
+            with self.subTest(setting=setting), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "scan.sqlite3"
+
+                class DowngradingConnection(sqlite3.Connection):
+                    requested_statement = f"PRAGMA {setting}={requested}"
+                    downgraded_statement = f"PRAGMA {setting}={downgraded}"
+
+                    def execute(self, sql, parameters=()):
+                        if sql == self.requested_statement:
+                            sql = self.downgraded_statement
+                        return super().execute(sql, parameters)
+
+                with patch("polymarket.leaderboard_state.sqlite3.connect", side_effect=lambda *args, **kwargs: connect(
+                    *args, **kwargs, factory=DowngradingConnection,
+                )):
+                    with self.assertRaisesRegex(RuntimeError, f"requires SQLite {setting}={requested}"):
+                        LeaderboardStateStore(path)
+                with connect(path) as connection:
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0], 0)
+                connection.close()
+                recovered = LeaderboardStateStore(path)
+                recovered.close()
+
+    def test_sqlite_full_does_not_advance_page_or_mdd_progress(self) -> None:
+        for phase in ("page", "mdd"):
+            with self.subTest(phase=phase):
+                store = self.make_store()
+                store.record_page(0, 1, [self.row("0xaaa")])
+                row = next(store.iter_mdd_candidates({}, sort="roi_pct", direction="DESC", limit=None))
+                before = store.status()
+                page_count = store.connection.execute("PRAGMA page_count").fetchone()[0]
+                previous_limit = store.connection.execute("PRAGMA max_page_count").fetchone()[0]
+                store.connection.execute(f"PRAGMA max_page_count={int(page_count)}")
+                try:
+                    with self.assertRaisesRegex(sqlite3.OperationalError, "database or disk is full"):
+                        if phase == "page":
+                            store.record_page(1, 1, [{**self.row("0xbbb"), "raw": {"payload": "x" * 1_048_576}}])
+                        else:
+                            store.set_mdd(row["id"], {"mdd_pct": 10.0, "limitations": ["x" * 1_048_576]})
+                    self.assertFalse(store.connection.in_transaction)
+                    self.assertEqual(store.status(), before)
+                    self.assertEqual(store.connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                finally:
+                    store.connection.execute(f"PRAGMA max_page_count={int(previous_limit)}")
+                store.record_page(1, 1, [self.row("0xbbb")])
+                store.set_mdd(row["id"], {"mdd_pct": 10.0})
+                self.assertEqual(store.progress()["rows"], 2)
+                self.assertEqual(store.progress()["mdd_done"], 1)
+
+    def test_abrupt_exit_during_page_or_mdd_transaction_preserves_committed_state(self) -> None:
+        script = """
+import os, sys
+from polymarket.leaderboard_state import LeaderboardStateStore
+store = LeaderboardStateStore(sys.argv[1])
+store.prepare({'period': 'all'}, resume=False)
+store.record_page(0, 1, [{'wallet': '0xaaa'}])
+set_metadata = store._set_metadata
+def interrupt(key, value):
+    if key == 'last_updated_at' and store.connection.in_transaction:
+        os._exit(18)
+    set_metadata(key, value)
+store._set_metadata = interrupt
+if sys.argv[2] == 'page':
+    store.record_page(1, 1, [{'wallet': '0xbbb'}])
+else:
+    row = next(store.iter_mdd_candidates({}, sort='roi_pct', direction='DESC', limit=None))
+    store.set_mdd(row['id'], {'mdd_pct': 10.0})
+raise AssertionError('transaction must be interrupted before commit')
+"""
+        for phase in ("page", "mdd"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "scan.sqlite3"
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", script, str(path), phase],
+                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(result.returncode, 18, result.stderr)
+                recovered = LeaderboardStateStore(path)
+                try:
+                    recovered.prepare({"period": "all"}, resume=True)
+                    progress = recovered.progress()
+                    self.assertEqual(progress["rows"], 1)
+                    self.assertEqual(progress["pages"], 1)
+                    self.assertEqual(progress["next_offset"], 1)
+                    self.assertEqual(progress["mdd_pending"], 1)
+                    self.assertEqual(progress["mdd_done"], 0)
+                    self.assertEqual(recovered.connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                finally:
+                    recovered.close()
+
     def test_single_writer_ownership_allows_readers_but_rejects_a_second_writer(self) -> None:
         store = self.make_store()
         store.record_page(0, 1, [self.row("0xaaa")])

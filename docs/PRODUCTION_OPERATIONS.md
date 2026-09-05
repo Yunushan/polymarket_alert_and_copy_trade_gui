@@ -157,6 +157,18 @@ acceptance above remains required.
 
 ### Durable state boundary
 
+Leaderboard scan writers require SQLite WAL with `synchronous=FULL`. Each
+page/MDD transaction requests a storage sync before reporting success, rather
+than deferring it until a checkpoint. `fullfsync=ON` additionally requests
+macOS F_FULLFSYNC where supported. Every writer connection reapplies and checks
+these settings before schema migration or scan writes; an unavailable setting
+fails closed. Read-only status/export connections do not change database mode.
+This can reduce write throughput compared with the previous NORMAL setting.
+Use a local filesystem with working locks and reliable storage sync; SQLite
+settings and process-crash tests cannot certify a VPS provider's power-loss
+behavior. Keep backups and perform real-host recovery drills. See the
+[SQLite sync contract](https://www.sqlite.org/pragma.html#pragma_synchronous).
+
 The bundled production environment pins every non-configuration durable store
 below `/var/lib/market-sentinel`:
 
@@ -321,7 +333,15 @@ cryptographically verified, restorable archive/manifest pairs. An orphan left
 by an interrupted publication and an invalid pair are preserved for operator
 inspection, do not consume a retention slot, and cannot evict a valid backup.
 SQLite state databases are captured with SQLite's online backup API instead of
-copying WAL, shared-memory, or rollback-journal sidecar files. Other regular
+copying WAL, shared-memory, or rollback-journal sidecar files. A read transaction
+pins each database snapshot before its page-count/size preflight, so concurrent
+WAL commits cannot expand the copy beyond its accepted payload budget. Oversized
+databases are rejected before a staged database is created. `--sqlite-timeout`
+sets the per-database lock/copy budget (30 seconds by default). Copying checks
+that budget after each 64-page step; this is not an interrupt for a blocked
+kernel/filesystem call. The systemd unit's five-minute process timeout remains
+the final service-level bound. Failed or timed-out copies publish no new pair
+and do not prune prior valid backups. Other regular
 files are copied to a private stable snapshot and rejected if they change while
 being copied. Creation enforces the same member, payload, compressed-archive,
 and bounded tar-overhead limits as verification; it verifies the staged pair

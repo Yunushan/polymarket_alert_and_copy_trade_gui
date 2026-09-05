@@ -7,6 +7,26 @@ GitHub repository.
 
 ## Improvement Status: 2026-09-05
 
+The committed transport follow-up `981a2e0` passed exact-commit hosted
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/33975571723)
+(48 successful jobs, two optional skips) and
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33975571816).
+This includes macOS deadline and real SIGTERM regressions after retaining POSIX
+reader descriptors until normal cleanup. It does not verify subsequent edits.
+
+The next storage candidate requires WAL/FULL synchronization and requests
+macOS fullfsync before scan writes. Its tests exercise actual SQLite-full errors and
+abrupt exits inside page/MDD transactions, retaining committed progress. SQLite
+backups now preflight a pinned snapshot before copying and check a configurable
+per-database budget between bounded copy steps. These are storage-contract
+improvements, not evidence of host power-loss behavior or a 100/100 promotion.
+The focused storage/backup/CLI/deployment group passed 172 tests on Linux and
+ran 172 on Windows with five platform-specific skips. The full Windows verifier
+ran 1,400 tests with nine skips, three errors and one failed assertion, all four
+failures originating in the local TLS fixture's certificate-trust rejection.
+Ruff, dependency/workflow checks, frontend build and browser smoke passed.
+This is not a full local pass; exact-commit hosted verification is still required.
+
 A subsequent review of the working tree (committed transport baseline
 `cc13dbe`, plus uncommitted deadline/cancellation changes) scored
 **70/100**, not a release approval. It reproduced two concrete candidate bugs:
