@@ -343,6 +343,26 @@ class HTTPDeadlineTests(unittest.TestCase):
         with cancellation_scope(lambda: 1 / 0), self.assertRaises(RequestCancelled), request_scope(1):
             self.fail("failed cancellation source must not dispatch")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX reader owns its descriptor until cleanup")
+    def test_abort_preserves_reader_descriptor_until_cleanup(self):
+        left, right = socket.socketpair()
+        control = RequestControl(2)
+        try:
+            descriptor = left.fileno()
+            guard = control.watch_socket(left)
+            control._abort("cancelled")
+            self.assertEqual(left.fileno(), descriptor)
+            self.assertEqual(guard.fileno(), -1)
+            self.assertFalse(control._sockets)
+            left.settimeout(0.5)
+            self.assertEqual(left.recv(1), b"")
+            with self.assertRaises(RequestCancelled):
+                control.check()
+        finally:
+            control.close()
+            left.close()
+            right.close()
+
     def test_guard_shutdown_interrupts_recv_and_release_is_idempotent(self):
         left, right = socket.socketpair()
         control = RequestControl(0.1)

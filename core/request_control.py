@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 import math
+import os
 import socket
 import threading
 import time
@@ -70,9 +71,13 @@ class RequestControl:
                 # while makefile() owns an I/O reference. Detach invalidates
                 # the socket object before closing its handle, preventing a
                 # later wrapper cleanup from closing a reused descriptor.
-                descriptor = original.detach()
-                if descriptor >= 0:
-                    socket.close(descriptor)
+                # POSIX readers must keep their descriptor until they unwind:
+                # closing it here can remove a macOS select() wakeup after
+                # shutdown, leaving the reader asleep until its old timeout.
+                if os.name == "nt":
+                    descriptor = original.detach()
+                    if descriptor >= 0:
+                        socket.close(descriptor)
                 guard.close()
             self._sockets.clear()
 
