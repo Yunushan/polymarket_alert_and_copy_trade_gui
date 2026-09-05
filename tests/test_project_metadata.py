@@ -4,6 +4,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 from scripts.verify_python_dist_artifacts import REQUIRED_SDIST_MEMBERS
 
 try:
@@ -18,6 +20,18 @@ APP_TITLE = "MarketSentinel"
 
 
 class ProjectMetadataTests(unittest.TestCase):
+    def test_managed_tls_transport_has_an_explicit_supported_dependency(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        sources = [project["project"]["dependencies"], (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()]
+        for source in sources:
+            with self.subTest(source=source):
+                dependencies = {requirement.name: requirement for requirement in map(Requirement, source)}
+                self.assertIn("urllib3", dependencies)
+                versions = dependencies["urllib3"].specifier
+                self.assertIn("2.7.0", versions)
+                self.assertNotIn("1.25.11", versions)
+                self.assertNotIn("3.0.0", versions)
+
     def test_repository_hygiene_policy(self) -> None:
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
 

@@ -124,7 +124,13 @@ class RequestControl:
 
     def watch_socket(self, sock: socket.socket) -> socket.socket:
         self.check()
-        guard = socket.socket(fileno=socket.dup(sock.fileno()))
+        descriptor = socket.dup(sock.fileno())
+        try:
+            # Windows cannot infer an unconnected socket's family from its handle.
+            guard = socket.socket(sock.family, sock.type, sock.proto, fileno=descriptor)
+        except BaseException:
+            socket.close(descriptor)
+            raise
         with self._lock:
             if self._finished.is_set():
                 guard.close()

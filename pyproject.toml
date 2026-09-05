@@ -14,6 +14,7 @@ authors = [{ name = "MarketSentinel contributors" }]
 dependencies = [
     "exceptiongroup>=1.0.2; python_version < '3.11'",
     "requests>=2.31.0",
+    "urllib3>=2.7.0,<3.0",
     "truststore>=0.10.0",
     "websocket-client>=1.7.0",
     "python-dotenv>=1.0.0",

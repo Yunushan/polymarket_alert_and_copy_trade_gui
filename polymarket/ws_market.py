@@ -11,6 +11,8 @@ from websocket import (
     create_connection,
 )
 
+from core.request_control import cancellation_scope
+
 from .constants import CLOB_WSS_BASE
 from .http_client import PolymarketValidationError
 from .ws_transport import (
@@ -27,7 +29,6 @@ from .ws_transport import (
 
 
 MarketEventHandler = Callable[[Dict[str, Any]], None]
-_ORIGINAL_CREATE_CONNECTION = create_connection
 
 
 def _validated_market_ws_url(url_base: str, *, resolve_addresses: bool = False) -> str:
@@ -207,14 +208,15 @@ class MarketWSClient:
                 self._url,
                 setting_key="Polymarket market WebSocket URL",
                 kind="websocket",
-                resolve_addresses=create_connection is _ORIGINAL_CREATE_CONNECTION,
+                resolve_addresses=False,
             )
-            connection = open_websocket_connection(
-                url,
-                connection_factory=create_connection,
-                timeout=WEBSOCKET_CONNECT_TIMEOUT_SECONDS,
-                read_timeout=WEBSOCKET_IO_TIMEOUT_SECONDS,
-            )
+            with cancellation_scope(stop_event.is_set):
+                connection = open_websocket_connection(
+                    url,
+                    connection_factory=create_connection,
+                    timeout=WEBSOCKET_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout=WEBSOCKET_IO_TIMEOUT_SECONDS,
+                )
             connected_at = time.monotonic()
             if not self._register_connection(generation, stop_event, connection):
                 return 0.0

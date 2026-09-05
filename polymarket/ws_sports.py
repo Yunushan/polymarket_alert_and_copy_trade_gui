@@ -11,6 +11,8 @@ from websocket import (
     create_connection,
 )
 
+from core.request_control import cancellation_scope
+
 from .constants import SPORTS_WSS_BASE
 from .http_client import PolymarketValidationError
 from .ws_transport import (
@@ -26,7 +28,6 @@ from .ws_transport import (
 
 
 SportsEventHandler = Callable[[Dict[str, Any]], None]
-_ORIGINAL_CREATE_CONNECTION = create_connection
 
 
 def _validated_websocket_url(
@@ -159,16 +160,14 @@ class SportsWSClient:
         connection: Optional[Any] = None
         connected_at: Optional[float] = None
         try:
-            url = _validated_websocket_url(
-                self._url,
-                resolve_addresses=create_connection is _ORIGINAL_CREATE_CONNECTION,
-            )
-            connection = open_websocket_connection(
-                url,
-                connection_factory=create_connection,
-                timeout=WEBSOCKET_CONNECT_TIMEOUT_SECONDS,
-                read_timeout=WEBSOCKET_IO_TIMEOUT_SECONDS,
-            )
+            url = _validated_websocket_url(self._url)
+            with cancellation_scope(stop_event.is_set):
+                connection = open_websocket_connection(
+                    url,
+                    connection_factory=create_connection,
+                    timeout=WEBSOCKET_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout=WEBSOCKET_IO_TIMEOUT_SECONDS,
+                )
             connected_at = time.monotonic()
             if not self._register_connection(generation, stop_event, connection):
                 return 0.0

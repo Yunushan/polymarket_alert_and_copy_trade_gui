@@ -28,6 +28,7 @@ APP_TITLE = "MarketSentinel"
 
 REQUIRED_IMPORTS = {
     "requests": "requests",
+    "urllib3": "urllib3",
     "truststore": "truststore",
     "websocket-client": "websocket",
     "python-dotenv": "dotenv",

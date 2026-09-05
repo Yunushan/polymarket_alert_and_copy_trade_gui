@@ -7,15 +7,16 @@ GitHub repository.
 
 ## Current Independent Assessment
 
-The latest independently reviewed committed baseline is `75aabb7`, scored
-**75/100 on 2026-09-05**, not approved for unattended funded production. Its
-exact [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33979920122)
-passed 48 jobs with two optional skips, and its exact
-[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33979920096)
-passed. The candidate remains on open PR #79, not protected main or a published
-release. Earlier 70/73 independent assessments and the 83-point formal local
-checklist below are historical results with different scope, not competing
-current approvals. Missing external acceptance cannot be supplied by a score.
+The latest independent review scored `b7b9b21` plus the local managed-WebSocket
+candidate **75/100 on 2026-09-05**, not approved for unattended funded production.
+The committed `b7b9b21` [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33981703520)
+passed 48 jobs with two optional skips, and its
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33981703519)
+passed. Those results do not validate subsequent local changes. The candidate
+remains on open PR #79, not protected main or a published release. Earlier
+independent assessments and the 83-point formal local checklist below are
+historical results with different scope, not competing current approvals.
+Missing external acceptance cannot be supplied by a score.
 
 The accepted browser-workflow baseline applies the saved React theme,
 preserves view navigation through reload/back/forward, names the previously
@@ -55,6 +56,34 @@ for the intercepted connection. Keep the original DNS/SNI and negative trust
 tests intact. Run them in a clean Windows VM or runner without HTTPS interception;
 do not trust the interceptor's untrusted root, use `verify=False`, disable
 hostname checks, or skip the cases to manufacture a full local pass.
+
+The next managed-WebSocket candidate addresses a reproduced scope-exit cleanup
+failure: cancellation after disarming the socket guard could leave a connection
+open despite connect() raising. Cleanup now surrounds the complete connection
+scope. Direct connections pin validated DNS addresses, preserve verified TLS/SNI,
+reject non-101 upgrades, and share the setup deadline across DNS/TCP/TLS/HTTP.
+The channel clients no longer resolve DNS before that deadline and their stop
+events cancel pending direct setup. A Windows unconnected-socket guard fix also
+preserves socket family/type/protocol and releases a failed duplicate handle.
+Focused regressions use real socket pairs, loopback upgrades, ephemeral-CA TLS,
+slow peers and actual worker stop events. Memory-BIO TLS through urllib3 keeps
+the guarded raw socket owned throughout the handshake while retaining native
+certificate verification. The real TLS session test covers partial-frame
+timeouts, fragmented messages, ping/pong, binary traffic and an orderly close
+after the setup deadline. Custom SSL contexts and CA/client-certificate options
+are retained. urllib3 is now an explicit runtime dependency, with the existing
+hash-locked version unchanged. Configured proxies are preserved but remain
+outside the direct pinning/active-cancellation guarantee. This candidate needs
+its own exact-commit hosted checks, not transferred release, deployment,
+financial-history or funded acceptance evidence.
+
+Candidate verification passed 23 Linux WebSocket tests, ran 170 Linux Polymarket
+tests with one platform-specific skip, and passed 20 focused Windows metadata
+and dependency-lock tests. Wheel/source artifact validation and Ruff passed.
+The final Windows full verifier ran 1,437 cases in 70.257 seconds with five
+errors, one failed assertion and nine skips, all six failure records originating
+in the local TLS fixture's certificate-trust rejection. This is not a full local
+pass, and no certificate or hostname-verification bypass has been introduced.
 
 ## Audit History: 2026-09-05
 

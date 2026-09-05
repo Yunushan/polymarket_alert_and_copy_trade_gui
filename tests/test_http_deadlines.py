@@ -336,6 +336,43 @@ class HTTPDeadlineTests(unittest.TestCase):
             left.close()
             right.close()
 
+    def test_unconnected_socket_can_be_guarded_before_connect(self):
+        for family in (socket.AF_INET, socket.AF_INET6):
+            with self.subTest(family=family), socket.socket(family, socket.SOCK_STREAM) as sock:
+                control = RequestControl(1)
+                try:
+                    guard = control.watch_socket(sock)
+                    self.assertEqual(guard.family, sock.family)
+                    self.assertEqual(guard.type, sock.type)
+                    self.assertGreaterEqual(guard.fileno(), 0)
+                    control.unwatch_socket(guard)
+                    self.assertEqual(guard.fileno(), -1)
+                    self.assertGreaterEqual(sock.fileno(), 0)
+                finally:
+                    control.close()
+
+    def test_failed_guard_construction_releases_duplicate_not_original(self):
+        left, right = socket.socketpair()
+        control = RequestControl(1)
+        descriptor = socket.dup(left.fileno())
+        try:
+            with (
+                patch.object(socket, "dup", return_value=descriptor),
+                patch.object(socket, "socket", side_effect=OSError("guard construction failed")),
+                patch.object(socket, "close", wraps=socket.close) as close,
+            ):
+                with self.assertRaisesRegex(OSError, "guard construction failed"):
+                    control.watch_socket(left)
+                close.assert_called_once_with(descriptor)
+            self.assertFalse(control._sockets)
+            self.assertIsNone(control._watcher)
+            left.sendall(b"x")
+            self.assertEqual(right.recv(1), b"x")
+        finally:
+            control.close()
+            left.close()
+            right.close()
+
     def test_invalid_timeout_and_failed_cancellation_check_fail_closed(self):
         for value in (0, -1, float("inf"), float("nan")):
             with self.subTest(timeout=value), self.assertRaises(ValueError):

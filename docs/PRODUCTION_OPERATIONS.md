@@ -75,6 +75,14 @@ regional restrictions.
   origin, list its exact scheme, host, and port in
   `MARKET_SENTINEL_OUTBOUND_PRIVATE_ORIGINS`; never use wildcards, CIDRs, or a
   public deployment's browser/API settings endpoint to change it.
+- Managed direct Polymarket WebSocket connections pin the current validated
+  DNS addresses, retain the origin hostname for TLS/SNI and HTTP Host, and
+  require a verified TLS connection and a completed 101 upgrade. DNS, TCP,
+  TLS and HTTP upgrade share one connection deadline. Worker stop events
+  cancel pending direct connections; subscriptions are not sent before upgrade.
+  Successful connections disarm their setup deadline so a later timeout cannot
+  close an established stream. Configured proxies remain honored and require
+  their own connect-time egress and deadline enforcement.
 - Managed Polymarket WebSocket connections reject any frame or complete
   fragmented message larger than 1 MiB. The frame-length check runs before
   `websocket-client` reads the declared payload, and the continuation check
@@ -104,8 +112,11 @@ owned session spanning each bounded retry/body-read operation. Pools include
 the validated address set in their identity, so a DNS change cannot reuse a
 pool pinned to retired addresses. Redirect responses are closed before
 Requests can eagerly consume their bodies while preparing a next request.
-Proxy/WebSocket paths still need their own connect-time enforcement; do not
-infer uniform pinning across all transports from direct HTTP coverage.
+Managed direct WebSockets likewise resolve inside their connection deadline
+and connect only to that validated address set, without a second hostname lookup.
+Configured proxy and injected SDK/factory paths still need their own connect-time
+enforcement; do not infer uniform pinning across all transports from direct
+HTTP/WebSocket coverage.
 TLS hostname verification, disabled redirects, and immutable endpoint settings
 reduce exposure but do not remove every validation-to-connect race.
 
@@ -154,13 +165,15 @@ service termination and forced process kills are not equivalent to POSIX
 SIGTERM; abrupt-exit durability remains a separate contract.
 
 An OS DNS lookup cannot be forcibly interrupted by Python. At most 16 daemon
-DNS helpers may remain outstanding; expired lookups cannot initiate HTTP work.
+DNS helpers may remain outstanding; expired lookups cannot initiate managed
+direct HTTP/WebSocket work.
 Cancellation callbacks must be fast, side-effect-free and thread-safe. Raw
 connect/TLS setup can take up to the remaining transport timeout to unwind;
 body reads and retry/rate-limiter waits are actively interrupted. Custom
 injected transports, SOCKS transports and venue SDKs do not acquire these
-guarantees merely by accepting a timeout argument. Host proxy/WebSocket egress
-acceptance above remains required.
+guarantees merely by accepting a timeout argument. Configured WebSocket proxies
+retain the library's connection route and do not inherit direct socket guards;
+proxy deadline/egress enforcement and host acceptance above remain required.
 
 ### Durable state boundary
 
