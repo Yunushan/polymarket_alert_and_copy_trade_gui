@@ -193,6 +193,10 @@ class ProductionDeploymentTests(unittest.TestCase):
             tracked = root / "web_api.py"
             tracked.write_text("SAFE = True\n", encoding="utf-8")
             subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            # Automatic maintenance can outlive commit and race with fixture
+            # cleanup on newer Git versions. Keep this temporary repo synchronous.
+            for setting, value in (("maintenance.auto", "false"), ("gc.auto", "0")):
+                subprocess.run(["git", "config", "--local", setting, value], cwd=root, check=True)
             subprocess.run(["git", "add", "."], cwd=root, check=True)
             subprocess.run(
                 [
