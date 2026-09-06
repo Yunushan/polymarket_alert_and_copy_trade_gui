@@ -25,7 +25,8 @@ except Exception:  # pragma: no cover
 
 from polymarket import bridge, clob_rest, data_api, gamma, relayer
 from core.atomic_files import atomic_write_text
-from polymarket.auth_readiness import build_clob_auth_readiness
+from core.json_validation import loads_strict_json
+from polymarket.auth_readiness import build_clob_auth_readiness, is_evm_address_like
 from polymarket.constants import (
     POLYMARKET_BOUNDED_AUDIT_MUTATION_BLOCKER,
     POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED,
@@ -39,6 +40,7 @@ from polymarket.live_verification import (
     LiveOrderCancelRequest,
     accepted_credential_read_checks,
     build_live_validation_stage_gates,
+    extract_order_id,
     load_allow_token_ids,
     run_live_order_cancel_verification,
 )
@@ -123,6 +125,7 @@ PUBLIC_ONLY_EVIDENCE_FIELDS = frozenset(
 _GITHUB_REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 STRICT_SOURCE_PROVENANCE_SCHEMA_VERSION = 1
+MAX_RECOVERY_JOURNAL_BYTES = 64 * 1024
 
 
 def _load_env() -> None:
@@ -497,12 +500,74 @@ def _validate_recovery_journal_target(value: str | Path) -> Path:
     return target
 
 
+def _validate_resolved_recovery_journal(value: Any) -> None:
+    error = "existing recovery journal is invalid or unresolved and must be reconciled before a new funded run"
+    if not isinstance(value, Mapping):
+        raise ValueError(error)
+    if (
+        type(value.get("schema_version")) is not int or value["schema_version"] != 1
+        or value.get("market_id") != "polymarket"
+        or value.get("stage") != "cancel_verified"
+        or value.get("resolved") is not True
+        or value.get("manual_reconciliation_required") is not False
+        or value.get("zero_fill_verified") is not True
+        or value.get("post_only") is not True
+        or value.get("tif") != "GTC"
+        or value.get("side") not in ("BUY", "SELL")
+        or type(value.get("sequence")) is not int or value["sequence"] < 1
+    ):
+        raise ValueError(error)
+    for name in ("token_id", "order_id"):
+        item = value.get(name)
+        if not isinstance(item, str) or not item.strip() or len(item) > 256 or any(ord(c) < 32 for c in item):
+            raise ValueError(error)
+    if not extract_order_id({"order_id": value["order_id"]}):
+        raise ValueError(error)
+    source = value.get("source_revision")
+    if not isinstance(source, str) or not _COMMIT_RE.fullmatch(source) or not is_evm_address_like(value.get("account_address")):
+        raise ValueError(error)
+    for name in ("price", "size"):
+        number = value.get(name)
+        try:
+            valid = type(number) in (int, float) and math.isfinite(number) and number > 0
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ValueError(error)
+    if value["price"] >= 1:
+        raise ValueError(error)
+    run_id = value.get("run_id")
+    try:
+        if not isinstance(run_id, str) or str(uuid.UUID(run_id)) != run_id:
+            raise ValueError(error)
+    except ValueError as exc:
+        raise ValueError(error) from exc
+    started = _parse_utc_timestamp(value.get("run_started_at"))
+    updated = _parse_utc_timestamp(value.get("updated_at"))
+    if started is None or updated is None or updated < started:
+        raise ValueError(error)
+
+
+def _read_resolved_recovery_journal(target: Path) -> None:
+    try:
+        with target.open("rb") as handle:
+            raw = handle.read(MAX_RECOVERY_JOURNAL_BYTES + 1)
+        if len(raw) > MAX_RECOVERY_JOURNAL_BYTES:
+            raise ValueError("recovery journal exceeds its byte limit")
+        existing = loads_strict_json(raw.decode("utf-8"))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ValueError("existing recovery journal is unreadable and must be reconciled manually") from exc
+    _validate_resolved_recovery_journal(existing)
+
+
 @contextmanager
 def _recovery_journal_session(
     value: str | Path,
     *,
     source_revision: str,
 ) -> Iterable[Callable[[Mapping[str, Any]], None]]:
+    if not isinstance(source_revision, str) or not _COMMIT_RE.fullmatch(source_revision):
+        raise ValueError("recovery journal requires the exact source revision")
     target = _validate_recovery_journal_target(value)
     lock_path = target.with_name(f".{target.name}.funded.lock")
     if _is_link_like(lock_path):
@@ -528,12 +593,7 @@ def _recovery_journal_session(
         os.write(lock_descriptor, lock_payload)
         os.fsync(lock_descriptor)
         if target.exists():
-            try:
-                existing = json.loads(target.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ValueError("existing recovery journal is unreadable and must be reconciled manually") from exc
-            if not isinstance(existing, Mapping) or existing.get("resolved") is not True:
-                raise ValueError("existing recovery journal is unresolved and must be reconciled before a new funded run")
+            _read_resolved_recovery_journal(target)
             archive = target.with_name(
                 f"{target.stem}.resolved-{run_id}{target.suffix or '.json'}"
             )
@@ -554,7 +614,12 @@ def _recovery_journal_session(
                     "updated_at": _utc_now(),
                 }
             )
-            atomic_write_text(current_target, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+            if journal.get("resolved") is True:
+                _validate_resolved_recovery_journal(journal)
+            serialized = json.dumps(journal, indent=2, sort_keys=True, allow_nan=False) + "\n"
+            if len(serialized.encode("utf-8")) > MAX_RECOVERY_JOURNAL_BYTES:
+                raise ValueError("recovery journal exceeds its byte limit")
+            atomic_write_text(current_target, serialized)
             os.chmod(current_target, 0o600)
 
         yield write

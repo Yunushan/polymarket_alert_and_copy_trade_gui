@@ -722,9 +722,24 @@ where authenticated CLOB signing is explicitly approved.
 
 ### Funded production acceptance
 
-Polymarket funded production acceptance is currently unavailable because live
-mutations are blocked pending the reviewed CLOB V2 client/signing migration.
-After that migration, acceptance would still require a current credentialed-read
-report and a deliberately approved, capped order/cancel report with
-post-cancel verification. Dry-run, browser-smoke, readiness-only, and legacy
-V1 reports are not substitutes.
+The CLOB V2 wrapper and bounded audit's recovery-journal path are implemented,
+but both normal product execution and bounded funded-audit gates remain false.
+The bounded audit needs exact-revision implementation/recovery review and
+explicit operator approval before it can run. Normal product execution still
+requires current credentialed and funded order/cancel acceptance. Do not enable
+either gate merely because offline tests pass.
+
+The journal requires a private POSIX directory; Windows funded journals remain
+unavailable because the collector cannot verify an owner-only directory ACL.
+A prior journal is read with a 64 KiB limit and strict JSON decoding. Duplicate
+keys, non-finite numbers, incomplete identity, unsupported schema versions,
+unresolved state, or contradictory cancellation/zero-fill evidence block a new
+audit without moving or overwriting the prior file. A valid resolved journal
+is archived before the next audit. New writes are atomic and size-limited;
+failed final persistence cannot establish resolution. These file checks do not
+authenticate venue evidence or replace manual reconciliation after an ambiguous
+outcome, a stale lock, or a storage failure.
+
+Actual acceptance requires a current credentialed-read report and a deliberately
+approved, capped order/cancel report with post-cancel verification. Dry-run,
+browser-smoke, readiness-only, and legacy V1 reports are not substitutes.

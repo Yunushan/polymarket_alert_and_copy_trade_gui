@@ -7,7 +7,33 @@ GitHub repository.
 
 ## Current Independent Assessment
 
-The latest independent review scored `490e59b` **74/100 on 2026-09-06**, not
+The latest independent review scored `3f0da94` **77/100 on 2026-09-06**. This
+applies to the unmerged PR #79 candidate, not protected main or the published
+v1.0.9 release. Financial history and investment-return methodology, exhaustive
+wallet discovery, actual-host recovery and installed-release acceptance, and
+explicitly approved funded lifecycle evidence remain incomplete. Unattended
+funded production is not approved.
+
+The subsequent cross-browser commit `6aa50a0` passed
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/34030140802) and
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/34030140773).
+Its required Linux browser job passed all 60 cases: Chromium, Firefox and WebKit
+at desktop/mobile widths in both themes. This closes the engine-matrix gap,
+not physical-device, installed native GUI, release or financial acceptance.
+The local Windows full verifier still had seven failure/error records caused
+by TLS trust rejection; hosted success does not relabel that local run as a pass.
+
+The CLOB V2 wrapper and bounded audit journal are implemented, but both funded
+execution gates remain disabled pending their separate review/approval and
+acceptance requirements. A resolved journal must now contain consistent identity,
+cancellation and zero-fill evidence; duplicate keys, malformed or oversized JSON
+and contradictory state cannot authorize another audit. Offline regression
+coverage does not authenticate venue outcomes or supply operator approval.
+No additional readiness points are assigned merely for adding these guards.
+
+## Historical Assessment Notes
+
+The earlier review scored `490e59b` **74/100 on 2026-09-06**, not
 approved for unattended funded production. Its
 [CI](https://github.com/Yunushan/market-sentinel/actions/runs/34020190690) passed
 48 jobs with two optional skips, and all four
