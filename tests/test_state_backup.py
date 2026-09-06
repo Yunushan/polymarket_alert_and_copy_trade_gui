@@ -506,6 +506,7 @@ class StateBackupTests(unittest.TestCase):
             writer = sqlite3.connect(source)
             try:
                 writer.execute("CREATE TABLE data (value TEXT)")
+                writer.execute("INSERT INTO data VALUES ('durable')")
                 writer.commit()
                 writer.execute("BEGIN EXCLUSIVE")
                 before = time.monotonic()
@@ -514,7 +515,13 @@ class StateBackupTests(unittest.TestCase):
                 self.assertLess(time.monotonic() - before, 2)
                 self.assertFalse(staging.exists())
                 writer.rollback()
-                backup_state._snapshot_sqlite(source, staging, 65536, timeout_seconds=1)
+                # This phase proves lock cleanup and recovery, not disk throughput.
+                backup_state._snapshot_sqlite(source, staging, 65536)
+                restored = sqlite3.connect(staging)
+                try:
+                    self.assertEqual(restored.execute("SELECT value FROM data").fetchall(), [("durable",)])
+                finally:
+                    restored.close()
             finally:
                 writer.close()
 
