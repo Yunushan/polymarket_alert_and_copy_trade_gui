@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import csv
+import math
 import sys
 import threading
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 from urllib import request as urllib_request
 from urllib import error as urllib_error
 from dataclasses import asdict, dataclass, field
+from copy import copy, deepcopy
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import tkinter as tk
@@ -32,7 +34,7 @@ from core.models import (
     PriceAlert,
     WalletWatch,
 )
-from core.storage import ConfigLoadError, load_config, save_config
+from core.storage import ConfigCommitError, ConfigConflictError, ConfigLoadError, load_config, save_config
 from market_adapters import build_default_registry
 from market_adapters.base import MarketAdapter
 from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
@@ -62,6 +64,7 @@ from polymarket.trader import PolymarketTrader, TraderConfig
 APP_ID = "market-sentinel"
 APP_TITLE = "MarketSentinel"
 APP_USER_AGENT = f"{APP_ID}/1.0"
+CONFIG_PAUSED_STATUS = "Storage error: writes, alerts and copy paused. Resolve the error, then restart."
 
 DEPENDENCY_IMPORT_FALLBACKS = {
     "websocket-client": ("websocket",),
@@ -139,12 +142,14 @@ def bool_from_setting(value: Any, default: bool = False) -> bool:
 
 
 def optional_positive_float(raw: Any, label: str) -> Optional[float]:
-    text = str(raw or "").strip()
+    if isinstance(raw, bool):
+        raise ValueError(f"{label} must be blank or a finite positive number.")
+    text = "" if raw is None else str(raw).strip()
     if not text:
         return None
     value = safe_float(text, None)
-    if value is None or value <= 0:
-        raise ValueError(f"{label} must be blank or a positive number.")
+    if value is None or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{label} must be blank or a finite positive number.")
     return float(value)
 
 
@@ -900,6 +905,58 @@ class App(tk.Tk):
             self.cfg.markets[normalized] = market_cfg
         return market_cfg
 
+    def _pause_configuration(self, exc: Exception) -> None:
+        outcome = (
+            "Configuration was replaced, but durability could not be confirmed."
+            if isinstance(exc, ConfigCommitError)
+            else "Configuration could not be saved."
+        )
+        self._config_persistence_error = (
+            f"{outcome} ({type(exc).__name__}) "
+            "Configuration writes, alerts and copy execution are paused. "
+            "Resolve the storage error or conflict, then restart to reload durable state."
+        )
+        for name in ("status_var", "safety_status_var", "lb_status_var"):
+            variable = getattr(self, name, None)
+            if variable is not None:
+                try:
+                    variable.set(CONFIG_PAUSED_STATUS)
+                except tk.TclError:
+                    # A destroyed widget must not hide the storage commit state.
+                    pass
+
+    def _save_runtime_config(self, candidate: Optional[AppConfig] = None) -> None:
+        if getattr(self, "_config_persistence_error", ""):
+            raise ConfigConflictError("Desktop persistence is paused; restart after reconciling durable state.")
+        try:
+            save_config(candidate if candidate is not None else self.cfg)
+        except Exception as exc:
+            App._pause_configuration(self, exc)
+            raise
+
+    def _persist_config_changes(self, **changes: Any) -> bool:
+        if getattr(self, "_config_persistence_error", ""):
+            messagebox.showerror("Configuration paused", self._config_persistence_error)
+            return False
+        # UI-thread ownership: callers supply detached replacements for changed
+        # fields. Keep unchanged journal/watch objects and the root object shared
+        # with pollers; publish the candidate's fields and revision together.
+        candidate = copy(self.cfg)
+        candidate.__dict__.update(changes)
+        try:
+            App._save_runtime_config(self, candidate)
+        except Exception as exc:
+            if isinstance(exc, ConfigCommitError):
+                self.cfg.__dict__ = candidate.__dict__
+                if "markets" in changes:
+                    self.polymarket_adapter = None
+            messagebox.showerror("Configuration paused", self._config_persistence_error)
+            return False
+        self.cfg.__dict__ = candidate.__dict__
+        if "markets" in changes:
+            self.polymarket_adapter = None
+        return True
+
     def _market_display_name_for_id(self, market_id: str) -> str:
         normalized = str(market_id or "polymarket").strip().lower()
         try:
@@ -1013,8 +1070,9 @@ class App(tk.Tk):
             market_id = "polymarket"
         if market_id == self.cfg.selected_market_id:
             return
-        self.cfg.selected_market_id = market_id
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, selected_market_id=market_id):
+            self.market_var.set(self._market_label_for_id(self.cfg.selected_market_id))
+            return
         self.market_var.set(self._market_label_for_id(market_id))
         adapter = self._get_selected_market_adapter()
         health = adapter.health_check()
@@ -1395,16 +1453,18 @@ class App(tk.Tk):
         theme = self._theme_from_label(self.theme_var.get())
         if theme == self.cfg.theme:
             return
-        self.cfg.theme = theme
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, theme=theme):
+            self.theme_var.set(self._theme_label(self.cfg.theme))
+            return
         self._apply_theme(theme, self.cfg.ui_design)
 
     def _on_ui_design_change(self):
         ui_design = self._ui_design_from_label(self.ui_design_var.get())
         if ui_design == self.cfg.ui_design:
             return
-        self.cfg.ui_design = ui_design
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, ui_design=ui_design):
+            self.ui_design_var.set(self._ui_design_label(self.cfg.ui_design))
+            return
         self._apply_theme(self.cfg.theme, ui_design)
 
     def _apply_theme(self, theme: str, ui_design: Optional[str] = None):
@@ -2668,16 +2728,16 @@ class App(tk.Tk):
         user = self._selected_leaderboard_display_name() or str(row.get("wallet") or "").strip()
         self._copy_text_to_clipboard(user, "user")
 
-    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "", *, persist: bool = True) -> bool:
+    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "") -> bool:
         wallet = wallet.lower().strip()
         if not is_wallet_address(wallet):
             messagebox.showerror("Polymarket analytics", "Selected row does not contain a valid wallet address.")
             return False
         if any(str(w.wallet).lower() == wallet for w in self.cfg.wallets):
             return False
-        self.cfg.wallets.append(WalletWatch(wallet=wallet, display_name=display_name, enabled=True))
-        if persist:
-            save_config(self.cfg)
+        watch = WalletWatch(wallet=wallet, display_name=display_name, enabled=True)
+        if not App._persist_config_changes(self, wallets=[*self.cfg.wallets, watch]):
+            return False
         self._refresh_wallet_table()
         if hasattr(self, "ui_queue"):
             self.ui_queue.put(("log", f"Added wallet watch from leaderboard: {display_name or wallet} ({wallet})"))
@@ -2690,6 +2750,8 @@ class App(tk.Tk):
         name = self._selected_leaderboard_display_name()
         display_name = name if name and name.lower() != wallet else ""
         added = self._ensure_wallet_watch_from_leaderboard(wallet, display_name)
+        if getattr(self, "_config_persistence_error", ""):
+            return
         if added:
             message = f"Tracking wallet: {wallet}"
         else:
@@ -2706,15 +2768,21 @@ class App(tk.Tk):
         follow_wallets = self._copy_follow_wallets_from_text() if hasattr(self, "ct_follow_var") else self.cfg.copytrading.normalized_follow_wallets()
         if follow_wallets is None:
             return
-        tracked = self._ensure_wallet_watch_from_leaderboard(wallet, display_name, persist=False)
+        tracked = not any(str(w.wallet).lower() == wallet for w in self.cfg.wallets)
+        watches = list(self.cfg.wallets)
+        if tracked:
+            watches.append(WalletWatch(wallet=wallet, display_name=display_name, enabled=True))
         added_follow = wallet not in follow_wallets
         if added_follow:
             follow_wallets.append(wallet)
-        self.cfg.copytrading.follow_wallet = follow_wallets[0] if follow_wallets else ""
-        self.cfg.copytrading.follow_wallets = follow_wallets
+        settings = deepcopy(self.cfg.copytrading)
+        settings.follow_wallet = follow_wallets[0] if follow_wallets else ""
+        settings.follow_wallets = follow_wallets
+        if not App._persist_config_changes(self, wallets=watches, copytrading=settings):
+            return
+        self._refresh_wallet_table()
         if hasattr(self, "ct_follow_var"):
             self.ct_follow_var.set(", ".join(follow_wallets))
-        save_config(self.cfg)
         if hasattr(self, "ui_queue"):
             self.ui_queue.put(("log", f"Added leaderboard wallet to copy-trading follow list: {wallet}"))
         details = []
@@ -3362,7 +3430,7 @@ class App(tk.Tk):
 
         label = self.alert_label_entry.get().strip() or f"Alert {token_id[:8]}"
         thr = safe_float(self.alert_threshold_entry.get().strip())
-        if thr is None or thr < 0 or thr > 1:
+        if thr is None or not math.isfinite(thr) or thr < 0 or thr > 1:
             messagebox.showerror("Error", "Threshold must be a number between 0 and 1.")
             return
 
@@ -3380,8 +3448,8 @@ class App(tk.Tk):
             enabled=True,
             market_id=market_id,
         )
-        self.cfg.alerts.append(a)
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, alerts=[*self.cfg.alerts, a]):
+            return
         self._refresh_alert_table()
 
         if market_id == "polymarket":
@@ -3422,15 +3490,17 @@ class App(tk.Tk):
         aid = self._selected_alert_id()
         if not aid:
             return
-        for a in self.cfg.alerts:
+        alerts = deepcopy(self.cfg.alerts)
+        for a in alerts:
             if a.id == aid:
                 a.enabled = not a.enabled
+                if not App._persist_config_changes(self, alerts=alerts):
+                    return
                 if a.enabled and self._alert_market_id(a) == "polymarket":
                     self.market_ws.subscribe([a.token_id])
                 else:
                     # we don't unsubscribe automatically because another alert might use same token
                     pass
-                save_config(self.cfg)
                 self._refresh_alert_table()
                 self.ui_queue.put(("log", f"Toggled alert {a.label} -> {'enabled' if a.enabled else 'disabled'}"))
                 return
@@ -3439,8 +3509,8 @@ class App(tk.Tk):
         aid = self._selected_alert_id()
         if not aid:
             return
-        self.cfg.alerts = [a for a in self.cfg.alerts if a.id != aid]
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, alerts=[a for a in self.cfg.alerts if a.id != aid]):
+            return
         self._refresh_alert_table()
         self.ui_queue.put(("log", f"Deleted alert {aid}"))
         # WS unsubscribe: only unsubscribe if no other alert uses token
@@ -3557,6 +3627,9 @@ class App(tk.Tk):
         )
 
     def submit_paper_order(self) -> None:
+        if getattr(self, "_config_persistence_error", ""):
+            messagebox.showerror("Configuration paused", self._config_persistence_error)
+            return
         try:
             order = App._paper_order_from_form(self)
             if not App._require_market_enabled(self, order.market_id, "paper orders"):
@@ -3580,6 +3653,8 @@ class App(tk.Tk):
             return
 
         record = App._record_paper_trade(self, order, result)
+        if record is None:
+            return
         self.paper_status_var.set(record.message)
         self.status_var.set("Paper order recorded.")
         self.ui_queue.put(
@@ -3795,7 +3870,7 @@ class App(tk.Tk):
                 return float(value), label
         raise ValueError("No quote price is available for the selected side.")
 
-    def _record_paper_trade(self, order: PaperOrderRequest, result: PaperOrderResult) -> PaperTradeRecord:
+    def _record_paper_trade(self, order: PaperOrderRequest, result: PaperOrderResult) -> Optional[PaperTradeRecord]:
         record = PaperTradeRecord(
             market_id=order.market_id,
             contract_id=order.contract_id,
@@ -3808,10 +3883,8 @@ class App(tk.Tk):
             average_price=result.average_price,
             raw=dict(result.raw or {}),
         )
-        self.cfg.paper_trades.insert(0, record)
-        if len(self.cfg.paper_trades) > 200:
-            self.cfg.paper_trades = self.cfg.paper_trades[:200]
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, paper_trades=[record, *self.cfg.paper_trades][:200]):
+            return None
         App._refresh_paper_trade_table(self)
         return record
 
@@ -4339,8 +4412,8 @@ class App(tk.Tk):
             return
         if not messagebox.askyesno("Clear paper history", "Clear local paper trade history?"):
             return
-        self.cfg.paper_trades = []
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, paper_trades=[]):
+            return
         self._refresh_paper_trade_table()
         self.paper_status_var.set("Paper trade history cleared.")
 
@@ -4378,7 +4451,7 @@ class App(tk.Tk):
             health = {"ok": False, "message": str(exc)}
             status = f"{display_name}: adapter unavailable. {exc}"
 
-        self.safety_status_var.set(status)
+        self.safety_status_var.set(CONFIG_PAUSED_STATUS if getattr(self, "_config_persistence_error", "") else status)
         App._refresh_market_health_table(self, health)
 
     def _refresh_market_health_table(self, health: Dict[str, Any]) -> None:
@@ -4428,7 +4501,7 @@ class App(tk.Tk):
 
     def save_market_safety_settings(self) -> None:
         market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
-        market_cfg = App._market_config_for(self, market_id)
+        market_cfg = deepcopy(self.cfg.markets.get(market_id) or MarketConfig(market_id=market_id))
         settings = dict(market_cfg.settings)
 
         try:
@@ -4452,9 +4525,9 @@ class App(tk.Tk):
         else:
             settings["live_trading_max_notional"] = max_notional
         market_cfg.settings = settings
-        self.cfg.markets[market_id] = market_cfg
-
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, markets={**self.cfg.markets, market_id: market_cfg}):
+            App._refresh_market_safety_tab(self)
+            return
         if hasattr(self, "market_status_var"):
             self.market_status_var.set(App._selected_market_status_text(self))
         if hasattr(self, "paper_market_var"):
@@ -4495,10 +4568,12 @@ class App(tk.Tk):
         wid = self._selected_wallet_id()
         if not wid:
             return
-        for w in self.cfg.wallets:
+        wallets = deepcopy(self.cfg.wallets)
+        for w in wallets:
             if w.id == wid:
                 w.enabled = not w.enabled
-                save_config(self.cfg)
+                if not App._persist_config_changes(self, wallets=wallets):
+                    return
                 self._refresh_wallet_table()
                 self.ui_queue.put(("log", f"Toggled wallet {w.wallet} -> {'enabled' if w.enabled else 'disabled'}"))
                 return
@@ -4507,8 +4582,8 @@ class App(tk.Tk):
         wid = self._selected_wallet_id()
         if not wid:
             return
-        self.cfg.wallets = [w for w in self.cfg.wallets if w.id != wid]
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, wallets=[w for w in self.cfg.wallets if w.id != wid]):
+            return
         self._refresh_wallet_table()
         self.ui_queue.put(("log", f"Deleted wallet watch {wid}"))
 
@@ -4599,8 +4674,8 @@ class App(tk.Tk):
             return
 
         ww = WalletWatch(wallet=wallet, display_name=display_name, enabled=True)
-        self.cfg.wallets.append(ww)
-        save_config(self.cfg)
+        if not App._persist_config_changes(self, wallets=[*self.cfg.wallets, ww]):
+            return
         self._refresh_wallet_table()
         self.ui_queue.put(("log", f"Added wallet watch: {display_name} ({wallet})"))
 
@@ -4680,9 +4755,18 @@ class App(tk.Tk):
         except (ValueError, tk.TclError) as exc:
             messagebox.showerror("Copy trading settings", str(exc))
             return
-        self.ct_follow_var.set(", ".join(s.normalized_follow_wallets()))
-        self.cfg.copytrading = s
-        save_config(self.cfg)
+        saved = App._persist_config_changes(self, copytrading=s)
+        current = self.cfg.copytrading
+        for name, value in (
+            ("ct_enabled_var", current.enabled), ("ct_live_var", current.live),
+            ("ct_follow_var", ", ".join(current.normalized_follow_wallets())),
+            ("ct_scale_var", str(current.scale * 100)), ("ct_max_var", str(current.max_usdc_per_trade)),
+            ("ct_slip_var", str(current.slippage)), ("ct_allow_sells_var", current.allow_sells),
+            ("ct_conflict_guard_var", current.conflict_guard),
+        ):
+            getattr(self, name).set(value)
+        if not saved:
+            return
         self.ui_queue.put(("log", f"Saved copy settings: {asdict(s)}"))
 
         # Safety: warn on LIVE
@@ -4773,6 +4857,11 @@ class App(tk.Tk):
         replay_authorized_at: int = 0,
         before_live_dispatch: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> CopyActivityOutcome:
+        if getattr(self, "_config_persistence_error", ""):
+            return CopyActivityOutcome(
+                "retryable", "config_persistence_paused",
+                "Copy execution is paused until restart after reconciling durable configuration.",
+            )
         now = time.time()
         manual_replay_authorized = int(replay_authorized_at or 0) > 0
         replay_age_origin = int(replay_authorized_at or staged_at or 0)
@@ -5123,6 +5212,8 @@ class App(tk.Tk):
         self._eval_alerts_for_contract(market_id, contract_id)
 
     def _eval_alerts_for_contract(self, market_id: str, contract_id: str):
+        if getattr(self, "_config_persistence_error", ""):
+            return
         normalized_market = str(market_id or "polymarket").strip().lower()
         st = self.price_state.get(App._price_state_key(normalized_market, contract_id)) or {}
         # evaluate all alerts for this token
@@ -5164,7 +5255,7 @@ class App(tk.Tk):
                 changed = True
 
         if changed:
-            save_config(self.cfg)
+            App._save_runtime_config(self)
             self._refresh_alert_table()
 
     def _fire_alert(self, alert: PriceAlert, value: float):
@@ -5205,6 +5296,9 @@ class App(tk.Tk):
                         if isinstance(a, WalletActivityTask)
                         else WalletActivityTask(str(a), dict(b or {}), activity_key(b or {}))
                     )
+                    if getattr(self, "_config_persistence_error", ""):
+                        task.acknowledge(False)
+                        continue
                     checkpoint = None
                     try:
                         checkpoint = _apply_wallet_activity_checkpoint(self.cfg, task)
@@ -5212,13 +5306,13 @@ class App(tk.Tk):
                             task.acknowledge(True)
                             continue
                         if checkpoint.changed:
-                            save_config(self.cfg)
+                            App._save_runtime_config(self)
                     except Exception as exc:
-                        if checkpoint is not None:
+                        if checkpoint is not None and not isinstance(exc, ConfigCommitError):
                             _restore_wallet_activity_checkpoint(checkpoint)
                         self.log(
                             "[copy] Refusing wallet activity because its replay checkpoint "
-                            f"could not be persisted ({type(exc).__name__})."
+                            f"could not be confirmed durable ({type(exc).__name__})."
                         )
                         task.acknowledge(False)
                         continue
@@ -5262,16 +5356,17 @@ class App(tk.Tk):
                             # This commit is the safety boundary. The exchange
                             # call must not start unless the non-replayable
                             # dispatch intent is durable first.
-                            save_config(self.cfg)
-                        except Exception:
-                            (
-                                _outbox_entry.state,
-                                _outbox_entry.outcome_code,
-                                _outbox_entry.outcome_message,
-                                previous_dispatch,
-                                _outbox_entry.updated_at,
-                            ) = previous
-                            _outbox_entry.dispatch = previous_dispatch
+                            App._save_runtime_config(self)
+                        except Exception as exc:
+                            if not isinstance(exc, ConfigCommitError):
+                                (
+                                    _outbox_entry.state,
+                                    _outbox_entry.outcome_code,
+                                    _outbox_entry.outcome_message,
+                                    previous_dispatch,
+                                    _outbox_entry.updated_at,
+                                ) = previous
+                                _outbox_entry.dispatch = previous_dispatch
                             raise
 
                     try:
@@ -5316,7 +5411,7 @@ class App(tk.Tk):
                     _set_copy_activity_outcome(outbox_entry, outcome)
                     _prune_copy_activity_outbox(self.cfg)
                     try:
-                        save_config(self.cfg)
+                        App._save_runtime_config(self)
                     except Exception as exc:
                         self.log(
                             "[copy] Copy activity outcome could not be persisted "
@@ -5325,7 +5420,7 @@ class App(tk.Tk):
                     task.acknowledge(True)
                 elif kind == "config_changed":
                     # Persist config (for last_seen state)
-                    save_config(self.cfg)
+                    App._save_runtime_config(self)
                     self._refresh_wallet_table()
                 elif kind == "dep_versions":
                     rows = a or []

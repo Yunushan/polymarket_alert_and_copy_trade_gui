@@ -278,8 +278,8 @@ class AnalyticsHarness:
     def _copy_text_to_clipboard(self, text: str, label: str):
         return App._copy_text_to_clipboard(self, text, label)
 
-    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "", *, persist: bool = True):
-        return App._ensure_wallet_watch_from_leaderboard(self, wallet, display_name, persist=persist)
+    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = ""):
+        return App._ensure_wallet_watch_from_leaderboard(self, wallet, display_name)
 
     def _copy_follow_wallets_from_text(self):
         return App._copy_follow_wallets_from_text(self)

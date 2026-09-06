@@ -28,6 +28,10 @@ class ConfigConflictError(RuntimeError):
     """Raised when a stale process attempts to overwrite newer configuration."""
 
 
+class ConfigCommitError(OSError):
+    """The replacement committed, but synchronization or cleanup then failed."""
+
+
 _STORAGE_REVISION_ATTR = "_market_sentinel_storage_revision"
 _MISSING_REVISION = "missing"
 _LOCK_TIMEOUT_SECONDS = 10.0
@@ -91,28 +95,38 @@ def save_config(cfg: AppConfig, path: Path = DEFAULT_CONFIG_PATH) -> None:
         data = (json.dumps(raw_data, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
         committed_revision = hashlib.sha256(data).hexdigest()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with _config_file_lock(path):
-            current_revision = _config_file_revision(path)
-            expected_revision = getattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
-            if expected_revision != current_revision:
-                raise ConfigConflictError(
-                    f"Configuration changed in another process: {path}. Reload it before saving; no data was written."
-                )
-            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-            tmp_path = Path(tmp_name)
-            try:
-                with os.fdopen(fd, "wb") as tmp:
-                    tmp.write(data)
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                replace_file(tmp_path, path)
-                # Replacement is the commit point. Keep the object consistent
-                # with the committed bytes even if directory durability fails.
-                setattr(cfg, _STORAGE_REVISION_ATTR, committed_revision)
-                _fsync_parent_directory(path)
-            finally:
-                if tmp_path.exists():
-                    tmp_path.unlink()
+        committed = False
+        try:
+            with _config_file_lock(path):
+                current_revision = _config_file_revision(path)
+                expected_revision = getattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
+                if expected_revision != current_revision:
+                    raise ConfigConflictError(
+                        f"Configuration changed in another process: {path}. Reload it before saving; no data was written."
+                    )
+                fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+                tmp_path = Path(tmp_name)
+                try:
+                    with os.fdopen(fd, "wb") as tmp:
+                        tmp.write(data)
+                        tmp.flush()
+                        os.fsync(tmp.fileno())
+                    replace_file(tmp_path, path)
+                    # Replacement is the commit point, including errors during
+                    # directory sync, temporary-file cleanup or lock release.
+                    committed = True
+                    setattr(cfg, _STORAGE_REVISION_ATTR, committed_revision)
+                    _fsync_parent_directory(path)
+                finally:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+        except Exception as exc:
+            if committed:
+                raise ConfigCommitError(
+                    "Configuration was replaced, but durability or cleanup could not be confirmed. "
+                    "Reconcile the committed file before continuing."
+                ) from exc
+            raise
 
 
 @contextmanager

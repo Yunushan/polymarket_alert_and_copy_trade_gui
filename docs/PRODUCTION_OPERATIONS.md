@@ -52,6 +52,24 @@ regional restrictions.
   returns `409 config_conflict`. Reload state before retrying. Keep the lock
   file on the same local filesystem as `config.json`, and do not run multiple
   active instances against network filesystems with unreliable advisory locks.
+- Desktop settings, market selection, wallet/follow changes, and manual
+  alert/history edits are persisted as detached field replacements before
+  publication to the shared runtime configuration. Failed pre-commit saves do
+  not install their settings or report successful actions. The config root and
+  unchanged journal objects retain their identities for background workers.
+- Configuration replacement is the commit point. `ConfigCommitError` means the
+  replacement completed but subsequent synchronization or cleanup failed; the
+  saved revision remains attached to the candidate. Do not treat that error as
+  proof that nothing was written, or blindly restore the previous snapshot.
+- After a desktop persistence failure or stale-writer conflict, configuration
+  writes, alert evaluation and copy activity are paused for that process. A
+  post-commit candidate remains reflected in memory, but execution stays paused;
+  committed copy checkpoints/dispatch intent are not rolled back in memory.
+  Fix permissions, capacity or writer conflicts, inspect the durable settings
+  and any ambiguous order journal, then restart to reload verified state. Do
+  not reset journals or assume restarting by itself resolves the underlying
+  error. A later unrelated desktop action cannot save a previously rejected
+  setting or automatically clear the pause.
 - Live-validation report, decision, and promotion-snapshot stores use the same
   single-writer/atomic-replace discipline. Existing malformed JSON is preserved
   and rejected rather than silently replaced. Restore a reviewed backup before

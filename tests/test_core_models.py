@@ -647,8 +647,9 @@ class CoreModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "config.json"
             with patch("core.storage._fsync_parent_directory", side_effect=OSError("directory sync failed")):
-                with self.assertRaisesRegex(OSError, "directory sync failed"):
+                with self.assertRaisesRegex(OSError, "Configuration was replaced") as raised:
                     save_config(cfg, path)
+                self.assertEqual(str(raised.exception.__cause__), "directory sync failed")
 
             committed = load_config(path)
             cfg.theme = "light"

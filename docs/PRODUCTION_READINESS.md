@@ -7,7 +7,30 @@ GitHub repository.
 
 ## Current Independent Assessment
 
-The latest independent review scored `4f72abf` **73/100 on 2026-09-06**, not
+The latest independent review scored `490e59b` **74/100 on 2026-09-06**, not
+approved for unattended funded production. Its
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/34020190690) passed
+48 jobs with two optional skips, and all four
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/34020190695)
+jobs passed. Raw-input validation repairs were verified, but desktop save-failure
+injection reproduced live/copy settings changing in memory despite unchanged
+file bytes; a later unrelated save persisted the rejected live setting.
+Financial-history completeness, actual-host recovery, release acceptance and
+authorized funded lifecycle evidence remain incomplete. The score applies to
+the unmerged PR #79 candidate, not protected main or the older published release.
+
+The next persistence candidate publishes detached desktop field changes only
+after save, preserves the shared root and unchanged journal identities, and
+invalidates cached adapter settings after a committed market change. A typed
+post-replacement error distinguishes committed bytes from a pre-commit failure.
+Persistence failure pauses subsequent desktop writes, alerts and copy activity
+until the operator reconciles durable state and restarts. Regression tests cover
+pre-commit denial, stale writers, directory-sync and lock-cleanup failures,
+later writes, policy publication, multi-field follows and copy dispatch intent.
+These fixes require their own exact-commit checks and do not raise the independent
+score or establish full production acceptance by themselves.
+
+The preceding independent review scored `4f72abf` **73/100 on 2026-09-06**, not
 approved for unattended funded production. Its
 [CI](https://github.com/Yunushan/market-sentinel/actions/runs/34018549867) passed
 48 jobs with two optional skips, and its

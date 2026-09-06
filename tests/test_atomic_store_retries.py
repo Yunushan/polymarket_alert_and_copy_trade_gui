@@ -4,10 +4,12 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from core.storage import load_config, save_config
+from core import storage
+from core.storage import ConfigCommitError, load_config, save_config
 from polymarket.analytics_cache import load_analytics_cache, save_analytics_cache
 from polymarket.live_reports import (
     load_live_validation_decisions,
@@ -29,6 +31,41 @@ STORES = (
 
 
 class AtomicStoreRetryTests(unittest.TestCase):
+    def test_config_commit_error_distinguishes_post_replace_lock_cleanup(self):
+        original_lock = storage._config_file_lock
+
+        @contextmanager
+        def failed_release(path):
+            with original_lock(path):
+                yield
+            raise OSError("private lock-release detail")
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.json"
+            cfg = load_config(target)
+            with patch("core.storage._config_file_lock", failed_release):
+                with self.assertRaises(ConfigCommitError) as raised:
+                    save_config(cfg, target)
+            self.assertNotIn("private lock-release detail", str(raised.exception))
+            self.assertEqual(str(raised.exception.__cause__), "private lock-release detail")
+            self.assertEqual(cfg.to_dict(), load_config(target).to_dict())
+            cfg.theme = "dark"
+            save_config(cfg, target)
+            self.assertEqual(load_config(target).theme, "dark")
+
+    def test_precommit_failure_does_not_claim_a_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.json"
+            cfg = load_config(target)
+            save_config(cfg, target)
+            before = target.read_bytes()
+            cfg.theme = "dark"
+            with patch("core.storage.replace_file", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError) as raised:
+                    save_config(cfg, target)
+            self.assertNotIsInstance(raised.exception, ConfigCommitError)
+            self.assertEqual(target.read_bytes(), before)
+
     def change(self, snapshot, collection):
         if collection:
             snapshot[collection]["new"] = {"status": "ok"}
