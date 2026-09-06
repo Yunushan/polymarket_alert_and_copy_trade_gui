@@ -14,7 +14,9 @@ from scripts import verify_polymarket_live as live
 
 class FundedRecoveryJournalTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.parent = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.parent = Path(self.directory.name).resolve()
         self.target = self.parent / "recovery.json"
         if os.name == "posix":
             self.parent.chmod(0o700)
