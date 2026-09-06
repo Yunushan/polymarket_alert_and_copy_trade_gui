@@ -14,7 +14,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         frontend = text.split("  frontend:\n", 1)[1].split("  mobile-web:\n", 1)[0]
         for fragment in (
-            "npx playwright install --with-deps chromium",
+            "npx playwright install --with-deps chromium firefox webkit",
             "python scripts/verify_browser_workflows.py",
             "--require-hashes -r requirements-test.lock",
             "frontend/test-results/",

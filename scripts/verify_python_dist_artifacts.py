@@ -42,6 +42,7 @@ REQUIRED_SDIST_MEMBERS = {
     "frontend/package.json",
     "frontend/playwright.config.mjs",
     "frontend/browser-tests/workflows.spec.mjs",
+    "frontend/tests/browser-projects.test.mjs",
     "frontend/scripts/run-tests.mjs",
     "frontend/src/App.tsx",
     "requirements.lock",

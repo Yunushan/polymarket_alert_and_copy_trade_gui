@@ -36,8 +36,13 @@ def main(argv: list[str] | None = None) -> int:
         forbidden_connections.append("outbound socket")
         raise PermissionError("Browser acceptance forbids backend outbound connections.")
 
-    with tempfile.TemporaryDirectory(prefix="marketsentinel-browser-") as temporary:
+    cache = ROOT / ".cache"
+    cache.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="marketsentinel-browser-", dir=cache) as temporary:
         state = Path(temporary)
+        # Keep reloads on one build even if a developer rebuilds the workspace.
+        frontend_snapshot = state / "frontend"
+        shutil.copytree(frontend / "dist", frontend_snapshot)
         environment = {
             "POLYMARKET_ANALYTICS_CACHE_PATH": str(state / "analytics.json"),
             "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(state / "reports.json"),
@@ -51,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             server = ReactGuiServer(
                 ("127.0.0.1", 0), ReactGuiHandler,
-                config_path=state / "config.json", frontend_dir=frontend / "dist",
+                config_path=state / "config.json", frontend_dir=frontend_snapshot,
             )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()

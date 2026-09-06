@@ -382,7 +382,7 @@ jobs:
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
 
       - name: Install browser acceptance runtime
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox webkit
 
       - name: Verify browser workflows
         working-directory: .

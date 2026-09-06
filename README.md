@@ -821,6 +821,24 @@ npm install
 npm run build
 ```
 
+Cross-browser acceptance (requires the built frontend and Python test dependencies):
+```bash
+cd frontend
+npx playwright install --with-deps chromium firefox webkit
+cd ..
+python scripts/verify_browser_workflows.py
+```
+
+The same workflows run in Chromium, Firefox and WebKit at desktop/mobile viewport
+sizes in both themes. Browser and backend venue egress is blocked, application
+state is temporary, and failures block frontend artifact publication in CI.
+Screenshots, traces, an HTML report and `frontend/test-results/results.json`
+identify the tested engine/profile. These are browser-engine tests, not physical
+iOS/Android or installed Safari certification. For local diagnosis, pass
+`--project=firefox-desktop-dark` (or another project) to the runner; a selected
+project is not a full acceptance run. `MARKET_SENTINEL_BROWSER_TEST_CHANNEL=msedge`
+only substitutes the local Chromium channel; Firefox and WebKit remain enabled.
+
 Strict final frontend verification:
 ```bash
 python verify.py --frontend-build

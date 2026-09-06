@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createHash } from "node:crypto";
 
 const views = ["Overview", "Markets", "Analytics", "Live Safety", "Alerts", "Wallets", "Paper", "Settings"];
 const headings = { Markets: "Market Operations", Analytics: "Polymarket Analytics", Wallets: "Wallets & Copy", Paper: "Paper Trading" };
@@ -139,7 +140,8 @@ test("wallet edit and delete persist, and failed saves preserve form input", asy
   const name = `Browser wallet ${testInfo.project.name}`;
   const updated = `${name} edited`;
   const walletForm = page.locator("form.wallet-form");
-  await walletForm.getByLabel("Activity identity").fill("0x1111111111111111111111111111111111111111");
+  const identity = `0x${createHash("sha256").update(testInfo.project.name).digest("hex").slice(0, 40)}`;
+  await walletForm.getByLabel("Activity identity").fill(identity);
   await walletForm.getByLabel("Name", { exact: true }).fill(name);
   await walletForm.getByLabel("Enabled", { exact: true }).uncheck();
   const failure = (route) => route.request().method() === "POST"

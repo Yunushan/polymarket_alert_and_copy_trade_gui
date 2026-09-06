@@ -31,6 +31,12 @@ class BrowserWorkflowRunnerTests(unittest.TestCase):
         real_run = subprocess.run
 
         def create_server(*args, **kwargs):
+            snapshot = kwargs["frontend_dir"]
+            original = workflows.ROOT / "frontend" / "dist"
+            self.assertNotEqual(snapshot, original)
+            self.assertEqual((snapshot / "index.html").read_text(encoding="utf-8"), "original build")
+            (original / "index.html").write_text("replacement build", encoding="utf-8")
+            self.assertEqual((snapshot / "index.html").read_text(encoding="utf-8"), "original build")
             server = real_server(*args, **kwargs)
             servers.append(server)
             return server
@@ -53,7 +59,7 @@ class BrowserWorkflowRunnerTests(unittest.TestCase):
             for relative in ("frontend/dist/index.html", "frontend/node_modules/@playwright/test/cli.js"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("", encoding="utf-8")
+                path.write_text("original build", encoding="utf-8")
             with (
                 patch.object(workflows, "ROOT", root),
                 patch("web_api._RESOURCE_ROOT", root),
