@@ -562,7 +562,8 @@ def load_analytics_artifact(
 
 
 def mdd_payload_to_csv(payload: Mapping[str, Any]) -> str:
-    quality_fields = ["mdd_history_status", "mdd_source_quality", "mdd_unavailable_reasons", "mdd_history_coverage"]
+    quality_fields = ["mdd_history_status", "mdd_source_quality", "mdd_unavailable_reasons", "mdd_history_coverage",
+                      "position_capital_basis"]
     provenance_fields = [
         "calculation_version", "calculation_current", "pct_drawdown_usd",
         "pct_peak_value", "pct_trough_value", "pct_peak_timestamp", "pct_trough_timestamp", "drawdown_baseline",

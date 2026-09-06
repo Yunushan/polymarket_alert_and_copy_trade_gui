@@ -845,12 +845,14 @@ class AppLogicTests(unittest.TestCase):
     def test_desktop_leaderboard_export_preserves_unknown_risk_and_source_diagnostics(self) -> None:
         harness = AnalyticsHarness()
         quality = {"status": "invalid", "sources": {"closed_positions": {"invalid_rows": 1}}}
+        cost = {"unit": "USD", "closed_unknown_rows": 1, "account_fees_verified": False}
         reasons = ["invalid_source_data:closed_positions:invalid_timestamp"]
         harness._last_leaderboard_payload = {"rows": [{
             "wallet": WALLET, "display_name": "Trader", "roi_pct": 10,
             "pnl_volume_pct": 10, "roi_pct_basis": "PnL / volume, not investment ROI",
             "mdd_usd": None, "mdd_pct": None, "mdd_history_status": "invalid_source_data",
             "mdd_source_quality": quality, "mdd_unavailable_reasons": reasons,
+            "position_capital_basis": cost,
             "mdd_account_equity_verified": False,
         }]}
         with tempfile.TemporaryDirectory() as directory:
@@ -864,6 +866,7 @@ class AppLogicTests(unittest.TestCase):
             self.assertEqual(row["mdd_pct"], "")
             self.assertEqual(row["mdd_history_status"], "invalid_source_data")
             self.assertEqual(json.loads(row["mdd_source_quality"]), quality)
+            self.assertEqual(json.loads(row["position_capital_basis"]), cost)
             self.assertEqual(json.loads(row["mdd_unavailable_reasons"]), reasons)
             self.assertIn("not investment ROI", row["roi_pct_basis"])
             self.assertIn("Exported 1 rows", harness.lb_status_var.get())

@@ -487,7 +487,7 @@ on invested capital. Interfaces label it **PnL/volume %**; API/JSON/CSV rows
 also include `pnl_volume_pct` and `roi_pct_basis`. Existing sort/filter flags
 remain compatible. This ratio ranks only the fetched public candidates.
 
-MDD calculation version 6 independently maximizes dollar loss and percentage
+MDD calculation version 7 independently maximizes dollar loss and percentage
 loss over the sampled PnL curve. The observed window starts from a constructed
 zero-PnL baseline, so its initial loss is included. No PnL observations means
 unavailable MDD, not zero risk. `peak_value`/`trough_value` and their timestamps
@@ -502,6 +502,17 @@ Statement equity and position/cash-flow comparisons remain available as
 diagnostics. Legacy accounting `base_equity_usd` fields are null, with
 `base_source=unavailable_from_point_in_time_snapshot`; `max_equity_usd` remains
 available as a statement statistic, not a historical capital estimate.
+
+Position capital is denominated in USD: explicit entry cost takes precedence,
+and otherwise closed bought shares or remaining open shares require an average
+entry price. Raw `totalBought` and `currentValue` do not establish entry cost.
+Open `grossInitialValue` already includes attributed BUY fees; reported
+`entryFeesUsdc` are added only to a fee-exclusive basis. Missing costs/fees
+remain unavailable, not known zeros. `position_capital_basis` in audit and
+leaderboard JSON/CSV records the source and unknown-row counts. These are
+public cost/turnover estimates, not verified initial capital or net-fee returns.
+MDD position queries request `sizeThreshold=0` and `includeArchived=true` on
+every page; existing row caps and incomplete-history safeguards still apply.
 
 Every fetched trade and normalized mark contributes to replay; the replay
 point limit only bounds retained output. Incomplete inventory/marks return

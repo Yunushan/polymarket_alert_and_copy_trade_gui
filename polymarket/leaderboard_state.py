@@ -485,6 +485,7 @@ class LeaderboardStateStore:
             "equity_base_usd",
             "equity_base_source",
             "public_capital_basis_usd",
+            "position_capital_basis",
             "peak_value",
             "trough_value",
             "peak_timestamp",

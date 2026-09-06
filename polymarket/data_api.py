@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .endpoints import DATA_ENDPOINTS
@@ -80,12 +81,21 @@ def get_positions(
     *,
     limit: int = 100,
     offset: int = 0,
+    size_threshold: float = 1.0,
+    include_archived: bool = False,
     timeout: float = 15.0,
 ) -> List[Dict[str, Any]]:
+    if (isinstance(size_threshold, bool) or not isinstance(size_threshold, (int, float))
+            or not math.isfinite(size_threshold) or size_threshold < 0):
+        raise ValueError("Position size threshold must be finite and nonnegative.")
+    if not isinstance(include_archived, bool):
+        raise ValueError("Include archived positions must be a boolean.")
     params = {
         "user": user,
         "limit": max(0, min(int(limit), 500)),
         "offset": max(0, min(int(offset), 10000)),
+        "sizeThreshold": size_threshold,
+        "includeArchived": str(include_archived).lower(),
     }
     data = _get_json("positions", params=params, timeout=timeout)
     return _history_payload(data, "positions")

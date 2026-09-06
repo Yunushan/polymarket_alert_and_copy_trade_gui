@@ -2358,14 +2358,6 @@ def _position_total_pnl(row: Mapping[str, Any]) -> Optional[float]:
     return sum(present) if present else None
 
 
-def _position_capital(row: Mapping[str, Any]) -> float:
-    value = _safe_float(
-        _leaderboard_lookup(row, "totalBought", "total_bought", "initialValue", "initial_value", "currentValue", "current_value"),
-        0.0,
-    )
-    return max(float(value or 0.0), 0.0)
-
-
 def _fetch_user_positions_all(wallet: str, limit: int = 500) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     offset = 0
@@ -3545,6 +3537,7 @@ def polymarket_leaderboard_payload(
                     "mdd_history_status": mdd.get("mdd_history_status", "unknown"),
                     "mdd_history_coverage": mdd.get("mdd_history_coverage", {}),
                     "mdd_source_quality": mdd.get("mdd_source_quality", {}),
+                    "position_capital_basis": mdd.get("position_capital_basis", {}),
                     "mdd_unavailable_reasons": mdd.get("mdd_unavailable_reasons", []),
                     "mdd_calculation_version": mdd.get("calculation_version"),
                     "mdd_pct_peak_value": mdd.get("pct_peak_value"),

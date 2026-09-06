@@ -17,7 +17,7 @@ from .util import normalize_wallet
 MDD_METHOD_V2 = "public_data_historical_equity_curve_v2"
 MDD_METHOD_MARK_REPLAY = "clob_price_history_inventory_mark_replay_v1"
 # Increment when changing calculations to invalidate durable scan enrichment.
-MDD_CALCULATION_VERSION = 6
+MDD_CALCULATION_VERSION = 7
 MDD_PCT_BASIS_V2 = "max_t(drawdown_usd[t] / (equity_base_usd + running_peak_pnl_usd[t])) * 100"
 MAX_CLOSED_POSITIONS = 1000
 MAX_OPEN_POSITIONS = 1000
@@ -33,12 +33,15 @@ MDD_V2_ASSUMPTIONS = [
     "Current open positions are represented by one current snapshot using public currentValue and PnL fields.",
     "Activity/trade rows are used for capital and exposure basis; they do not reconstruct historical mark-to-market prices.",
     "When equity_base_usd is not supplied, percentage MDD uses the largest public capital basis found from closed positions, open positions, and trade notional.",
+    "Position capital uses USD entry values or share quantity multiplied by average entry price, never raw share count or current market value.",
+    "Open-position gross entry values already include attributed BUY fees; reported entry fees are added only to a fee-exclusive basis.",
 ]
 MDD_V2_LIMITATIONS = [
     "Public Data API rows do not expose a complete deposit/withdrawal ledger, so true account-equity cash flows are not independently verified.",
     "Historical unrealized valleys between trade/close timestamps require per-token price replay and exact position inventory.",
     "Unresolved/open markets are included only at the current snapshot, not at every historical timestamp.",
     "Exhausting a public endpoint window does not verify complete account history or investment-capital returns.",
+    "Missing position cost and fee fields remain unavailable; reported position costs and aggregate trade turnover are not verified opening account capital or a complete net-fee ledger.",
 ]
 MDD_MARK_REPLAY_ASSUMPTIONS = [
     "Drawdown starts from zero PnL at the beginning of the observed window; the initial loss is included.",
@@ -133,12 +136,24 @@ def _position_total_pnl(row: Mapping[str, Any]) -> Optional[float]:
     return sum(present) if present else None
 
 
-def _position_capital(row: Mapping[str, Any]) -> float:
-    value = _safe_float(
-        _lookup(row, "totalBought", "total_bought", "initialValue", "initial_value", "currentValue", "current_value"),
-        0.0,
-    )
-    return max(float(value or 0.0), 0.0)
+def _position_capital(row: Mapping[str, Any], *, closed: bool) -> Tuple[Optional[float], str]:
+    gross = _finite_number(_lookup(row, "grossInitialValue", "gross_initial_value"))
+    if gross is not None:
+        return gross, "gross_initial_value"
+    value = _finite_number(_lookup(row, "initialValue", "initial_value"))
+    source = "initial_value"
+    if value is None:
+        # Closed rows describe bought shares; open rows need remaining shares.
+        quantity = _finite_number(_lookup(row, "totalBought", "total_bought") if closed else _lookup(row, "size"))
+        price = _finite_number(_lookup(row, "avgPrice", "avg_price"))
+        if quantity is None or price is None:
+            return None, "unavailable"
+        value = quantity * price
+        source = "bought_shares_times_average_price" if closed else "held_shares_times_average_price"
+    fee = _finite_number(_lookup(row, "entryFeesUsdc", "entry_fees_usdc"))
+    if fee is not None:
+        return value + fee, source + "_with_reported_entry_fees"
+    return value, source + "_fee_component_unavailable"
 
 
 def _trade_notional(row: Mapping[str, Any]) -> float:
@@ -209,6 +224,7 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
     numeric_fields = {
         "realizedpnl", "realized_pnl", "cashpnl", "cash_pnl", "totalpnl", "total_pnl",
         "totalbought", "total_bought", "initialvalue", "initial_value", "currentvalue", "current_value",
+        "grossinitialvalue", "gross_initial_value", "entryfeesusdc", "entry_fees_usdc",
         "usdcsize", "usdc_size", "notional", "value", "cash", "size", "tokens", "amount",
         "price", "avgprice", "avg_price",
     }
@@ -233,6 +249,21 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
                     elif field_name in {"price", "avgprice", "avg_price"} and number > 1:
                         issues.add("invalid_probability_price")
             timestamp = _event_timestamp(_lookup(row, "timestamp"), latest=latest)
+            if name in {"closed_positions", "open_positions"}:
+                capital, _ = _position_capital(row, closed=name == "closed_positions")
+                if capital is not None and not math.isfinite(capital):
+                    issues.add("invalid_position_capital")
+                gross = _finite_number(_lookup(row, "grossInitialValue", "gross_initial_value"))
+                initial = _finite_number(_lookup(row, "initialValue", "initial_value"))
+                fees = _finite_number(_lookup(row, "entryFeesUsdc", "entry_fees_usdc"))
+                # The API rounds each cost component to six decimal places.
+                tolerance = 1.000001e-6
+                if gross is not None and (
+                    any(value is not None and value - gross > tolerance for value in (initial, fees))
+                    or (initial is not None and fees is not None
+                        and not math.isclose(gross, initial + fees, rel_tol=0, abs_tol=tolerance))
+                ):
+                    issues.add("inconsistent_position_entry_cost")
             if name == "closed_positions":
                 pnl = _finite_number(_lookup(row, "realizedPnl", "realized_pnl"))
                 if timestamp is None:
@@ -313,7 +344,7 @@ def _fetch_open_positions(wallet: str, limit: int) -> List[Dict[str, Any]]:
     clean_limit = _clamp(limit, 0, MAX_OPEN_POSITIONS)
     while len(rows) < clean_limit:
         page_limit = min(500, clean_limit - len(rows))
-        page = data_api.get_positions(wallet, limit=page_limit, offset=offset)
+        page = data_api.get_positions(wallet, limit=page_limit, offset=offset, size_threshold=0, include_archived=True)
         if not page:
             break
         rows.extend(page)
@@ -405,6 +436,8 @@ def fetch_mdd_inputs(
             "last_timestamp": max(known_times) if known_times else None,
             "rows_without_timestamp": len(timestamps) - len(known_times),
         }
+        if name == "open_positions" and row_limit > 0:
+            coverage[name]["query_filters"] = {"sizeThreshold": 0, "includeArchived": True}
     inputs = MddInputs(
         wallet=normalized_wallet,
         **{name: rows for name, (rows, _) in sources.items()},
@@ -524,12 +557,18 @@ def build_historical_mdd_payload(
     points: List[Dict[str, Any]] = []
     cumulative_realized = 0.0
     closed_capital = 0.0
+    capital_sources: Dict[str, int] = {}
+    unknown_closed_capital = 0
+    unknown_open_capital = 0
     for row in sorted(calculation_inputs.closed_positions, key=lambda item: _event_timestamp(_lookup(item, "timestamp"))):
         realized = _safe_float(_lookup(row, "realizedPnl", "realized_pnl"), None)
         if realized is None:
             continue
         cumulative_realized += float(realized)
-        closed_capital += _position_capital(row)
+        capital, capital_source = _position_capital(row, closed=True)
+        capital_sources[capital_source] = capital_sources.get(capital_source, 0) + 1
+        unknown_closed_capital += int(capital is None)
+        closed_capital += capital if capital is not None else 0.0
         points.append(
             {
                 "timestamp": _safe_int(_lookup(row, "timestamp"), 0),
@@ -551,7 +590,10 @@ def build_historical_mdd_payload(
             open_pnl += float(pnl)
             open_pnl_available = True
         open_current_value += _safe_float(_lookup(row, "currentValue", "current_value"), 0.0) or 0.0
-        open_capital += _position_capital(row)
+        capital, capital_source = _position_capital(row, closed=False)
+        capital_sources[capital_source] = capital_sources.get(capital_source, 0) + 1
+        unknown_open_capital += int(capital is None)
+        open_capital += capital if capital is not None else 0.0
     if open_pnl_available:
         points.append(
             {
@@ -602,6 +644,13 @@ def build_historical_mdd_payload(
         "trade_capital_timeline": trade_stats["timeline"],
         "closed_capital_basis_usd": closed_capital,
         "open_capital_basis_usd": open_capital,
+        "position_capital_basis": {
+            "unit": "USD",
+            "sources": capital_sources,
+            "closed_unknown_rows": unknown_closed_capital,
+            "open_unknown_rows": unknown_open_capital,
+            "account_fees_verified": False,
+        },
         "cumulative_realized_pnl": cumulative_realized,
         "open_pnl": open_pnl,
         "open_current_value": open_current_value,

@@ -4366,8 +4366,8 @@ class WebApiTests(unittest.TestCase):
         with patch(
             "web_api.data_api.get_closed_positions",
             return_value=[
-                {"timestamp": 10, "realizedPnl": "100", "totalBought": "1000"},
-                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "500"},
+                {"timestamp": 10, "realizedPnl": "100", "totalBought": "1000", "avgPrice": "0.5"},
+                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "500", "avgPrice": "0.5"},
             ],
         ), patch(
             "web_api.data_api.get_positions",
@@ -4386,7 +4386,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["closed_positions"], 2)
         self.assertEqual(payload["open_positions"], 1)
         self.assertAlmostEqual(payload["mdd_usd"], 50.0)
-        self.assertAlmostEqual(payload["mdd_pct"], 50.0 / 1700.0 * 100.0)
+        self.assertEqual(payload["equity_base_usd"], 850.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 50.0 / 950.0 * 100.0)
         self.assertEqual(payload["peak_value"], 100.0)
         self.assertEqual(payload["trough_value"], 50.0)
         self.assertIn("assumptions", payload)
@@ -4400,8 +4401,8 @@ class WebApiTests(unittest.TestCase):
         with patch(
             "web_api.data_api.get_closed_positions",
             return_value=[
-                {"timestamp": 10, "realizedPnl": "100", "totalBought": "100"},
-                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "100"},
+                {"timestamp": 10, "realizedPnl": "100", "totalBought": "100", "avgPrice": "0.5"},
+                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "100", "avgPrice": "0.5"},
             ],
         ), patch(
             "web_api.data_api.get_positions",
@@ -4420,9 +4421,9 @@ class WebApiTests(unittest.TestCase):
 
         mock_snapshot.assert_called_once()
         self.assertEqual(payload["equity_base_source"], "max_public_capital_basis_from_positions_and_trade_activity")
-        self.assertEqual(payload["equity_base_usd"], 250.0)
+        self.assertEqual(payload["equity_base_usd"], 150.0)
         self.assertAlmostEqual(payload["mdd_usd"], 40.0)
-        self.assertAlmostEqual(payload["mdd_pct"], 40.0 / 350.0 * 100.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 40.0 / 250.0 * 100.0)
         self.assertEqual(payload["accounting_snapshot"]["status"], "ok")
         self.assertEqual(payload["accounting_snapshot"]["equity"]["max_equity_usd"], 1200.0)
         self.assertFalse(payload["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])

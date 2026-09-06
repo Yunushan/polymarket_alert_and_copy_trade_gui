@@ -129,6 +129,7 @@ LEADERBOARD_FIELDS = [
     "mdd_history_status",
     "mdd_history_coverage",
     "mdd_source_quality",
+    "position_capital_basis",
     "mdd_unavailable_reasons",
     "mdd_calculation_version",
     "mdd_calculation_current",
@@ -340,6 +341,7 @@ def _csv_rows(rows: Iterable[Mapping[str, Any]]) -> Iterable[Dict[str, Any]]:
         item["mdd_calculation_current"] = type(version) is int and version == MDD_CALCULATION_VERSION
         item["mdd_history_coverage"] = json.dumps(row.get("mdd_history_coverage", {}), sort_keys=True, separators=(",", ":"))
         item["mdd_source_quality"] = json.dumps(row.get("mdd_source_quality", {}), sort_keys=True, separators=(",", ":"))
+        item["position_capital_basis"] = json.dumps(row.get("position_capital_basis", {}), sort_keys=True, separators=(",", ":"))
         item["mdd_unavailable_reasons"] = json.dumps(row.get("mdd_unavailable_reasons", []), separators=(",", ":"))
         yield item
 

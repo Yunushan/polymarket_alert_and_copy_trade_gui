@@ -7,12 +7,19 @@ GitHub repository.
 
 ## Current Independent Assessment
 
-The latest independent review scored `3f0da94` **77/100 on 2026-09-06**. This
+The latest independent review scored `533afc2` **77/100 on 2026-09-06**. This
 applies to the unmerged PR #79 candidate, not protected main or the published
 v1.0.9 release. Financial history and investment-return methodology, exhaustive
 wallet discovery, actual-host recovery and installed-release acceptance, and
 explicitly approved funded lifecycle evidence remain incomplete. Unattended
 funded production is not approved.
+
+The following [position-cost correction](POSITION_COST_BASIS.md) prices share
+quantities, uses explicit USD entry-cost/fee fields and includes dust and archived
+active positions in MDD queries. Version 7 invalidates prior scan enrichment;
+provenance remains in durable summaries and exports. Independent financial
+history, actual-host and funded acceptance are still missing. This candidate
+requires its own verification and does not automatically raise that assessment.
 
 The subsequent cross-browser commit `6aa50a0` passed
 [CI](https://github.com/Yunushan/market-sentinel/actions/runs/34030140802) and

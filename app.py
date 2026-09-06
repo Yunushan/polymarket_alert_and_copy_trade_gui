@@ -3034,6 +3034,7 @@ class App(tk.Tk):
             "mdd_history_status",
             "mdd_history_coverage",
             "mdd_source_quality",
+            "position_capital_basis",
             "mdd_unavailable_reasons",
         ]
         try:
@@ -3044,6 +3045,7 @@ class App(tk.Tk):
                     item = {field: row.get(field) for field in fields}
                     item["mdd_history_coverage"] = json.dumps(row.get("mdd_history_coverage", {}), sort_keys=True)
                     item["mdd_source_quality"] = json.dumps(row.get("mdd_source_quality", {}), sort_keys=True)
+                    item["position_capital_basis"] = json.dumps(row.get("position_capital_basis", {}), sort_keys=True)
                     item["mdd_unavailable_reasons"] = json.dumps(row.get("mdd_unavailable_reasons", []))
                     writer.writerow(item)
         except Exception as exc:

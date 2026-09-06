@@ -30,7 +30,7 @@ def snapshot(csv_text="timestamp,equity,deposit\n0,100,0\n1,70,0\n2,10070,10000\
 def inputs(loss=-30, *, capital=True):
     row = {"timestamp": 1, "realizedPnl": loss}
     if capital:
-        row["totalBought"] = 100
+        row.update(totalBought=200, avgPrice=0.5)
     return MddInputs(WALLET, [row], [], [], [])
 
 
