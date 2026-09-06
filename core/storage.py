@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Dict, Iterator
 
 from .atomic_files import replace_file
@@ -43,14 +45,45 @@ def default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = default_config_path()
 
 
-def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
-    if not path.exists():
-        cfg = AppConfig()
-        setattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
-        return cfg
+def _config_object(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Configuration contains a duplicate JSON key.")
+        result[key] = value
+    return result
+
+
+def _config_number(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("Configuration contains a non-finite number.")
+    return parsed
+
+
+def _read_config_bytes(path: Path) -> bytes | None:
+    # exists() can suppress permission/I/O failures. Only a missing directory
+    # entry is an uninitialized store; a failed read must never erase history.
     try:
-        raw = path.read_bytes()
-        data: Dict[str, Any] = json.loads(raw.decode("utf-8"))
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not S_ISREG(info.st_mode):
+        raise ValueError("Configuration must be a regular file, not a symbolic link or special file.")
+    return path.read_bytes()
+
+
+def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
+    try:
+        raw = _read_config_bytes(path)
+        if raw is None:
+            cfg = AppConfig()
+            setattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
+            return cfg
+        data: Dict[str, Any] = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_config_object,
+            parse_float=_config_number, parse_constant=_config_number,
+        )
         assert_no_persisted_secrets(data)
         cfg = AppConfig.from_dict(data)
         setattr(cfg, _STORAGE_REVISION_ATTR, hashlib.sha256(raw).hexdigest())
@@ -61,7 +94,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         ) from exc
     except Exception as exc:
         raise ConfigLoadError(
-            f"Configuration file cannot be loaded: {path}. The file was left unchanged; restore it from a backup or replace it with data/config.example.json."
+            f"Configuration file cannot be loaded: {path}. The file was left unchanged; restore a verified backup or reconcile the damaged state before restarting. Do not reset trading journals."
         ) from exc
 
 
@@ -72,7 +105,9 @@ def save_config(cfg: AppConfig, path: Path = DEFAULT_CONFIG_PATH) -> None:
     with _config_thread_lock(path):
         raw_data = cfg.to_dict()
         assert_no_persisted_secrets(raw_data)
-        data = (json.dumps(raw_data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        # Do not publish a snapshot that the strict loader will reject.
+        AppConfig.from_dict(raw_data)
+        data = (json.dumps(raw_data, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
         committed_revision = hashlib.sha256(data).hexdigest()
         path.parent.mkdir(parents=True, exist_ok=True)
         with _config_file_lock(path):
@@ -125,9 +160,10 @@ def _config_thread_lock(path: Path) -> Iterator[None]:
 
 
 def _config_file_revision(path: Path) -> str:
-    if not path.exists():
+    raw = _read_config_bytes(path)
+    if raw is None:
         return _MISSING_REVISION
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
 
 
 @contextmanager

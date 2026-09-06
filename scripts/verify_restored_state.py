@@ -140,24 +140,13 @@ def probe_restored_application(state: Path, frontend_dir: Path) -> dict[str, Any
     before = _inventory(state)
     if "config.json" not in before:
         raise ValueError("Restore drill requires the backed-up configuration, not empty defaults")
-    raw_config = None
     for filename in ("config.json", *STATE_FILENAMES.values()):
         target = state / filename
         if target.exists():
             parsed = _strict_json(target, MAX_READINESS_JSON_STORE_BYTES)
             if not isinstance(parsed, dict):
                 raise ValueError("Restored application store must contain a JSON object")
-            if filename == "config.json":
-                raw_config = parsed
-    config = load_config(state / "config.json")
-    for name in ("alerts", "paper_trades", "wallets", "copy_activity_outbox", "mutation_journal"):
-        entries = raw_config.get(name, [])
-        if (
-            not isinstance(entries, list)
-            or any(not isinstance(entry, dict) for entry in entries)
-            or len(getattr(config, name)) != len(entries)
-        ):
-            raise ValueError("Restored configuration silently drops durable records")
+    load_config(state / "config.json")
     databases = _check_sqlite(state)
     attempted_connections: list[None] = []
     probe_thread = threading.get_ident()

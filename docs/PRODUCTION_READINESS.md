@@ -18,13 +18,34 @@ independent assessments and the 83-point formal local checklist below are
 historical results with different scope, not competing current approvals.
 Missing external acceptance cannot be supplied by a score.
 
-The next recovery candidate closes a reproduced false-positive restore check:
+Recovery commit `7761cf6` closes a reproduced false-positive restore check:
 a checksummed backup containing malformed configuration previously passed the
 inventory-only drill. Collection now boots the restored application in an
 isolated read-only child, checks health/state and SQLite integrity, and rejects
 changed bytes or backend egress. Review requires this exact-runtime application
 evidence. Local regression results do not establish actual VPS recovery or raise
-the independent score by themselves.
+the independent score by themselves. Its
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/33987079898) and
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33987079888)
+passed; those results do not validate the following local startup changes.
+
+The next startup candidate applies fail-closed integrity checks to ordinary
+configuration loading as well as restoration. It rejects malformed durable
+collections, oversized journals, duplicate JSON keys and non-finite numbers
+without discarding records or publishing an unloadable replacement. Valid
+legacy configurations and append-time retention remain supported.
+
+The 2026-09-06 follow-up also rejects malformed operational booleans, invalid
+copy risk numbers, contradictory percentage/scale values and duplicate or
+incomplete journal identities. It no longer converts invalid copy percentages
+to 100%, treats quoted `"false"` as enabled, synthesizes missing durable record
+IDs, or treats absent copy dispatch state as automatically pending. Save and
+restore paths use the same guards. Numeric legacy risk settings within bounds
+remain supported, as do internal HTTP status enums and valid reconciliation
+replays. This closes reproduced configuration defects; it does not supply
+financial-history completeness, actual-host recovery, release acceptance or
+funded-account evidence. The independent 75/100 assessment is not raised merely
+because these regressions pass.
 
 The accepted browser-workflow baseline applies the saved React theme,
 preserves view navigation through reload/back/forward, names the previously

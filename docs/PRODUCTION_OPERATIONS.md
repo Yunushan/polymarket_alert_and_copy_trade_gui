@@ -214,6 +214,42 @@ fails if its effective paths or backup source differ from this boundary.
 
 ### Durable-mutation idempotency window
 
+Configuration loading rejects duplicate JSON keys, non-finite numbers,
+malformed record collections and market/safety-setting containers. Existing
+journals above the supported capacity are rejected unchanged, not trimmed on
+startup: sorting away an older pending live operation would erase its replay
+protection. Normal append-time retention still removes completed/rejected
+records while preserving unresolved ones. Valid older configurations may omit
+the newer journal collections. Saving validates the snapshot before publication
+so malformed or non-finite state cannot replace a valid configuration.
+An inaccessible, unreadable, symlinked or special-file configuration is not an
+empty store. Both loading and the save-time revision guard distinguish a truly
+missing directory entry from an inspection/read error. This avoids relying on
+[`Path.exists()`](https://docs.python.org/3/library/pathlib.html#pathlib.Path.exists),
+which can return false for inaccessible files.
+
+Operational flags in stored configuration must be JSON booleans (`true` or
+`false`), not quoted strings, numbers or nulls. Copy percentage/scale, slippage,
+positive per-trade caps and integer conflict windows are validated on load and
+before save. Valid finite legacy numeric strings remain accepted, but invalid
+values are not clamped, truncated or replaced with a 100% copy allocation.
+When both percentage and scale are present, they must agree within serialization
+rounding. Existing invalid settings need explicit operator correction.
+
+Mutation journals require stable record IDs, SHA-256 key/request hashes,
+mutation method/path and an explicit boolean live classification. Copy outboxes
+require stable record, market, watch and activity identities. Duplicate record
+IDs, duplicate journal client keys or duplicate outbox signal identities fail
+closed. Malformed replay metadata and completed records without a response
+status are rejected. Missing/unknown dispatch states remain ambiguous, never
+automatically pending. Valid legacy configurations can omit journal collections,
+but incomplete records inside a present journal are not reconstructed with new
+identities. Restore acceptance uses these same configuration rules.
+
+On a configuration-integrity error, preserve the original bytes and reconcile
+against a verified backup and venue history. Do not replace the configuration
+with empty defaults or delete its trading journals to get the process started.
+
 The live-report, decision, and promotion-snapshot create routes use an opaque
 `Idempotency-Key` (1-128 visible ASCII characters, with no whitespace). Only a
 SHA-256-derived binding is persisted. A retry with the same key and canonical

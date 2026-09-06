@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+import json
+from stat import S_IFDIR, S_IFIFO, S_IFLNK
+from types import SimpleNamespace
 import threading
 import unittest
 from pathlib import Path
@@ -12,6 +15,8 @@ from core.models import (
     CopyActivityOutboxEntry,
     CopyTradeSettings,
     MarketConfig,
+    MAX_MUTATION_JOURNAL_ENTRIES,
+    MutationJournalEntry,
     PaperTradeRecord,
     PriceAlert,
     WalletWatch,
@@ -108,12 +113,14 @@ class CoreModelTests(unittest.TestCase):
         self.assertEqual(loaded.copytrading.normalized_follow_wallets(), [WALLET])
         self.assertEqual(loaded.copytrading.to_dict()["copy_percentage"], 50.0)
 
-    def test_copy_settings_load_percentage_and_clamp_legacy_scale(self) -> None:
+    def test_copy_settings_load_percentage_and_valid_legacy_scale(self) -> None:
         from_percentage = CopyTradeSettings.from_dict({"copy_percentage": 25})
-        from_legacy = CopyTradeSettings.from_dict({"scale": 2.0})
+        from_legacy = CopyTradeSettings.from_dict({"scale": 0.5})
 
         self.assertEqual(from_percentage.scale, 0.25)
-        self.assertEqual(from_legacy.scale, 1.0)
+        self.assertEqual(from_legacy.scale, 0.5)
+        with self.assertRaises(ValueError):
+            CopyTradeSettings.from_dict({"scale": 2.0})
 
     def test_copy_activity_outbox_roundtrip_preserves_manual_reconciliation_state(self) -> None:
         entry = CopyActivityOutboxEntry(
@@ -148,6 +155,8 @@ class CoreModelTests(unittest.TestCase):
     def test_copy_activity_outbox_unknown_state_fails_closed(self) -> None:
         loaded = CopyActivityOutboxEntry.from_dict(
             {
+                "id": "outbox-1",
+                "market_id": "polymarket",
                 "watch_id": "watch-1",
                 "activity_key": "tx:abc",
                 "activity": {"transactionHash": "abc"},
@@ -346,6 +355,164 @@ class CoreModelTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigLoadError, "Configuration file cannot be loaded"):
                 load_config(path)
             self.assertEqual(path.read_text(encoding="utf-8"), "{not-json")
+
+    def test_malformed_durable_collections_fail_closed_without_losing_bytes(self) -> None:
+        for key in ("copy_activity_outbox", "mutation_journal"):
+            for value in ({"lost-record": {}}, [None], ["lost-record"], None):
+                with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "config.json"
+                    raw = json.dumps({key: value}).encode("utf-8")
+                    path.write_bytes(raw)
+                    with self.assertRaises(ConfigLoadError):
+                        load_config(path)
+                    self.assertEqual(path.read_bytes(), raw)
+
+    def test_oversized_journal_cannot_drop_old_pending_live_operation_on_load(self) -> None:
+        pending = MutationJournalEntry(
+            key_hash="a" * 64, method="POST", path="/api/live/order",
+            request_hash="b" * 64, live=True, state="pending", updated_at=1,
+        )
+        completed = MutationJournalEntry(
+            key_hash="c" * 64, method="POST", path="/api/config",
+            request_hash="d" * 64, state="completed", updated_at=2,
+        )
+        raw = json.dumps({"mutation_journal": [pending.to_dict()] + [completed.to_dict()] * MAX_MUTATION_JOURNAL_ENTRIES})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(raw, encoding="utf-8")
+            with self.assertRaises(ConfigLoadError):
+                load_config(path)
+            self.assertEqual(path.read_text(encoding="utf-8"), raw)
+
+    def test_duplicate_json_keys_cannot_replace_live_journal_or_safety_settings(self) -> None:
+        for raw in (
+            '{"mutation_journal":[{"live":true,"state":"pending"}],"mutation_journal":[]}',
+            '{"markets":{"polymarket":{"settings":{"live_trading_enabled":false,"live_trading_enabled":true}}}}',
+        ):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(raw, encoding="utf-8")
+                with self.assertRaises(ConfigLoadError):
+                    load_config(path)
+                self.assertEqual(path.read_text(encoding="utf-8"), raw)
+
+    def test_nonfinite_config_numbers_fail_closed_on_load_and_save(self) -> None:
+        for token in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999"):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                raw = '{"markets":{"polymarket":{"settings":{"live_trading_max_size":' + token + '}}}}'
+                path.write_text(raw, encoding="utf-8")
+                with self.assertRaises(ConfigLoadError):
+                    load_config(path)
+                self.assertEqual(path.read_text(encoding="utf-8"), raw)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            save_config(AppConfig(), path)
+            original = path.read_bytes()
+            for value in (float("nan"), float("inf"), -float("inf")):
+                with self.subTest(value=value):
+                    cfg = load_config(path)
+                    cfg.markets["polymarket"].settings["live_trading_max_size"] = value
+                    with self.assertRaises(ValueError):
+                        save_config(cfg, path)
+                    self.assertEqual(path.read_bytes(), original)
+
+    def test_invalid_configuration_containers_do_not_default_silently(self) -> None:
+        invalid = [
+            {"markets": []}, {"markets": None}, {"markets": {"polymarket": None}},
+            {"markets": {"polymarket": {"settings": []}}},
+            {"copytrading": None}, {"copytrading": []},
+        ]
+        invalid.extend({key: [None]} for key in ("alerts", "wallets", "paper_trades"))
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                AppConfig.from_dict(payload)
+
+    def test_full_journal_roundtrip_and_retention_preserve_pending_live_record(self) -> None:
+        pending = MutationJournalEntry(
+            key_hash="a" * 64, method="POST", path="/api/live/order", request_hash="b" * 64,
+            live=True, state="pending", updated_at=1,
+        )
+        cfg = AppConfig(mutation_journal=[pending])
+        for index in range(MAX_MUTATION_JOURNAL_ENTRIES - 1):
+            cfg.mutation_journal.append(MutationJournalEntry(
+                key_hash=f"{index:064x}", method="POST", path="/api/config", request_hash="d" * 64,
+                state="completed", response_status=200, updated_at=2,
+            ))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            save_config(cfg, path)
+            loaded = load_config(path)
+            self.assertEqual(len(loaded.mutation_journal), MAX_MUTATION_JOURNAL_ENTRIES)
+            self.assertEqual(loaded.mutation_journal[0].id, pending.id)
+            self.assertTrue(loaded.mutation_journal[0].live)
+            self.assertEqual(loaded.mutation_journal[0].state, "pending")
+            loaded.append_mutation_journal(MutationJournalEntry(
+                key_hash="e" * 64, method="POST", path="/api/config", request_hash="f" * 64,
+            ))
+            save_config(loaded, path)
+            self.assertIn(pending.id, [entry.id for entry in load_config(path).mutation_journal])
+
+    def test_save_cannot_publish_an_unloadable_oversized_journal(self) -> None:
+        cfg = AppConfig()
+        cfg.mutation_journal = [MutationJournalEntry(
+            key_hash="a" * 64, method="POST", path="/api/live/order", request_hash="b" * 64,
+            live=True,
+        ) for _ in range(MAX_MUTATION_JOURNAL_ENTRIES + 1)]
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "new-state"
+            with self.assertRaises(ValueError):
+                save_config(cfg, parent / "config.json")
+            self.assertFalse(parent.exists())
+
+    def test_legacy_file_without_new_journals_roundtrips_with_finite_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text('{"wallets":[],"copytrading":{"copy_percentage":25},"markets":{"polymarket":{"settings":{"limit":1e3}}}}', encoding="utf-8")
+            cfg = load_config(path)
+            self.assertEqual(cfg.mutation_journal, [])
+            self.assertEqual(cfg.copy_activity_outbox, [])
+            self.assertEqual(cfg.copytrading.scale, 0.25)
+            self.assertEqual(cfg.markets["polymarket"].settings["limit"], 1000.0)
+            save_config(cfg, path)
+            self.assertEqual(load_config(path).copytrading.scale, 0.25)
+
+    def test_inaccessible_existing_config_is_never_treated_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text("{}", encoding="utf-8")
+            with (
+                patch.object(Path, "exists", return_value=False),
+                patch.object(Path, "read_bytes", side_effect=PermissionError("unreadable")),
+                self.assertRaises(ConfigLoadError),
+            ):
+                load_config(path)
+            self.assertEqual(path.read_text(encoding="utf-8"), "{}")
+
+    def test_new_writer_cannot_replace_unreadable_existing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text("{}", encoding="utf-8")
+            with (
+                patch.object(Path, "exists", return_value=False),
+                patch.object(Path, "read_bytes", side_effect=PermissionError("unreadable")),
+                patch("core.storage.replace_file") as replace,
+            ):
+                with self.assertRaises(PermissionError):
+                    save_config(AppConfig(), path)
+                replace.assert_not_called()
+            self.assertEqual(path.read_text(encoding="utf-8"), "{}")
+
+    def test_nonregular_configuration_is_rejected_before_opening(self) -> None:
+        for mode in (S_IFDIR, S_IFIFO, S_IFLNK):
+            with (
+                self.subTest(mode=mode),
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=mode)),
+                patch.object(Path, "read_bytes") as read,
+                self.assertRaises(ConfigLoadError),
+            ):
+                load_config(Path("nonregular-config"))
+            read.assert_not_called()
 
     def test_default_config_path_can_use_environment_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Literal, Optional, Dict, Any, List, cast
 import hashlib
 import json
+import math
 import uuid
 import time
 
@@ -24,6 +25,56 @@ MAX_MUTATION_RESULT_BYTES = 256 * 1024
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _config_bool(data: Dict[str, Any], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if type(value) is not bool:
+        raise ValueError(f"Configuration field '{key}' must be a JSON boolean.")
+    return value
+
+
+def _config_number(value: Any, key: str, minimum: float, maximum: float | None = None, *, positive: bool = False) -> float:
+    if type(value) not in (int, float, str):
+        raise ValueError(f"Configuration field '{key}' must be a finite number.")
+    try:
+        number = float(value)
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(f"Configuration field '{key}' must be a finite number.") from exc
+    if not math.isfinite(number) or number < minimum or (maximum is not None and number > maximum) or (positive and number <= 0):
+        raise ValueError(f"Configuration field '{key}' is outside its supported range.")
+    return number
+
+
+def _config_integer(value: Any, key: str, maximum: int | None = None) -> int:
+    if isinstance(value, str) and value.strip().isdecimal():
+        value = int(value.strip())
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or (maximum is not None and value > maximum):
+        raise ValueError(f"Configuration field '{key}' must be an integer in its supported range.")
+    return int(value)
+
+
+def _record_identity(data: Dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip() or value != value.strip() or any(ord(char) < 32 for char in value):
+        raise ValueError(f"Durable record field '{key}' must contain a stable non-empty identity.")
+    return value
+
+
+def _record_object(data: Dict[str, Any], key: str, *, required: bool = False) -> Dict[str, Any]:
+    value = data.get(key) if required else data.get(key, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"Durable record field '{key}' must be an object.")
+    return dict(value)
+
+
+def _unique_record_fields(records: List[Any], fields: tuple[str, ...]) -> None:
+    seen = set()
+    for record in records:
+        key = tuple(getattr(record, name) for name in fields)
+        if key in seen:
+            raise ValueError("Configuration contains duplicate durable record identities; no records were discarded.")
+        seen.add(key)
 
 
 @dataclass
@@ -49,6 +100,8 @@ class PriceAlert:
     def from_dict(d: Dict[str, Any]) -> "PriceAlert":
         data = dict(d)
         data["market_id"] = str(data.get("market_id") or DEFAULT_MARKET_ID).strip().lower()
+        for key, default in (("enabled", True), ("once", True), ("triggered", False)):
+            data[key] = _config_bool(data, key, default)
         return PriceAlert(**data)
 
 
@@ -80,7 +133,7 @@ class PaperTradeRecord:
         data["size"] = float(data.get("size") or 0.0)
         raw_limit = data.get("limit_price")
         data["limit_price"] = None if raw_limit in (None, "") else float(raw_limit)
-        data["accepted"] = bool(data.get("accepted", False))
+        data["accepted"] = _config_bool(data, "accepted", False)
         data["message"] = str(data.get("message") or "")
         data["filled_size"] = float(data.get("filled_size") or 0.0)
         raw_average = data.get("average_price")
@@ -111,7 +164,9 @@ class WalletWatch:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "WalletWatch":
-        return WalletWatch(**d)
+        data = dict(d)
+        data["enabled"] = _config_bool(data, "enabled", True)
+        return WalletWatch(**data)
 
 
 @dataclass
@@ -144,7 +199,11 @@ class CopyActivityOutboxEntry:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "CopyActivityOutboxEntry":
         data = dict(d or {})
-        raw_state = str(data.get("state") or "pending").strip().lower()
+        record_id = _record_identity(data, "id")
+        watch_id = _record_identity(data, "watch_id")
+        activity_key = _record_identity(data, "activity_key")
+        market_id = _record_identity(data, "market_id").lower()
+        raw_state = str(data.get("state") or "ambiguous").strip().lower()
         # Unknown future/invalid states fail closed: automatic replay could
         # duplicate a live order whose dispatch status is not understood.
         state: CopyActivityState = (
@@ -152,39 +211,27 @@ class CopyActivityOutboxEntry:
             if raw_state in {"pending", "retryable", "completed", "rejected", "ambiguous"}
             else "ambiguous"
         )
-        activity = data.get("activity")
-        dispatch = data.get("dispatch")
-        execution_policy = data.get("execution_policy")
-        try:
-            attempts = max(0, int(data.get("attempts") or 0))
-        except (TypeError, ValueError):
-            attempts = 0
-        try:
-            created_at = max(0, int(data.get("created_at") or 0))
-        except (TypeError, ValueError):
-            created_at = 0
-        try:
-            updated_at = max(0, int(data.get("updated_at") or created_at))
-        except (TypeError, ValueError):
-            updated_at = created_at
-        try:
-            replay_authorized_at = max(0, int(data.get("replay_authorized_at") or 0))
-        except (TypeError, ValueError):
-            replay_authorized_at = 0
+        activity = _record_object(data, "activity", required=True)
+        dispatch = _record_object(data, "dispatch")
+        execution_policy = _record_object(data, "execution_policy")
+        if execution_policy:
+            CopyTradeSettings.from_dict(execution_policy)
+        attempts = _config_integer(data.get("attempts", 0), "attempts")
+        created_at = _config_integer(data.get("created_at", 0), "created_at")
+        updated_at = _config_integer(data.get("updated_at", created_at), "updated_at")
+        replay_authorized_at = _config_integer(data.get("replay_authorized_at", 0), "replay_authorized_at")
         return CopyActivityOutboxEntry(
-            watch_id=str(data.get("watch_id") or ""),
-            activity_key=str(data.get("activity_key") or ""),
-            activity=dict(activity) if isinstance(activity, dict) else {},
-            market_id=str(data.get("market_id") or DEFAULT_MARKET_ID).strip().lower(),
-            execution_policy=(
-                dict(execution_policy) if isinstance(execution_policy, dict) else {}
-            ),
+            watch_id=watch_id,
+            activity_key=activity_key,
+            activity=activity,
+            market_id=market_id,
+            execution_policy=execution_policy,
             state=state,
             attempts=attempts,
             outcome_code=str(data.get("outcome_code") or ""),
             outcome_message=str(data.get("outcome_message") or ""),
-            dispatch=dict(dispatch) if isinstance(dispatch, dict) else {},
-            id=str(data.get("id") or _uuid()),
+            dispatch=dispatch,
+            id=record_id,
             created_at=created_at,
             updated_at=updated_at,
             replay_authorized_at=replay_authorized_at,
@@ -318,48 +365,51 @@ class MutationJournalEntry:
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
+        _record_object(data, "response", required=True)
         data["response"] = bounded_mutation_result(self.response)
         return data
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "MutationJournalEntry":
         data = dict(d or {})
+        record_id = _record_identity(data, "id")
+        key_hash = _record_identity(data, "key_hash")
+        request_hash = _record_identity(data, "request_hash")
+        for digest in (key_hash, request_hash):
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                raise ValueError("Mutation journal hashes must be canonical SHA-256 digests.")
+        method = _record_identity(data, "method")
+        path = _record_identity(data, "path")
+        if method not in {"POST", "PATCH", "PUT", "DELETE"} or not path.startswith("/api/") or "?" in path or "#" in path:
+            raise ValueError("Mutation journal request identity is invalid.")
+        if "live" not in data:
+            raise ValueError("Mutation journal execution classification is missing.")
+        live = _config_bool(data, "live", False)
         raw_state = str(data.get("state") or "ambiguous").strip().lower()
         state: MutationJournalState = (
             cast(MutationJournalState, raw_state)
             if raw_state in {"pending", "retryable", "completed", "rejected", "ambiguous"}
             else "ambiguous"
         )
-        try:
-            response_status = int(data.get("response_status") or 0)
-        except (TypeError, ValueError):
-            response_status = 0
-        if response_status < 100 or response_status > 599:
-            response_status = 0
-        try:
-            created_at = max(0, int(data.get("created_at") or 0))
-        except (TypeError, ValueError):
-            created_at = 0
-        try:
-            updated_at = max(0, int(data.get("updated_at") or created_at))
-        except (TypeError, ValueError):
-            updated_at = created_at
-        try:
-            replay_authorized_at = max(0, int(data.get("replay_authorized_at") or 0))
-        except (TypeError, ValueError):
-            replay_authorized_at = 0
+        response_status = _config_integer(data.get("response_status", 0), "response_status", 599)
+        if (response_status and response_status < 100) or (state == "completed" and response_status == 0):
+            raise ValueError("Mutation journal response status is invalid.")
+        response = _record_object(data, "response")
+        created_at = _config_integer(data.get("created_at", 0), "created_at")
+        updated_at = _config_integer(data.get("updated_at", created_at), "updated_at")
+        replay_authorized_at = _config_integer(data.get("replay_authorized_at", 0), "replay_authorized_at")
         return MutationJournalEntry(
-            key_hash=str(data.get("key_hash") or ""),
-            method=str(data.get("method") or "").strip().upper(),
-            path=str(data.get("path") or "").strip(),
-            request_hash=str(data.get("request_hash") or ""),
-            live=bool(data.get("live", False)),
+            key_hash=key_hash,
+            method=method,
+            path=path,
+            request_hash=request_hash,
+            live=live,
             state=state,
             response_status=response_status,
-            response=bounded_mutation_result(data.get("response") or {}),
+            response=bounded_mutation_result(response),
             outcome_code=str(data.get("outcome_code") or ""),
             outcome_message=str(data.get("outcome_message") or ""),
-            id=str(data.get("id") or _uuid()),
+            id=record_id,
             created_at=created_at,
             updated_at=updated_at,
             replay_authorized_at=replay_authorized_at,
@@ -382,45 +432,57 @@ class CopyTradeSettings:
 
     @staticmethod
     def _stored_identity(value: object) -> str:
-        text = str(value or "").strip()
+        if not isinstance(value, str):
+            raise ValueError("Copy follow identities must be strings.")
+        text = value.strip()
         if text.lower().startswith("solana:"):
             return "solana:" + text.split(":", 1)[1].strip()
         return text.lower()
 
     def to_dict(self) -> Dict[str, Any]:
-        data = asdict(self)
+        data = self._validated_risk(asdict(self))
         data["follow_wallets"] = self.normalized_follow_wallets()
         data["follow_wallet"] = data["follow_wallets"][0] if data["follow_wallets"] else ""
-        data["copy_percentage"] = round(max(0.0, min(float(self.scale), 1.0)) * 100.0, 10)
+        data["copy_percentage"] = round(data["scale"] * 100.0, 10)
         return data
 
     def normalized_follow_wallets(self) -> List[str]:
+        if not isinstance(self.follow_wallets, list):
+            raise ValueError("Copy follow_wallets must be a list.")
         wallets: List[str] = []
-        for value in [self.follow_wallet, *(self.follow_wallets or [])]:
+        for value in [self.follow_wallet, *self.follow_wallets]:
             wallet = self._stored_identity(value)
             if wallet and wallet not in wallets:
                 wallets.append(wallet)
         return wallets
 
     @staticmethod
+    def _validated_risk(d: Dict[str, Any]) -> Dict[str, Any]:
+        data = dict(d)
+        for key, default in (("enabled", False), ("live", False), ("allow_sells", False), ("conflict_guard", True)):
+            data[key] = _config_bool(data, key, default)
+        scale = _config_number(data.get("scale", 1.0), "scale", 0, 1)
+        if "copy_percentage" in data:
+            percentage_scale = _config_number(data.pop("copy_percentage"), "copy_percentage", 0, 100) / 100
+            # to_dict rounds the UI percentage to ten decimal places.
+            if "scale" in data and not math.isclose(scale, percentage_scale, rel_tol=0, abs_tol=1e-12):
+                raise ValueError("Copy percentage and scale disagree.")
+            if "scale" not in data:
+                scale = percentage_scale
+        data["scale"] = scale
+        data["max_usdc_per_trade"] = _config_number(data.get("max_usdc_per_trade", 25.0), "max_usdc_per_trade", 0, positive=True)
+        data["slippage"] = _config_number(data.get("slippage", 0.02), "slippage", 0, 1)
+        data["conflict_window_seconds"] = _config_integer(data.get("conflict_window_seconds", 300), "conflict_window_seconds", 86400)
+        return data
+
+    @staticmethod
     def from_dict(d: Dict[str, Any]) -> "CopyTradeSettings":
-        data = dict(d or {})
-        raw_percentage = data.pop("copy_percentage", None)
-        if raw_percentage not in (None, ""):
-            try:
-                data["scale"] = float(raw_percentage) / 100.0
-            except (TypeError, ValueError):
-                data["scale"] = 1.0
-        try:
-            scale = float(data.get("scale", 1.0))
-        except (TypeError, ValueError):
-            scale = 1.0
-        data["scale"] = max(0.0, min(scale, 1.0))
+        data = CopyTradeSettings._validated_risk(d)
         raw_wallets = data.get("follow_wallets", [])
         if isinstance(raw_wallets, str):
             raw_wallets = raw_wallets.replace(";", ",").split(",")
         if not isinstance(raw_wallets, list):
-            raw_wallets = []
+            raise ValueError("Copy follow_wallets must be a list or delimited string.")
         wallets: List[str] = []
         for value in [data.get("follow_wallet", ""), *raw_wallets]:
             wallet = CopyTradeSettings._stored_identity(value)
@@ -428,12 +490,6 @@ class CopyTradeSettings:
                 wallets.append(wallet)
         data["follow_wallet"] = wallets[0] if wallets else ""
         data["follow_wallets"] = wallets
-        try:
-            window = int(data.get("conflict_window_seconds", 300))
-        except (TypeError, ValueError):
-            window = 300
-        data["conflict_window_seconds"] = max(0, min(window, 86400))
-        data["conflict_guard"] = bool(data.get("conflict_guard", True))
         return CopyTradeSettings(**data)
 
 
@@ -456,7 +512,7 @@ class MarketConfig:
             settings = {}
         return MarketConfig(
             market_id=str(d.get("market_id") or market_id),
-            enabled=bool(d.get("enabled", False)),
+            enabled=_config_bool(d, "enabled", False),
             settings=dict(settings),
         )
 
@@ -466,6 +522,13 @@ def default_market_configs() -> Dict[str, MarketConfig]:
         meta.market_id: MarketConfig(market_id=meta.market_id, enabled=meta.default_enabled)
         for meta in MARKET_CATALOG
     }
+
+
+def _config_records(data: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    records = data.get(key, [])
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise ValueError(f"Configuration field '{key}' must be a list of objects; no records were discarded.")
+    return records
 
 
 @dataclass
@@ -611,35 +674,34 @@ class AppConfig:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "AppConfig":
-        alerts = [PriceAlert.from_dict(x) for x in d.get("alerts", [])]
-        paper_trades = [PaperTradeRecord.from_dict(x) for x in d.get("paper_trades", [])]
-        wallets = [WalletWatch.from_dict(x) for x in d.get("wallets", [])]
-        raw_outbox = d.get("copy_activity_outbox", [])
-        copy_activity_outbox = (
-            [CopyActivityOutboxEntry.from_dict(x) for x in raw_outbox if isinstance(x, dict)]
-            if isinstance(raw_outbox, list)
-            else []
-        )
-        raw_mutation_journal = d.get("mutation_journal", [])
-        mutation_journal = (
-            [MutationJournalEntry.from_dict(x) for x in raw_mutation_journal if isinstance(x, dict)]
-            if isinstance(raw_mutation_journal, list)
-            else []
-        )
-        if len(mutation_journal) > MAX_MUTATION_JOURNAL_ENTRIES:
-            mutation_journal = sorted(
-                mutation_journal,
-                key=lambda item: (item.updated_at, item.created_at, item.id),
-                reverse=True,
-            )[:MAX_MUTATION_JOURNAL_ENTRIES]
+        if not isinstance(d, dict):
+            raise ValueError("Configuration must contain a JSON object.")
+        alerts = [PriceAlert.from_dict(x) for x in _config_records(d, "alerts")]
+        paper_trades = [PaperTradeRecord.from_dict(x) for x in _config_records(d, "paper_trades")]
+        wallets = [WalletWatch.from_dict(x) for x in _config_records(d, "wallets")]
+        copy_activity_outbox = [CopyActivityOutboxEntry.from_dict(x) for x in _config_records(d, "copy_activity_outbox")]
+        raw_mutation_journal = _config_records(d, "mutation_journal")
+        if len(raw_mutation_journal) > MAX_MUTATION_JOURNAL_ENTRIES:
+            # Loading must never evict a pending live operation. Retention is
+            # applied explicitly by append_mutation_journal, not by recovery.
+            raise ValueError("Configuration mutation journal exceeds its supported capacity; no records were discarded.")
+        mutation_journal = [MutationJournalEntry.from_dict(x) for x in raw_mutation_journal]
+        _unique_record_fields(mutation_journal, ("id",))
+        _unique_record_fields(mutation_journal, ("key_hash",))
+        _unique_record_fields(copy_activity_outbox, ("id",))
+        _unique_record_fields(copy_activity_outbox, ("market_id", "watch_id", "activity_key"))
+        if not isinstance(d.get("copytrading", {}), dict):
+            raise ValueError("Configuration copytrading settings must be an object.")
         copytrading = CopyTradeSettings.from_dict(d.get("copytrading", {}))
         markets = default_market_configs()
         raw_markets = d.get("markets", {})
-        if isinstance(raw_markets, dict):
-            for market_id, raw_cfg in raw_markets.items():
-                if isinstance(raw_cfg, dict):
-                    cfg = MarketConfig.from_dict(str(market_id), raw_cfg)
-                    markets[cfg.market_id] = cfg
+        if not isinstance(raw_markets, dict):
+            raise ValueError("Configuration markets must be an object.")
+        for market_id, raw_cfg in raw_markets.items():
+            if not isinstance(raw_cfg, dict) or not isinstance(raw_cfg.get("settings", {}), dict):
+                raise ValueError("Configuration market and safety settings must be objects.")
+            cfg = MarketConfig.from_dict(str(market_id), raw_cfg)
+            markets[cfg.market_id] = cfg
         selected_market_id = str(d.get("selected_market_id") or DEFAULT_MARKET_ID).strip().lower()
         if selected_market_id not in markets:
             selected_market_id = DEFAULT_MARKET_ID

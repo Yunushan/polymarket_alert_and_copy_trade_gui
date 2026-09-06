@@ -2845,21 +2845,24 @@ class MarketSentinelCliTests(unittest.TestCase):
                 self.assertEqual(run_cli_silent(["doctor", "--strict", "--config", str(config_path), "--frontend-dir", tmp]), 1)
 
     def test_doctor_cli_reports_corrupt_configuration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config.json"
-            config_path.write_text("{not-json", encoding="utf-8")
-            stdout = io.StringIO()
-            with patch("market_sentinel_cli._dependency_rows", return_value=[]), patch(
-                "market_sentinel_cli.health_payload",
-                return_value={"frontend_build_available": True},
-            ), patch("sys.stdout", stdout):
-                exit_code = market_sentinel_cli.main(["doctor", "--config", str(config_path), "--frontend-dir", tmp])
+        for raw in ("{not-json", '{"mutation_journal":[null]}', '{"copy_activity_outbox":{}}', '{"markets":{},"markets":{}}',
+                    '{"copytrading":{"live":"false"}}', '{"copytrading":{"copy_percentage":"invalid"}}', '{"mutation_journal":[{}]}'):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.json"
+                config_path.write_text(raw, encoding="utf-8")
+                stdout = io.StringIO()
+                with patch("market_sentinel_cli._dependency_rows", return_value=[]), patch(
+                    "market_sentinel_cli.health_payload",
+                    return_value={"frontend_build_available": True},
+                ), patch("sys.stdout", stdout):
+                    exit_code = market_sentinel_cli.main(["doctor", "--strict", "--config", str(config_path), "--frontend-dir", tmp])
 
-        self.assertEqual(exit_code, 1)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["status"], "error")
-        self.assertEqual(payload["checks"][0]["name"], "configuration")
-        self.assertEqual(payload["checks"][0]["status"], "fail")
+                self.assertEqual(exit_code, 1)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["checks"][0]["name"], "configuration")
+                self.assertEqual(payload["checks"][0]["status"], "fail")
+                self.assertEqual(config_path.read_text(encoding="utf-8"), raw)
 
     def test_full_app_cli_command_groups_are_registered(self) -> None:
         parser = market_sentinel_cli.build_parser()

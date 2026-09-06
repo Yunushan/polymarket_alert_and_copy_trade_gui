@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.models import AppConfig, MutationJournalEntry
+from core.storage import ConfigLoadError
 from scripts.backup_state import create_backup
 from scripts.verify_production_deployment import DURABLE_STATE_PATHS, check_restore_drill
 from scripts.verify_restored_state import (
@@ -80,11 +81,20 @@ class RestoredStateTests(unittest.TestCase):
 
     def test_malformed_durable_journals_are_not_silently_dropped(self) -> None:
         for field in ("copy_activity_outbox", "mutation_journal"):
-            for entries in ([None], {"unexpected": "shape"}):
+            for entries in ([None], [{}], {"unexpected": "shape"}):
                 with self.subTest(field=field, entries=entries):
                     (self.state / "config.json").write_text(json.dumps({field: entries}), encoding="utf-8")
-                    with self.assertRaisesRegex(ValueError, "drops durable records"):
+                    with self.assertRaises(ConfigLoadError):
                         self.probe()
+
+    def test_invalid_copy_risk_config_cannot_be_accepted_as_recovery_evidence(self) -> None:
+        for settings in ({"live": "false"}, {"copy_percentage": "invalid"}, {"scale": 2}):
+            with self.subTest(settings=settings):
+                (self.state / "config.json").write_text(json.dumps({"copytrading": settings}), encoding="utf-8")
+                before = _inventory(self.state)
+                with self.assertRaises(ConfigLoadError):
+                    self.probe()
+                self.assertEqual(_inventory(self.state), before)
 
     def test_invalid_store_schema_is_not_quarantined_or_treated_as_empty(self) -> None:
         for filename in STATE_FILENAMES.values():

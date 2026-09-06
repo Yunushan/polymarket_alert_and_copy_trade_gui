@@ -1523,13 +1523,16 @@ class WebApiTests(unittest.TestCase):
         )
 
     def test_server_refuses_to_start_with_a_corrupt_configuration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config_path = root / "config.json"
-            config_path.write_text("{not-json", encoding="utf-8")
-
-            with self.assertRaises(ConfigLoadError):
-                run_server("127.0.0.1", 0, config_path)
+        for raw in ("{not-json", '{"mutation_journal":[null]}', '{"copy_activity_outbox":{}}', '{"markets":{},"markets":{}}',
+                    '{"copytrading":{"live":"false"}}', '{"copytrading":{"copy_percentage":"invalid"}}', '{"mutation_journal":[{}]}'):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "config.json"
+                config_path.write_text(raw, encoding="utf-8")
+                with patch("web_api.ReactGuiServer") as server:
+                    with self.assertRaises(ConfigLoadError):
+                        run_server("127.0.0.1", 0, config_path)
+                    server.assert_not_called()
+                self.assertEqual(config_path.read_text(encoding="utf-8"), raw)
 
     def test_web_cli_forwards_configured_frontend_directory(self) -> None:
         frontend_dir = Path("deployment") / "frontend" / "dist"
