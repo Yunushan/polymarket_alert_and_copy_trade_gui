@@ -17,6 +17,8 @@ except ModuleNotFoundError:  # Direct execution adds scripts/ to sys.path.
     from release_version import normalize_release_tag, normalize_release_version
     from review_deployment_evidence import review_deployment_report, review_external_probe_report
 
+from core.deployment_identity import canonical_https_origin
+
 
 REPOSITORY = "Yunushan/market-sentinel"
 WORKFLOW = ".github/workflows/deployment-evidence.yml"
@@ -132,22 +134,14 @@ def frontend_archive_sha256(path: Path) -> str:
 
 
 def _canonical_origin(value: str) -> str:
-    parsed = urlparse(value.strip())
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        raise DeploymentEvidenceGenerationError("production origin must be an origin-only HTTPS URL")
-    hostname = parsed.hostname.lower()
+    try:
+        origin = canonical_https_origin(value)
+    except ValueError as exc:
+        raise DeploymentEvidenceGenerationError(str(exc)) from exc
+    hostname = urlparse(origin).hostname
     if hostname in {"localhost", "example.com", "analytics.example.com"} or hostname.endswith(".example.com"):
         raise DeploymentEvidenceGenerationError("production origin must not use a placeholder or localhost")
-    port = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
-    return f"https://{hostname}{port}"
+    return origin
 
 
 def generate_release_identity(

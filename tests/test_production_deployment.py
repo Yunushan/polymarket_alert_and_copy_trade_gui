@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,18 @@ def _unauthorized_errors(*, bodies: list[io.BytesIO] | None = None) -> list[HTTP
 
 
 class ProductionDeploymentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        resolver = socket.getaddrinfo
+
+        def resolve_fixture(host, port, *args, **kwargs):
+            if host == "analytics.example.com":
+                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("1.1.1.1", port))]
+            return resolver(host, port, *args, **kwargs)
+
+        dns = patch("scripts.verify_production_deployment.socket.getaddrinfo", side_effect=resolve_fixture)
+        dns.start()
+        self.addCleanup(dns.stop)
+
     def test_restore_drill_rejects_checksummed_but_unreadable_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1158,7 +1171,7 @@ class ProductionDeploymentTests(unittest.TestCase):
                     "1.0.11",
                     "api-token",
                 )
-        with self.assertRaisesRegex(ValueError, "absolute https"):
+        with self.assertRaisesRegex(ValueError, "origin-only HTTPS"):
             check_public_proxy("http://analytics.example.com", "", "", 1.0)
 
     def test_public_proxy_checks_static_read_metrics_state_and_mutation_routes(self) -> None:

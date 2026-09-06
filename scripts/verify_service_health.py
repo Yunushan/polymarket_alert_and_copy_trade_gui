@@ -13,6 +13,9 @@ MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
 
 
 class _RejectRedirects(HTTPRedirectHandler):
+    # Python 3.10 lacks the stdlib 308 dispatch alias.
+    http_error_308 = HTTPRedirectHandler.http_error_302
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         fp.close()
         raise RuntimeError("health and deployment probe redirects are forbidden")

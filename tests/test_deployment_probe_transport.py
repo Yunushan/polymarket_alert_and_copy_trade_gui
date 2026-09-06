@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import socket
 import threading
 import unittest
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler
 from unittest.mock import Mock, patch
 
 from scripts import verify_production_deployment as deployment
@@ -55,6 +57,14 @@ def serve(*, status=200, body=b"", headers=None, send_length=True):
 
 
 class ProbeTransportTests(unittest.TestCase):
+    def test_308_redirect_is_rejected_without_a_stdlib_308_handler(self):
+        with serve(body=json.dumps(HEALTH).encode()) as (target, received):
+            with serve(status=308, headers={"Location": target}) as (origin, _):
+                with patch.object(HTTPRedirectHandler, "http_error_308", None, create=True):
+                    with self.assertRaisesRegex(RuntimeError, "redirects are forbidden"):
+                        check_health(origin, "test-only-token", 2.0)
+            self.assertEqual(received, [])
+
     def test_body_reader_bounds_unannounced_and_understated_payloads(self):
         for headers in ({}, {"Content-Length": "10"}):
             with self.subTest(headers=headers):
@@ -157,7 +167,12 @@ class ProbeTransportTests(unittest.TestCase):
                 response.headers = headers
                 unauthorized = [HTTPError("https://analytics.example.com", 401, "Unauthorized", {}, io.BytesIO())
                                 for _ in deployment.PUBLIC_PROXY_AUTH_PROBES]
-                with patch("scripts.verify_production_deployment.urlopen", side_effect=unauthorized + [response]):
+                with (
+                    patch("scripts.verify_production_deployment.socket.getaddrinfo", return_value=[
+                        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("1.1.1.1", 443)),
+                    ]),
+                    patch("scripts.verify_production_deployment.urlopen", side_effect=unauthorized + [response]),
+                ):
                     with self.assertRaises(RuntimeError):
                         deployment.check_public_proxy("https://analytics.example.com", "user", "test-only-password",
                                                       2.0, upstream_token="test-only-token")

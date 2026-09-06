@@ -55,6 +55,7 @@ except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the r
 
 from polymarket.live_report_schema import validate_live_validation_report
 from polymarket.live_reports import live_validation_report_promotion
+from core.deployment_identity import canonical_https_origin
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2891,26 +2892,14 @@ def _deployment_result(status: str, detail: str, *, report_hash: str = "") -> di
 def _canonical_deployment_origin(value: Any) -> str:
     if not _is_nonblank_string(value):
         return ""
-    parsed = urlparse(value.strip())
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        return ""
-    hostname = parsed.hostname.lower()
-    if hostname in {"localhost", "example.com", "analytics.example.com"} or hostname.endswith(".example.com"):
-        return ""
     try:
-        port = parsed.port
+        origin = canonical_https_origin(value)
     except ValueError:
         return ""
-    suffix = f":{port}" if port and port != 443 else ""
-    return f"https://{hostname}{suffix}"
+    hostname = urlparse(origin).hostname
+    if hostname in {"localhost", "example.com", "analytics.example.com"} or hostname.endswith(".example.com"):
+        return ""
+    return origin
 
 
 def _attested_deployment_report(

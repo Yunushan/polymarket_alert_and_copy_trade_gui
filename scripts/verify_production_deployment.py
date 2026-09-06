@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.deployment_identity import (
     SHA256_HEX,
+    canonical_https_origin,
     frontend_tree_sha256,
     git_top_level_matches,
     safe_git_command,
@@ -132,16 +133,15 @@ PUBLIC_PROXY_AUTH_PROBES = (
 
 
 def _validated_public_origin(value: str) -> str:
-    parsed = urlparse(value.strip())
-    if parsed.scheme != "https" or not parsed.hostname or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
-        raise ValueError("public URL must be an absolute https origin-only URL")
+    origin = canonical_https_origin(value)
+    parsed = urlparse(origin)
     try:
         address = ipaddress.ip_address(parsed.hostname)
     except ValueError:
         address = None
     if address is not None and (not address.is_global or address.is_loopback or address.is_link_local or address.is_private):
         raise ValueError("public URL must not use a private, loopback, or link-local address")
-    if address is None and not parsed.hostname.endswith(".example.com"):
+    if address is None:
         try:
             resolved = {
                 ipaddress.ip_address(item[4][0])
@@ -151,8 +151,7 @@ def _validated_public_origin(value: str) -> str:
             raise ValueError("public URL hostname could not be resolved safely") from exc
         if not resolved or any(not item.is_global for item in resolved):
             raise ValueError("public URL resolves to a private, loopback, or link-local address")
-    port = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
-    return f"https://{parsed.hostname.lower()}{port}"
+    return origin
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:

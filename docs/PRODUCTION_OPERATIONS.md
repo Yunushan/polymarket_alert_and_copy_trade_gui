@@ -610,6 +610,12 @@ not production-host evidence.
   not a total elapsed-time guarantee; the supplied health and web-startup units
   additionally enforce 30-second and 60-second systemd limits. Use an external
   process deadline when running standalone probes outside those units.
+  Deployment origins share one strict HTTPS parser across collection, evidence
+  generation, review, and scoring. It preserves bracketed IPv6 addresses,
+  canonicalizes DNS names, and rejects userinfo, malformed ports, controls, and
+  non-origin paths or delimiters. All collector hostname lookups must return
+  exclusively public addresses, including fixture-looking names; tests supply
+  their own DNS fixtures rather than bypassing the production validator.
 - Startup readiness: run `market-sentinel doctor --strict` against the service
   configuration and production frontend before each deployment and after each
   restore. It fails on corrupt configuration, unwritable storage, or missing
