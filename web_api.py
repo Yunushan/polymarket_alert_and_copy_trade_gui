@@ -8,6 +8,7 @@ import io
 import importlib.metadata as importlib_metadata
 import ipaddress
 import json
+import math
 import mimetypes
 import os
 import posixpath
@@ -34,6 +35,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 from core.models import (
     AppConfig,
     CopyTradeSettings,
+    MarketConfig,
     MutationJournalEntry,
     PaperTradeRecord,
     PriceAlert,
@@ -41,9 +43,12 @@ from core.models import (
     WalletWatch,
     bounded_mutation_result,
     MAX_MUTATION_RESULT_BYTES,
+    MARKET_SAFETY_BOOLEAN_FIELDS,
+    MARKET_SAFETY_LIMIT_FIELDS,
 )
 from core.config_security import assert_no_persisted_secrets, is_sensitive_display_key
 from core.deployment_identity import capture_runtime_identity
+from core.json_validation import loads_strict_json
 from core.storage import ConfigConflictError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
@@ -605,7 +610,7 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("JSON request body must be UTF-8.") from exc
-    data = json.loads(text)
+    data = loads_strict_json(text)
     if not isinstance(data, dict):
         raise ValueError("JSON request body must be an object.")
     return data
@@ -1127,11 +1132,13 @@ def optional_positive_float(raw: Any, label: str) -> Optional[float]:
         value = raw.strip()
         if value == "":
             return None
+    if type(value) not in (int, float, str):
+        raise ValueError(f"{label} must be blank or a positive finite number.")
     try:
         number = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{label} must be blank or a positive number.") from exc
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{label} must be blank or a positive number.")
     return float(number)
 
@@ -1909,25 +1916,13 @@ def apply_market_patch(
     if normalized not in cfg.markets:
         raise ValueError(f"Unknown market id: {normalized}")
     market_cfg = cfg.markets[normalized]
-    enabled = bool(payload["enabled"]) if "enabled" in payload else market_cfg.enabled
-    settings = dict(market_cfg.settings)
-    for key in ("live_trading_enabled", "live_trading_confirmed", "live_trading_kill_switch"):
-        if key in payload:
-            settings[key] = bool(payload[key])
-    if "live_trading_max_size" in payload:
-        max_size = optional_positive_float(payload["live_trading_max_size"], "Max order size")
-        if max_size is None:
-            settings.pop("live_trading_max_size", None)
-        else:
-            settings["live_trading_max_size"] = max_size
-    if "live_trading_max_notional" in payload:
-        max_notional = optional_positive_float(payload["live_trading_max_notional"], "Max notional")
-        if max_notional is None:
-            settings.pop("live_trading_max_notional", None)
-        else:
-            settings["live_trading_max_notional"] = max_notional
+    control_fields = (*MARKET_SAFETY_BOOLEAN_FIELDS, *MARKET_SAFETY_LIMIT_FIELDS)
+    top_settings = {key: payload[key] for key in control_fields if key in payload}
+    top = MarketConfig.from_dict(normalized, {
+        "enabled": payload.get("enabled", market_cfg.enabled), "settings": top_settings,
+    })
+    raw_settings = payload.get("settings", {})
     if "settings" in payload:
-        raw_settings = payload["settings"]
         if not isinstance(raw_settings, dict):
             raise ValueError("settings must be an object.")
         assert_no_persisted_secrets(raw_settings)
@@ -1938,9 +1933,19 @@ def apply_market_patch(
                 "edit trusted local configuration and restart: "
                 + ", ".join(blocked_outbound)
             )
-        settings.update(raw_settings)
-    market_cfg.enabled = enabled
-    market_cfg.settings = settings
+    nested = MarketConfig.validated_settings(raw_settings)
+    for key in top_settings.keys() & raw_settings.keys():
+        if top.settings.get(key) != nested.get(key):
+            raise ValueError(f"Top-level and nested market setting '{key}' disagree.")
+    settings = dict(market_cfg.settings)
+    for original, validated in ((top_settings, top.settings), (raw_settings, nested)):
+        settings.update(validated)
+        for key in MARKET_SAFETY_LIMIT_FIELDS:
+            if key in original and key not in validated:
+                settings.pop(key, None)
+    updated = MarketConfig.from_dict(normalized, {"enabled": top.enabled, "settings": settings})
+    market_cfg.enabled = updated.enabled
+    market_cfg.settings = updated.settings
     return cfg
 
 
@@ -3864,7 +3869,7 @@ def _wallets_from_copy_payload(
             raw_values.extend(raw)
         elif isinstance(raw, str):
             raw_values.extend(raw.replace(";", ",").split(","))
-        elif raw not in (None, ""):
+        else:
             raise ValueError("follow_wallets must be a list or comma-separated string.")
     elif "follow_wallet" in payload:
         raw_values.append(payload.get("follow_wallet"))
@@ -3873,7 +3878,9 @@ def _wallets_from_copy_payload(
 
     wallets: List[str] = []
     for raw in raw_values:
-        raw_wallet = str(raw or "").strip()
+        if not isinstance(raw, str):
+            raise ValueError("Copy follow identities must be strings.")
+        raw_wallet = raw.strip()
         if not raw_wallet:
             continue
         normalized = normalize_activity_identity(market_id, raw_wallet)
@@ -3883,6 +3890,10 @@ def _wallets_from_copy_payload(
             raise ValueError("follow_wallets must contain only valid activity identities (0x or Solana wallets).")
         if normalized not in wallets:
             wallets.append(normalized)
+    if "follow_wallets" in payload and "follow_wallet" in payload:
+        single = _wallets_from_copy_payload({"follow_wallet": payload["follow_wallet"]}, existing, market_id=market_id)
+        if single != wallets[:1]:
+            raise ValueError("follow_wallet and follow_wallets disagree.")
     return wallets
 
 
@@ -3893,43 +3904,25 @@ def copy_settings_from_payload(
     market_id: str = "polymarket",
 ) -> CopyTradeSettings:
     follow_wallets = _wallets_from_copy_payload(payload, existing, market_id=market_id)
-    percentage_keys = ("copy_percentage", "scale_percent", "percentage")
-    percentage_value = next((payload[key] for key in percentage_keys if key in payload), None)
-    if percentage_value is not None:
-        copy_percentage = _safe_float(percentage_value, None)
-        if copy_percentage is None or copy_percentage < 0 or copy_percentage > 100:
-            raise ValueError("copy_percentage must be a number between 0 and 100.")
-        scale = float(copy_percentage) / 100.0
-    elif "scale" in payload:
-        scale = _safe_float(payload.get("scale"), None)
-    else:
-        scale = max(0.0, min(float(existing.scale), 1.0))
-    max_usdc = _safe_float(payload.get("max_usdc_per_trade", existing.max_usdc_per_trade), None)
-    slippage = _safe_float(payload.get("slippage", existing.slippage), None)
-    if scale is None or scale < 0 or scale > 1:
-        raise ValueError("scale must be a number between 0 and 1, matching copy_percentage 0..100.")
-    if max_usdc is None or max_usdc <= 0:
-        raise ValueError("max_usdc_per_trade must be a positive number.")
-    if slippage is None or slippage < 0 or slippage > 1:
-        raise ValueError("slippage must be a number between 0 and 1.")
-    try:
-        conflict_window = int(payload.get("conflict_window_seconds", existing.conflict_window_seconds))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("conflict_window_seconds must be an integer.") from exc
-    if conflict_window < 0 or conflict_window > 86400:
-        raise ValueError("conflict_window_seconds must be between 0 and 86400.")
-    return CopyTradeSettings(
-        enabled=bool_from_setting(payload.get("enabled"), existing.enabled),
-        live=bool_from_setting(payload.get("live"), existing.live),
-        follow_wallet=follow_wallets[0] if follow_wallets else "",
-        follow_wallets=follow_wallets,
-        scale=float(scale),
-        max_usdc_per_trade=float(max_usdc),
-        slippage=float(slippage),
-        allow_sells=bool_from_setting(payload.get("allow_sells"), existing.allow_sells),
-        conflict_guard=bool_from_setting(payload.get("conflict_guard"), existing.conflict_guard),
-        conflict_window_seconds=conflict_window,
-    )
+    data = existing.to_dict()
+    data.pop("copy_percentage")
+    for key in (
+        "enabled", "live", "scale", "max_usdc_per_trade", "slippage",
+        "allow_sells", "conflict_guard", "conflict_window_seconds",
+    ):
+        if key in payload:
+            data[key] = payload[key]
+    percentages = [payload[key] for key in ("copy_percentage", "scale_percent", "percentage") if key in payload]
+    if percentages:
+        scales = [CopyTradeSettings.from_dict({"copy_percentage": value}).scale for value in percentages]
+        if any(not math.isclose(scales[0], scale, rel_tol=0, abs_tol=1e-12) for scale in scales[1:]):
+            raise ValueError("Copy percentage aliases disagree.")
+        data["copy_percentage"] = percentages[0]
+        if "scale" not in payload:
+            data.pop("scale")
+    data["follow_wallet"] = follow_wallets[0] if follow_wallets else ""
+    data["follow_wallets"] = follow_wallets
+    return CopyTradeSettings.from_dict(data)
 
 
 def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> CopyTradeSettings:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import tempfile
 import threading
@@ -14,6 +13,7 @@ from typing import Any, Dict, Iterator
 
 from .atomic_files import replace_file
 from .config_security import ConfigSecurityError, assert_no_persisted_secrets
+from .json_validation import loads_strict_json
 from .models import AppConfig
 
 
@@ -45,22 +45,6 @@ def default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = default_config_path()
 
 
-def _config_object(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Configuration contains a duplicate JSON key.")
-        result[key] = value
-    return result
-
-
-def _config_number(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("Configuration contains a non-finite number.")
-    return parsed
-
-
 def _read_config_bytes(path: Path) -> bytes | None:
     # exists() can suppress permission/I/O failures. Only a missing directory
     # entry is an uninitialized store; a failed read must never erase history.
@@ -80,10 +64,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
             cfg = AppConfig()
             setattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
             return cfg
-        data: Dict[str, Any] = json.loads(
-            raw.decode("utf-8"), object_pairs_hook=_config_object,
-            parse_float=_config_number, parse_constant=_config_number,
-        )
+        data: Dict[str, Any] = loads_strict_json(raw.decode("utf-8"))
         assert_no_persisted_secrets(data)
         cfg = AppConfig.from_dict(data)
         setattr(cfg, _STORAGE_REVISION_ATTR, hashlib.sha256(raw).hexdigest())

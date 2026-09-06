@@ -4665,30 +4665,21 @@ class App(tk.Tk):
         follow_wallets = self._copy_follow_wallets_from_text()
         if follow_wallets is None:
             return
-        copy_percentage = safe_float(self.ct_scale_var.get(), None)
-        max_usdc = safe_float(self.ct_max_var.get(), None)
-        slippage = safe_float(self.ct_slip_var.get(), None)
-        if copy_percentage is None or copy_percentage < 0 or copy_percentage > 100:
-            messagebox.showerror("Copy trading settings", "Copy percentage must be a number between 0 and 100.")
+        try:
+            s = CopyTradeSettings.from_dict({
+                "enabled": self.ct_enabled_var.get(),
+                "live": self.ct_live_var.get(),
+                "follow_wallets": follow_wallets,
+                "copy_percentage": self.ct_scale_var.get(),
+                "max_usdc_per_trade": self.ct_max_var.get(),
+                "slippage": self.ct_slip_var.get(),
+                "allow_sells": self.ct_allow_sells_var.get(),
+                "conflict_guard": self.ct_conflict_guard_var.get(),
+                "conflict_window_seconds": self.cfg.copytrading.conflict_window_seconds,
+            })
+        except (ValueError, tk.TclError) as exc:
+            messagebox.showerror("Copy trading settings", str(exc))
             return
-        if max_usdc is None or max_usdc <= 0:
-            messagebox.showerror("Copy trading settings", "Max USDC / trade must be a positive number.")
-            return
-        if slippage is None or slippage < 0 or slippage > 1:
-            messagebox.showerror("Copy trading settings", "Slippage must be a number between 0 and 1.")
-            return
-        s = CopyTradeSettings(
-            enabled=bool(self.ct_enabled_var.get()),
-            live=bool(self.ct_live_var.get()),
-            follow_wallet=follow_wallets[0] if follow_wallets else "",
-            follow_wallets=follow_wallets,
-            scale=float(copy_percentage) / 100.0,
-            max_usdc_per_trade=float(max_usdc),
-            slippage=float(slippage),
-            allow_sells=bool(self.ct_allow_sells_var.get()),
-            conflict_guard=bool(self.ct_conflict_guard_var.get()),
-            conflict_window_seconds=self.cfg.copytrading.conflict_window_seconds,
-        )
         self.ct_follow_var.set(", ".join(s.normalized_follow_wallets()))
         self.cfg.copytrading = s
         save_config(self.cfg)

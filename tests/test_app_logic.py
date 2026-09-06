@@ -12,6 +12,7 @@ import unittest
 from contextlib import redirect_stdout
 from importlib import metadata as importlib_metadata
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import (
@@ -455,6 +456,49 @@ class FakeRegistry:
 
 
 class AppLogicTests(unittest.TestCase):
+    @staticmethod
+    def copy_settings_harness():
+        return SimpleNamespace(
+            cfg=AppConfig(), ui_queue=queue.Queue(),
+            _require_selected_market_capability=lambda *_: True,
+            _copy_follow_wallets_from_text=lambda: [WALLET],
+            ct_enabled_var=FakeVar(True), ct_live_var=FakeVar(False),
+            ct_allow_sells_var=FakeVar(False), ct_conflict_guard_var=FakeVar(True),
+            ct_scale_var=FakeVar("25"), ct_max_var=FakeVar("2.5"),
+            ct_slip_var=FakeVar("0.02"), ct_follow_var=FakeVar(WALLET),
+        )
+
+    def test_desktop_copy_settings_validate_before_installing_or_saving(self) -> None:
+        for variable, values in (
+            ("ct_scale_var", ("NaN", "Infinity", True, "invalid", "101")),
+            ("ct_max_var", ("NaN", "Infinity", True, "0")),
+            ("ct_slip_var", ("NaN", "Infinity", True, "-1")),
+            ("ct_live_var", ("false", 1, None, ["false"])),
+        ):
+            for value in values:
+                with self.subTest(variable=variable, value=value):
+                    harness = self.copy_settings_harness()
+                    getattr(harness, variable).set(value)
+                    before = harness.cfg.copytrading
+                    with patch("app.save_config") as save, patch("app.messagebox.showerror") as error, patch("app.messagebox.showwarning") as warning:
+                        App.save_copy_settings(harness)
+                    save.assert_not_called()
+                    error.assert_called_once()
+                    warning.assert_not_called()
+                    self.assertIs(harness.cfg.copytrading, before)
+                    self.assertTrue(harness.ui_queue.empty())
+
+    def test_desktop_copy_settings_accept_valid_raw_values(self) -> None:
+        harness = self.copy_settings_harness()
+        with patch("app.save_config") as save, patch("app.messagebox.showerror") as error:
+            App.save_copy_settings(harness)
+        save.assert_called_once_with(harness.cfg)
+        error.assert_not_called()
+        self.assertEqual(harness.cfg.copytrading.scale, 0.25)
+        self.assertEqual(harness.cfg.copytrading.max_usdc_per_trade, 2.5)
+        self.assertFalse(harness.cfg.copytrading.live)
+        self.assertEqual(harness.cfg.copytrading.normalized_follow_wallets(), [WALLET])
+
     def test_frozen_smoke_payload_uses_packaged_release_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             package_root = Path(tmp) / "market-sentinel-v1.0.11-win-x64"

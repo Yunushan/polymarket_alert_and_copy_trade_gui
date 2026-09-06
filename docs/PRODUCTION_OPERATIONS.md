@@ -236,6 +236,26 @@ values are not clamped, truncated or replaced with a 100% copy allocation.
 When both percentage and scale are present, they must agree within serialization
 rounding. Existing invalid settings need explicit operator correction.
 
+The HTTP API and CLI validate the original mutation values with the same model
+rules before changing settings. Send actual JSON booleans, not `"true"` or
+`"false"`; ordinary CLI `--enabled`/`--no-live` flags remain supported. Integer
+conflict windows must not contain fractional values. If both percentage and
+scale (or multiple percentage aliases) are supplied, they must agree; likewise
+top-level and nested market safety controls must not contradict each other.
+An empty wallet string or empty wallet list intentionally clears the follows;
+nulls and non-string members are invalid. If both follow aliases are supplied,
+the single identity must match the first normalized list identity.
+
+Shared market safety flags and positive caps are also checked when loading and
+saving configuration. A blank string or null explicitly unsets an optional
+market cap; a supplied nonblank cap must be positive and finite. Numeric
+booleans, NaN and infinity are rejected. Desktop copy settings are validated
+before being installed in memory. HTTP/CLI JSON objects, including `--json
+@file` and structured `--setting` values, reject duplicate keys and non-finite
+JSON numbers rather than silently taking the last value. Invalid settings must
+be corrected explicitly; the application does not rewrite or reset damaged
+configuration to make it load.
+
 Mutation journals require stable record IDs, SHA-256 key/request hashes,
 mutation method/path and an explicit boolean live classification. Copy outboxes
 require stable record, market, watch and activity identities. Duplicate record

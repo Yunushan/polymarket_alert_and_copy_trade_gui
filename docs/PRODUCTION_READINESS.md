@@ -7,16 +7,30 @@ GitHub repository.
 
 ## Current Independent Assessment
 
-The latest independent review scored `b7b9b21` plus the managed-WebSocket
-candidate **75/100 on 2026-09-05**, not approved for unattended funded production.
-That candidate is now committed as `b548461`; its [CI](https://github.com/Yunushan/market-sentinel/actions/runs/33985401422)
-passed 48 jobs with two optional skips, and its
-[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33985401417)
-passed. Those results do not validate subsequent local changes. The candidate
-remains on open PR #79, not protected main or a published release. Earlier
-independent assessments and the 83-point formal local checklist below are
-historical results with different scope, not competing current approvals.
+The latest independent review scored `4f72abf` **73/100 on 2026-09-06**, not
+approved for unattended funded production. Its
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/34018549867) passed
+48 jobs with two optional skips, and its
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/34018549842)
+passed. The review nevertheless reproduced API input conversions that turned
+false-looking market flags into persisted live enablement/confirmation and
+malformed copy values into 100% sizing or a zero-second conflict window. The
+two-point reduction from the preceding independent review reflects these
+safety defects. The candidate remains on open PR #79, not protected main or a
+published release. Earlier assessments and formal local-checklist scores below
+are historical results with different scope, not competing current approvals.
 Missing external acceptance cannot be supplied by a score.
+
+The next mutation-validation candidate checks original HTTP/CLI market and copy
+settings through the shared model rules, rejects contradictory aliases, and
+shares duplicate-key/non-finite JSON rejection with configuration loading.
+Desktop copy settings validate before replacing in-memory state. Valid numeric
+strings, actual booleans, explicit optional-cap clearing and wallet-list clearing
+remain supported; invalid mutations preserve prior stored bytes. This candidate
+requires its own exact-commit verification. Regression repairs do not by
+themselves prove financial-history completeness, release installation, actual
+VPS recovery, or authorized funded-account acceptance and do not automatically
+raise the independent score.
 
 Recovery commit `7761cf6` closes a reproduced false-positive restore check:
 a checksummed backup containing malformed configuration previously passed the

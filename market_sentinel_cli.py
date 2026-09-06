@@ -20,6 +20,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from core.atomic_files import atomic_text_writer
+from core.json_validation import loads_strict_json
 from core.request_control import RequestCancelled, cancellation_scope, request_scope
 from core.storage import ConfigLoadError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
@@ -182,8 +183,8 @@ def _coerce_value(value: Any) -> Any:
     if not text:
         return ""
     try:
-        return json.loads(text)
-    except Exception:
+        return loads_strict_json(text)
+    except json.JSONDecodeError:
         return text
 
 
@@ -193,7 +194,7 @@ def _json_arg(value: Optional[str]) -> Dict[str, Any]:
     raw = value
     if raw.startswith("@"):
         raw = Path(raw[1:]).expanduser().read_text(encoding="utf-8")
-    data = json.loads(raw)
+    data = loads_strict_json(raw)
     if not isinstance(data, dict):
         raise argparse.ArgumentTypeError("JSON payload must be an object.")
     return data

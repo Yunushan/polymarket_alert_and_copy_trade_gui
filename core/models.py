@@ -21,6 +21,11 @@ DEFAULT_MARKET_ID = "polymarket"
 DEFAULT_UI_DESIGN: UIDesign = "aurora_2026"
 MAX_MUTATION_JOURNAL_ENTRIES = 256
 MAX_MUTATION_RESULT_BYTES = 256 * 1024
+MARKET_SAFETY_BOOLEAN_FIELDS = (
+    "live_trading_enabled", "live_trading_confirmed", "live_trading_acknowledged",
+    "live_trading_kill_switch", "live_trading_paused", "copy_trading_enabled",
+)
+MARKET_SAFETY_LIMIT_FIELDS = ("live_trading_max_size", "live_trading_max_notional")
 
 
 def _uuid() -> str:
@@ -501,19 +506,34 @@ class MarketConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "enabled": self.enabled,
-            "settings": dict(self.settings),
+            "enabled": _config_bool({"enabled": self.enabled}, "enabled", False),
+            "settings": self.validated_settings(self.settings),
         }
 
     @staticmethod
+    def validated_settings(raw: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise ValueError("Market settings must be an object.")
+        settings = dict(raw)
+        for key in MARKET_SAFETY_BOOLEAN_FIELDS:
+            if key in settings:
+                settings[key] = _config_bool(settings, key, False)
+        for key in MARKET_SAFETY_LIMIT_FIELDS:
+            if key not in settings:
+                continue
+            value = settings[key]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                settings.pop(key)
+            else:
+                settings[key] = _config_number(value, key, 0, positive=True)
+        return settings
+
+    @staticmethod
     def from_dict(market_id: str, d: Dict[str, Any]) -> "MarketConfig":
-        settings = d.get("settings", {})
-        if not isinstance(settings, dict):
-            settings = {}
         return MarketConfig(
             market_id=str(d.get("market_id") or market_id),
             enabled=_config_bool(d, "enabled", False),
-            settings=dict(settings),
+            settings=MarketConfig.validated_settings(d.get("settings", {})),
         )
 
 
