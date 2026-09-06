@@ -16,7 +16,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
-from core.request_control import RequestCancelled, RequestDeadlineExceeded, cancellation_scope
+from core.request_control import RequestCancelled, RequestControl, RequestDeadlineExceeded, cancellation_scope
 from scripts import verify_production_deployment as deployment
 from scripts.verify_service_health import open_probe, read_probe_body
 from test_polymarket_http_transport import local_tls_server, resolver_for
@@ -103,28 +103,75 @@ class ProbeDeadlineTests(unittest.TestCase):
                 timer.cancel()
                 timer.join(timeout=1)
 
-    def test_stalled_dns_times_out_without_a_late_connection(self):
+    def _assert_timeout_during_dns(self, operation, control_factory):
+        entered = threading.Event()
         release = threading.Event()
         done = threading.Event()
-        with probe_server() as (port, received):
-            def resolve(*_args, **_kwargs):
-                try:
-                    release.wait(2)
-                    return resolver_for("127.0.0.1")("probe.example.test", port, type=socket.SOCK_STREAM)
-                finally:
-                    done.set()
+        errors = []
+        control = RequestControl(30)
 
+        def resolve(*args, **kwargs):
+            entered.set()
             try:
-                before = time.monotonic()
-                with patch("socket.getaddrinfo", side_effect=resolve):
-                    with self.assertRaises(RequestDeadlineExceeded):
-                        with open_probe(Request(f"http://probe.example.test:{port}"), 0.15) as response:
-                            read_probe_body(response)
-                self.assertLess(time.monotonic() - before, 1.5)
+                release.wait(10)
+                return resolver_for("127.0.0.1")(*args, **kwargs)
+            finally:
+                done.set()
+
+        def request():
+            try:
+                operation()
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=request)
+        with patch("socket.getaddrinfo", side_effect=resolve), patch(control_factory, return_value=control):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(5), "request must reach the stalled resolver")
+                # Isolate DNS expiry from platform-dependent TLS context setup.
+                with control._lock:
+                    control.deadline = time.monotonic() - 1
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive(), "request must time out before DNS is released")
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], RequestDeadlineExceeded)
             finally:
                 release.set()
-                self.assertTrue(done.wait(1))
+                worker.join(timeout=5)
+                if entered.is_set():
+                    self.assertTrue(done.wait(5))
+                control.close()
+            self.assertFalse(worker.is_alive())
+
+    def test_stalled_dns_times_out_without_a_late_connection(self):
+        with probe_server() as (port, received):
+            def request():
+                with open_probe(Request(f"http://probe.example.test:{port}"), 30) as response:
+                    read_probe_body(response)
+
+            self._assert_timeout_during_dns(request, "core.probe_transport.RequestControl")
             self.assertEqual(received, [])
+
+    def test_expiry_during_setup_does_not_require_a_dns_worker(self):
+        context = ssl.create_default_context()
+        control = RequestControl(30)
+
+        def expire_during_setup():
+            control.deadline = time.monotonic() - 1
+            return context
+
+        with (
+            patch("core.probe_transport.RequestControl", return_value=control),
+            patch("core.probe_transport.ssl.create_default_context", side_effect=expire_during_setup),
+            patch("socket.getaddrinfo") as resolver,
+            patch("socket.socket.connect") as connect,
+        ):
+            with self.assertRaises(RequestDeadlineExceeded):
+                open_probe(Request("http://probe.example.test"), 30)
+        resolver.assert_not_called()
+        connect.assert_not_called()
+        self.assertTrue(control._closed)
 
     def test_stalled_tls_handshake_obeys_the_same_budget(self):
         with probe_server("tls") as (port, _):
@@ -182,30 +229,13 @@ class ProbeDeadlineTests(unittest.TestCase):
                     deployment._validated_public_origin("https://venue.example.test")
 
     def test_public_preflight_dns_uses_the_callers_deadline(self):
-        release = threading.Event()
-        done = threading.Event()
-
-        def resolve(*_args, **_kwargs):
-            try:
-                release.wait(2)
-                return resolver_for("1.1.1.1")("venue.example.test", 443, type=socket.SOCK_STREAM)
-            finally:
-                done.set()
-
-        try:
-            before = time.monotonic()
-            with (
-                patch("socket.getaddrinfo", side_effect=resolve),
-                patch("scripts.verify_production_deployment.urlopen") as opener,
-            ):
-                with self.assertRaises(RequestDeadlineExceeded):
-                    deployment.check_public_proxy("https://venue.example.test", "operator", "test-only", 0.15,
-                                                  upstream_token="test-only-api-token")
-                opener.assert_not_called()
-            self.assertLess(time.monotonic() - before, 1.5)
-        finally:
-            release.set()
-            self.assertTrue(done.wait(1))
+        with patch("scripts.verify_production_deployment.urlopen") as opener:
+            self._assert_timeout_during_dns(
+                lambda: deployment.check_public_proxy("https://venue.example.test", "operator", "test-only", 30,
+                                                       upstream_token="test-only-api-token"),
+                "core.request_control.RequestControl",
+            )
+            opener.assert_not_called()
 
     def test_probe_ignores_inherited_proxies_and_uses_one_dns_answer(self):
         with probe_server() as (port, received):
