@@ -4,27 +4,20 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
+from pathlib import Path
 from urllib.error import URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.probe_transport import _RejectRedirects, open_probe  # noqa: F401 - compatibility exports for probe callers
 
 
 MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
-
-
-class _RejectRedirects(HTTPRedirectHandler):
-    # Python 3.10 lacks the stdlib 308 dispatch alias.
-    http_error_308 = HTTPRedirectHandler.http_error_302
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        fp.close()
-        raise RuntimeError("health and deployment probe redirects are forbidden")
-
-
-def open_probe(request: Request, timeout: float):
-    if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("probe socket timeout must be finite and greater than zero")
-    return build_opener(_RejectRedirects()).open(request, timeout=timeout)
 
 
 def read_probe_body(response) -> bytes:
@@ -80,10 +73,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check the local MarketSentinel web API health endpoint.")
     parser.add_argument("--url", default="http://127.0.0.1:8765/api/health")
     parser.add_argument("--token", default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""))
-    parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--timeout", type=float, default=5.0,
+                        help="Overall network deadline in seconds for each health request.")
     parser.add_argument("--retries", type=int, default=12)
     parser.add_argument("--retry-delay", type=float, default=1.0)
     args = parser.parse_args()
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("--timeout must be finite and greater than zero")
 
     last_error: Exception | None = None
     for attempt in range(1, max(1, args.retries) + 1):

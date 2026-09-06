@@ -15,6 +15,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from stat import S_IFDIR, S_IFREG, S_IMODE, S_ISDIR, S_ISREG
 from typing import Any, Callable
@@ -34,6 +35,8 @@ from core.deployment_identity import (
     safe_git_command,
     safe_git_environment,
 )
+from core.probe_transport import is_public_probe_address
+from core.request_control import request_scope, resolve_with_deadline
 
 if __package__:
     from scripts.restore_state_backup import (
@@ -132,25 +135,28 @@ PUBLIC_PROXY_AUTH_PROBES = (
 )
 
 
-def _validated_public_origin(value: str) -> str:
-    origin = canonical_https_origin(value)
-    parsed = urlparse(origin)
-    try:
-        address = ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        address = None
-    if address is not None and (not address.is_global or address.is_loopback or address.is_link_local or address.is_private):
-        raise ValueError("public URL must not use a private, loopback, or link-local address")
-    if address is None:
+def _validated_public_origin(value: str, timeout: float = 10.0) -> str:
+    with request_scope(timeout):
+        origin = canonical_https_origin(value)
+        parsed = urlparse(origin)
         try:
-            resolved = {
-                ipaddress.ip_address(item[4][0])
-                for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
-            }
-        except OSError as exc:
-            raise ValueError("public URL hostname could not be resolved safely") from exc
-        if not resolved or any(not item.is_global for item in resolved):
-            raise ValueError("public URL resolves to a private, loopback, or link-local address")
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            address = None
+        if address is not None and not is_public_probe_address(str(address)):
+            raise ValueError("public URL must use a public unicast address")
+        if address is None:
+            try:
+                resolved = {
+                    item[4][0]
+                    for item in resolve_with_deadline(
+                        socket.getaddrinfo, parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
+                    )
+                }
+            except OSError as exc:
+                raise ValueError("public URL hostname could not be resolved safely") from exc
+            if not resolved or any(not is_public_probe_address(item) for item in resolved):
+                raise ValueError("public URL must resolve exclusively to public unicast addresses")
     return origin
 
 
@@ -1034,7 +1040,7 @@ def check_public_proxy(
     *,
     require_upstream_token: bool = True,
 ) -> dict[str, Any]:
-    origin = _validated_public_origin(url)
+    origin = _validated_public_origin(url, timeout)
     if not username or not password:
         raise ValueError("public proxy verification requires non-empty Basic Auth credentials")
     if require_upstream_token and not upstream_token.strip():
@@ -1052,7 +1058,7 @@ def check_public_proxy(
             Request(probe_url, data=body, headers=headers, method=method),
             timeout,
             f"public proxy {method} {urlparse(probe_url).path or '/'}",
-            opener=urlopen,
+            opener=partial(urlopen, public_only=True),
         )
 
     health_url = urljoin(base_url, "api/health")
@@ -1060,7 +1066,7 @@ def check_public_proxy(
     headers = {"Accept": "application/json"}
     encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     headers["Authorization"] = f"Basic {encoded}"
-    with urlopen(Request(health_url, headers=headers, method="GET"), timeout=timeout) as response:
+    with urlopen(Request(health_url, headers=headers, method="GET"), timeout=timeout, public_only=True) as response:
         payload = read_health_payload(response)
         response_headers = {str(name).lower(): str(value) for name, value in response.headers.items()}
         missing = [name for name in REQUIRED_PROXY_HEADER_VALUES if name not in response_headers]
@@ -1166,7 +1172,7 @@ def build_external_public_probe_evidence(
 ) -> dict[str, Any]:
     """Probe the public deployment from a separately attested GitHub-hosted job."""
 
-    origin = _validated_public_origin(public_origin)
+    origin = _validated_public_origin(public_origin, timeout)
     revision = expected_source_revision.strip().lower()
     frontend_sha256 = expected_frontend_sha256.strip().lower()
     if not expected_version.strip() or not COMMIT_SHA.fullmatch(revision):
@@ -1306,8 +1312,8 @@ def main() -> int:
     expected_source_revision = args.expected_source_revision.strip().lower()
     expected_frontend_sha256 = args.expected_frontend_sha256.strip().lower()
     try:
-        public_origin = _validated_public_origin(args.public_url) if args.public_url else ""
-    except ValueError:
+        public_origin = _validated_public_origin(args.public_url, args.timeout) if args.public_url else ""
+    except (OSError, ValueError):
         public_origin = ""
     collection = {
         "mode": "production" if not args.skip_systemd and bool(args.public_url) else "local_smoke",

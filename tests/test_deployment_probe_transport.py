@@ -95,7 +95,7 @@ class ProbeTransportTests(unittest.TestCase):
 
     def test_invalid_socket_timeouts_fail_before_opening(self):
         for value in (True, 0, -1, float("nan"), float("inf")):
-            with self.subTest(value=value), patch("scripts.verify_service_health.build_opener") as opener:
+            with self.subTest(value=value), patch("core.probe_transport.build_opener") as opener:
                 with self.assertRaises(ValueError):
                     open_probe(None, value)
                 opener.assert_not_called()

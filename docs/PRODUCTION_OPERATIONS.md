@@ -606,10 +606,24 @@ not production-host evidence.
   another endpoint cannot prove the requested endpoint is healthy or protected.
   Health and metrics bodies are capped at 1 MiB, including bodies without a
   Content-Length. Public HTTPS health evidence uses the same version and explicit
-  readiness checks as loopback health. `--timeout` is a socket-operation timeout,
-  not a total elapsed-time guarantee; the supplied health and web-startup units
-  additionally enforce 30-second and 60-second systemd limits. Use an external
-  process deadline when running standalone probes outside those units.
+  readiness checks as loopback health. Each probe request owns one monotonic
+  network deadline through DNS, TCP, TLS, response headers and body consumption;
+  a slow peer cannot restart the budget by sending occasional bytes. The public
+  origin's preliminary DNS check is bounded separately by the same `--timeout`.
+  Multiple public probes and health retries have separate budgets, so this is
+  not a deadline for the entire collection or retry loop. The supplied health
+  and web-startup units additionally enforce 30-second and 60-second systemd
+  limits. Use an external process deadline for standalone multi-probe runs.
+  Probe DNS uses the bounded helper pool described above; expired lookups cannot
+  initiate a later connection. Probe responses must be closed after consumption
+  so their socket guards and deadline controller can be released.
+  Operational probes are direct connections and ignore inherited HTTP/SOCKS
+  proxy variables. Public probes require HTTPS and validate every DNS answer
+  immediately before connecting to an approved numeric address, retaining the
+  original hostname for TLS certificate verification, SNI and HTTP Host. Literal
+  origins use the same public-unicast policy; multicast and reserved addresses
+  are rejected. Loopback health/metrics probes intentionally permit local targets.
+  These probe guarantees do not extend to separately injected venue SDKs/proxies.
   Deployment origins share one strict HTTPS parser across collection, evidence
   generation, review, and scoring. It preserves bracketed IPv6 addresses,
   canonicalizes DNS names, and rejects userinfo, malformed ports, controls, and

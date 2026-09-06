@@ -1189,7 +1189,8 @@ class ProductionDeploymentTests(unittest.TestCase):
         calls: list[tuple[str, str, bytes | None]] = []
         errors = _unauthorized_errors()
 
-        def urlopen(request, timeout):
+        def urlopen(request, timeout, *, public_only):
+            self.assertTrue(public_only)
             calls.append((request.get_method(), request.full_url, request.data))
             if errors:
                 raise errors.pop(0)

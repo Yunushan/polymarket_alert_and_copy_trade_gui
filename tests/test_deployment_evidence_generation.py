@@ -89,6 +89,18 @@ class DeploymentEvidenceGenerationTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", workflow)
         self.assertNotIn("/opt/market-sentinel/scripts/verify_production_deployment.py", workflow)
 
+    def test_workflow_reuses_bounded_public_origin_validation_before_collection(self) -> None:
+        workflow = Path(".github/workflows/deployment-evidence.yml").read_text(encoding="utf-8")
+        prepare = workflow.split("  prepare:\n", 1)[1].split("  collect:\n", 1)[0]
+        self.assertIn("from scripts.verify_production_deployment import _validated_public_origin", prepare)
+        self.assertIn("_validated_public_origin(sys.argv[1], timeout=10)", prepare)
+        self.assertIn("origin == sys.argv[1]", prepare)
+        self.assertIn('test "${REQUESTED_ORIGIN}" = "${APPROVED_ORIGIN}"', prepare)
+        self.assertLess(prepare.index("Checkout protected main"), prepare.index("Require exact protected production origin"))
+        self.assertNotIn("getaddrinfo", prepare)
+        self.assertNotIn("secrets.", prepare)
+        self.assertIn("needs: prepare", workflow.split("  collect:\n", 1)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

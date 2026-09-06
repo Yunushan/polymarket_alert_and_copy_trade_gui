@@ -9,7 +9,13 @@ import threading
 import time
 from typing import Any, Callable, Iterator, Optional
 
-import requests
+try:
+    from requests.exceptions import Timeout as _Timeout
+except ModuleNotFoundError as exc:
+    if exc.name != "requests":
+        raise
+    # Operational probes also run under system Python without site-packages.
+    _Timeout = TimeoutError
 
 
 POLL_SECONDS = 0.05
@@ -23,7 +29,7 @@ class RequestCancelled(Exception):
     """A read operation was cancelled; it must not be retried or cached as data."""
 
 
-class RequestDeadlineExceeded(requests.Timeout):
+class RequestDeadlineExceeded(_Timeout):
     """The overall request deadline expired, independently of socket progress."""
 
 
