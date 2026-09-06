@@ -602,6 +602,14 @@ not production-host evidence.
   loopback every minute using `scripts/verify_service_health.py`. Ship failures
   of `market-sentinel-health.service` from journald to the selected monitoring
   system and alert after two consecutive failed executions.
+  Health, metrics, and authentication probes reject redirects; a response from
+  another endpoint cannot prove the requested endpoint is healthy or protected.
+  Health and metrics bodies are capped at 1 MiB, including bodies without a
+  Content-Length. Public HTTPS health evidence uses the same version and explicit
+  readiness checks as loopback health. `--timeout` is a socket-operation timeout,
+  not a total elapsed-time guarantee; the supplied health and web-startup units
+  additionally enforce 30-second and 60-second systemd limits. Use an external
+  process deadline when running standalone probes outside those units.
 - Startup readiness: run `market-sentinel doctor --strict` against the service
   configuration and production frontend before each deployment and after each
   restore. It fails on corrupt configuration, unwritable storage, or missing

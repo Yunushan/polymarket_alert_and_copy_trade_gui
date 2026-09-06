@@ -20,7 +20,7 @@ from stat import S_IFDIR, S_IFREG, S_IMODE, S_ISDIR, S_ISREG
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import Request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -42,7 +42,7 @@ if __package__:
         catalog_verified_backups,
         restore_backup,
     )
-    from scripts.verify_service_health import check_health
+    from scripts.verify_service_health import check_health, open_probe as urlopen, read_health_payload, read_probe_body
     from scripts.verify_restored_state import application_check_valid, isolated_environment
 else:  # Supports the documented `python /path/to/scripts/verify_production_deployment.py` invocation.
     from restore_state_backup import (
@@ -52,7 +52,7 @@ else:  # Supports the documented `python /path/to/scripts/verify_production_depl
         catalog_verified_backups,
         restore_backup,
     )
-    from verify_service_health import check_health
+    from verify_service_health import check_health, open_probe as urlopen, read_health_payload, read_probe_body
     from verify_restored_state import application_check_valid, isolated_environment
 
 try:
@@ -129,17 +129,6 @@ PUBLIC_PROXY_AUTH_PROBES = (
     ("GET", "metrics"),
     ("PATCH", "api/config"),
 )
-
-
-class _RejectRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        raise RuntimeError("public proxy redirects are forbidden")
-
-
-def _public_open(request: Request, timeout: float):
-    if urlopen.__class__.__module__ == "unittest.mock":
-        return urlopen(request, timeout=timeout)
-    return build_opener(_RejectRedirects()).open(request, timeout=timeout)
 
 
 def _validated_public_origin(value: str) -> str:
@@ -993,7 +982,7 @@ def check_loopback_metrics(url: str, token: str, timeout: float) -> dict[str, An
         headers["Authorization"] = f"Bearer {token}"
     with urlopen(Request(url, headers=headers, method="GET"), timeout=timeout) as response:
         content_type = str(response.headers.get("Content-Type") or "").lower()
-        body = response.read().decode("utf-8")
+        body = read_probe_body(response).decode("utf-8")
     if response.status != 200:
         raise RuntimeError(f"loopback metrics endpoint returned HTTP {response.status}")
     if not content_type.startswith("text/plain; version=0.0.4"):
@@ -1064,7 +1053,7 @@ def check_public_proxy(
             Request(probe_url, data=body, headers=headers, method=method),
             timeout,
             f"public proxy {method} {urlparse(probe_url).path or '/'}",
-            opener=_public_open,
+            opener=urlopen,
         )
 
     health_url = urljoin(base_url, "api/health")
@@ -1072,12 +1061,10 @@ def check_public_proxy(
     headers = {"Accept": "application/json"}
     encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     headers["Authorization"] = f"Basic {encoded}"
-    with _public_open(Request(health_url, headers=headers, method="GET"), timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    with urlopen(Request(health_url, headers=headers, method="GET"), timeout=timeout) as response:
+        payload = read_health_payload(response)
         response_headers = {str(name).lower(): str(value) for name, value in response.headers.items()}
         missing = [name for name in REQUIRED_PROXY_HEADER_VALUES if name not in response_headers]
-        if response.status != 200 or payload.get("status") != "ok":
-            raise RuntimeError("public proxy health endpoint did not report status=ok")
         if expected_version and str(payload.get("api_version", "")) != expected_version:
             raise RuntimeError(
                 f"public proxy reported version {payload.get('api_version')}, expected {expected_version}"

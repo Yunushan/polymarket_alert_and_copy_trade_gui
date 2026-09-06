@@ -33,13 +33,13 @@ from scripts.verify_production_deployment import (
     check_source_revision,
     check_systemd,
     _fsync_parent_directory,
-    _RejectRedirects,
     _validated_public_origin,
     build_evidence,
     source_identity,
     main,
     write_evidence,
 )
+from scripts.verify_service_health import _RejectRedirects
 
 TEST_SOURCE_REVISION = "a" * 40
 TEST_FRONTEND_SHA256 = "b" * 64
@@ -58,8 +58,8 @@ class _Response:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: int = -1) -> bytes:
+        return self._body if size < 0 else self._body[:size]
 
 
 def _unauthorized_errors(*, bodies: list[io.BytesIO] | None = None) -> list[HTTPError]:
@@ -579,16 +579,18 @@ class ProductionDeploymentTests(unittest.TestCase):
             def __exit__(self, *args):
                 return None
 
-            def read(self):
-                return good_metrics.encode("utf-8")
+            def read(self, size=-1):
+                body = good_metrics.encode("utf-8")
+                return body if size < 0 else body[:size]
 
         with patch("scripts.verify_production_deployment.urlopen", return_value=MetricsResponse()):
             self.assertEqual(check_loopback_metrics("http://127.0.0.1:8765/metrics", "token", 1.0)["status"], "pass")
 
         missing_metric = good_metrics.replace("market_sentinel_http_requests_completed_total 1", "")
         class MissingMetricResponse(MetricsResponse):
-            def read(self):
-                return missing_metric.encode("utf-8")
+            def read(self, size=-1):
+                body = missing_metric.encode("utf-8")
+                return body if size < 0 else body[:size]
 
         with patch("scripts.verify_production_deployment.urlopen", return_value=MissingMetricResponse()):
             with self.assertRaisesRegex(RuntimeError, "missing required metrics"):
@@ -1260,15 +1262,17 @@ class ProductionDeploymentTests(unittest.TestCase):
             "https://markets.example.net/api/health",
             headers={"Authorization": "Basic secret"},
         )
+        response = io.BytesIO()
         with self.assertRaisesRegex(RuntimeError, "redirects are forbidden"):
             _RejectRedirects().redirect_request(
                 request,
-                None,
+                response,
                 302,
                 "Found",
                 {},
                 "https://attacker.example/api/health",
             )
+        self.assertTrue(response.closed)
 
     def test_private_loopback_and_link_local_public_origins_are_rejected(self) -> None:
         for origin in ("https://127.0.0.1", "https://10.0.0.4", "https://169.254.1.2", "https://[::1]"):
