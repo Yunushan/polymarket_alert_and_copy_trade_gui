@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from tkinter import TclError
@@ -19,12 +20,14 @@ class DesktopConfigPersistenceTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "config.json"
-        self.error = self.enterContext(patch("app.messagebox.showerror"))
-        self.warning = self.enterContext(patch("app.messagebox.showwarning"))
+        self.contexts = ExitStack()
+        self.addCleanup(self.contexts.close)
+        self.error = self.contexts.enter_context(patch("app.messagebox.showerror"))
+        self.warning = self.contexts.enter_context(patch("app.messagebox.showwarning"))
 
     def bind_store(self, harness) -> None:
         save_config(harness.cfg, self.path)
-        self.writer = self.enterContext(patch("app.save_config", side_effect=lambda cfg: save_config(cfg, self.path)))
+        self.writer = self.contexts.enter_context(patch("app.save_config", side_effect=lambda cfg: save_config(cfg, self.path)))
 
     @staticmethod
     def armed_copy_harness():
