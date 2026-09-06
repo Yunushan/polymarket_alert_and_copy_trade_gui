@@ -2240,6 +2240,7 @@ class MarketSentinelCliTests(unittest.TestCase):
             store = LeaderboardStateStore(state_path)
             try:
                 store.prepare({"remote_sort": "PNL", "direction": "DESC", "period": "all", "category": "OVERALL"}, resume=False)
+                store.prepare_mdd({"calculation_version": market_sentinel_cli.MDD_CALCULATION_VERSION})
                 store.record_page(
                     0,
                     2,
@@ -2310,6 +2311,7 @@ class MarketSentinelCliTests(unittest.TestCase):
                 store = LeaderboardStateStore(state_path)
                 try:
                     store.prepare({}, resume=False)
+                    store.prepare_mdd({"calculation_version": market_sentinel_cli.MDD_CALCULATION_VERSION})
                     page = [{"wallet": "0xaaa"}]
                     store.record_page(0, 50 if reason == "mdd_error" else 1, page)
                     row = next(store.iter_mdd_candidates({}, sort="roi_pct", direction="DESC", limit=None))

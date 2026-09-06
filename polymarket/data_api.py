@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .endpoints import DATA_ENDPOINTS
 from .http_client import PolymarketResponseError, comma_join, request_bytes, request_json
-from .leaderboard import LEADERBOARD_MAX_OFFSET
+from .leaderboard import LEADERBOARD_MAX_OFFSET, normalize_leaderboard_category
 
 
 def _get_json(endpoint_name: str, *, params: Optional[Mapping[str, Any]] = None, timeout: float = 15.0) -> Any:
@@ -159,9 +159,7 @@ def get_leaderboard(
     clean_period = str(period or "ALL").strip().upper()
     if clean_period not in {"DAY", "WEEK", "MONTH", "ALL"}:
         clean_period = "ALL"
-    clean_category = str(category or "OVERALL").strip().upper()
-    if clean_category not in {"OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE", "MENTIONS", "WEATHER", "ECONOMICS", "TECH", "FINANCE"}:
-        clean_category = "OVERALL"
+    clean_category = normalize_leaderboard_category(category)
     params = {
         "limit": max(1, min(int(limit), 50)),
         "offset": clean_offset,

@@ -100,6 +100,7 @@ import type { MarketPatch } from "./api";
 import { formatAuditValue, formatNumber } from "./formatting";
 import { LivePreflightAudit } from "./live-preflight-audit";
 import { MddHistoryCoverage } from "./mdd-history-coverage";
+import { POLYMARKET_LEADERBOARD_CATEGORIES } from "./types";
 import type {
   AlertForm,
   AlertsPayload,
@@ -683,6 +684,7 @@ function defaultLeaderboardFilters(): PolymarketLeaderboardFilters {
   return {
     sort: "roi_pct",
     direction: "DESC",
+    category: "OVERALL",
     limit: "100",
     scan_limit: "500",
     compute_mdd: false,
@@ -5204,7 +5206,7 @@ function PolymarketAnalyticsView({
               checked={mddForm.include_accounting_snapshot}
               onChange={(event) => updateMddForm("include_accounting_snapshot", event.target.checked)}
             />
-            <span>Accounting base</span>
+            <span>Accounting snapshot</span>
           </label>
           <label className="check-row">
             <input type="checkbox" checked={mddForm.persist_cache} onChange={(event) => updateMddForm("persist_cache", event.target.checked)} />
@@ -5392,6 +5394,12 @@ function PolymarketAnalyticsView({
         </div>
         <form className="analytics-form leaderboard-form" onSubmit={onLeaderboardRefresh}>
           <label>
+            <span>Category</span>
+            <select value={filters.category} onChange={(event) => updateFilter("category", event.target.value as PolymarketLeaderboardFilters["category"])}>
+              {POLYMARKET_LEADERBOARD_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+          </label>
+          <label>
             <span>Sort</span>
             <select value={filters.sort} onChange={(event) => updateFilter("sort", event.target.value as PolymarketLeaderboardSort)}>
               <option value="roi_pct">PnL/volume %</option>
@@ -5533,7 +5541,7 @@ function PolymarketAnalyticsView({
               checked={filters.mdd_include_accounting}
               onChange={(event) => updateFilter("mdd_include_accounting", event.target.checked)}
             />
-            <span>Accounting base</span>
+            <span>Accounting snapshot</span>
           </label>
           <label className="check-row">
             <input

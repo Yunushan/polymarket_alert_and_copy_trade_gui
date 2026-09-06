@@ -53,6 +53,7 @@ from market_adapters.types import (
 from polymarket.util import is_wallet_address, normalize_wallet
 from polymarket import data_api
 from polymarket.constants import POLYMARKET_LIVE_MUTATION_BLOCKER
+from polymarket.leaderboard import LEADERBOARD_CATEGORIES
 from polymarket.ws_market import MarketWSClient
 from polymarket.trader import PolymarketTrader, TraderConfig
 
@@ -2471,7 +2472,7 @@ class App(tk.Tk):
             ("Sort", self.lb_sort_var, ["PnL/volume %", "PnL USD", "Volume USD", "Obs. MDD %", "Obs. MDD USD"], 0, 0, 14),
             ("Direction", self.lb_direction_var, ["High to low", "Low to high"], 0, 1, 12),
             ("Period", self.lb_period_var, ["All", "Day", "Week", "Month"], 0, 2, 10),
-            ("Category", self.lb_category_var, ["OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE", "WEATHER", "ECONOMICS", "TECH", "FINANCE"], 0, 3, 14),
+            ("Category", self.lb_category_var, LEADERBOARD_CATEGORIES, 0, 3, 14),
             ("MDD mode", self.lb_mdd_mode_var, ["Fast public curve", "CLOB mark replay"], 1, 3, 16),
         )
         for label, var, values, row, col, width in fields:

@@ -58,7 +58,7 @@ class MarkReplayCorrectnessTests(unittest.TestCase):
         self.assertEqual(result["points"][0]["value"], 0)
         self.assertEqual(result["pct_trough_timestamp"], 2)
         reconciled = reconcile_mdd_payload_with_accounting(result, {"equity": {"base_equity_usd": 200}})
-        self.assertEqual(reconciled["mdd_pct"], 40)
+        self.assertEqual(reconciled["mdd_pct"], 80)
 
     def test_drawdown_accepts_one_pass_and_empty_iterators(self):
         self.assertEqual(max_drawdown(iter([{"value": -20}]), 100)["mdd_pct"], 20)

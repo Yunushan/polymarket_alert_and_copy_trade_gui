@@ -35,6 +35,35 @@ test.afterEach(async ({}, testInfo) => {
   expect(testInfo.blockedRequests).toEqual([]);
 });
 
+test("leaderboard category selection is sent without changing its meaning", async ({ page }, testInfo) => {
+  await navigate(page, "Analytics");
+  const form = page.locator(".leaderboard-form");
+  const category = form.getByRole("combobox", { name: "Category", exact: true });
+  await expect(form.getByRole("checkbox", { name: "Accounting snapshot", exact: true })).toBeVisible();
+  await expect(category).toHaveValue("OVERALL");
+  await expect(category.locator("option")).toHaveCount(11);
+  await category.selectOption("ESPORTS");
+  await page.route("**/api/polymarket/users/leaderboard?*", async (route) => {
+    expect(new URL(route.request().url()).searchParams.get("category")).toBe("ESPORTS");
+    await route.fulfill({ json: {
+      category: "ESPORTS", rows: [], warnings: [],
+      counts: { returned: 0, filtered: 0, scanned: 0, mdd_computed: 0 },
+      mdd_available: false, mdd_note: "No history requested.", rate_limit: { limited: false },
+      completion_reason: "end_of_results", source_enumeration_complete: true,
+      source_scope_note: "Fixture category results."
+    } });
+  });
+  const request = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/polymarket/users/leaderboard");
+  await form.locator('button[type="submit"]').click();
+  expect(new URL((await request).url()).searchParams.get("category")).toBe("ESPORTS");
+  await expect(page.getByText("No leaderboard rows matched the filters.")).toBeVisible();
+  await expect(category).toHaveValue("ESPORTS");
+  await form.screenshot({ path: testInfo.outputPath("leaderboard-category.png") });
+  await navigate(page, "Overview");
+  await navigate(page, "Analytics");
+  await expect(category).toHaveValue("ESPORTS");
+});
+
 test("all views have named controls, current navigation and responsive layout", async ({ page }, testInfo) => {
   for (const name of views) {
     await navigate(page, name);

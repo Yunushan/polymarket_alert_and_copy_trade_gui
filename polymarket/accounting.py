@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from . import data_api
-from .drawdown import max_drawdown, percentage_drawdown
 from .util import normalize_wallet
 
 
@@ -237,8 +236,8 @@ def _summarize_equity(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "last_equity_usd": last,
         "max_equity_usd": max(values) if values else None,
         "min_equity_usd": min(values) if values else None,
-        "base_equity_usd": max(values) if values else None,
-        "base_source": "accounting_snapshot_max_equity" if values else "",
+        "base_equity_usd": None,
+        "base_source": "unavailable_from_point_in_time_snapshot",
         "cash_flows": {
             "deposits_usd": deposits,
             "withdrawals_usd": withdrawals,
@@ -393,23 +392,10 @@ def reconcile_mdd_payload_with_accounting(payload: Mapping[str, Any], snapshot: 
     result = dict(payload)
     equity = snapshot.get("equity") if isinstance(snapshot.get("equity"), Mapping) else {}
     positions = snapshot.get("positions") if isinstance(snapshot.get("positions"), Mapping) else {}
-    base = _safe_float(equity.get("base_equity_usd"), None)
     previous_base = result.get("equity_base_usd")
     previous_pct = result.get("mdd_pct")
-    percentage_recalculated = False
-    if base and base > 0 and snapshot.get("complete", True) and snapshot.get("status", "ok") == "ok":
-        episodes = result.get("drawdown_episodes")
-        points = result.get("points")
-        recalculated = None
-        if isinstance(episodes, list) and result.get("mdd_available"):
-            recalculated = percentage_drawdown(episodes, base)
-        elif result.get("mdd_available") is not False and isinstance(points, list) and points and result.get("points_total") == len(points):
-            recalculated = max_drawdown(points, base)
-        if recalculated is not None:
-            result.update(recalculated)
-            result["equity_base_usd"] = base
-            result["equity_base_source"] = "accounting_snapshot_max_equity"
-            percentage_recalculated = True
+    # A statement balance, including its maximum, does not establish capital
+    # before the observed PnL window. Later funding/profits cannot rebase losses.
     open_current_value = _safe_float(result.get("open_current_value"), None)
     snapshot_current_value = _safe_float(positions.get("current_value_usd"), None)
     current_delta = (
@@ -445,20 +431,18 @@ def reconcile_mdd_payload_with_accounting(payload: Mapping[str, Any], snapshot: 
             "last_equity_usd": equity.get("last_equity_usd"),
             "max_equity_usd": equity.get("max_equity_usd"),
             "min_equity_usd": equity.get("min_equity_usd"),
-            "base_equity_usd": equity.get("base_equity_usd"),
-            "base_source": equity.get("base_source"),
+            "base_equity_usd": None,
+            "base_source": "unavailable_from_point_in_time_snapshot",
             "cash_flows": dict(cash_flows),
         },
         "positions": dict(positions),
         "reconciliation": {
             "status": "reconciled_with_gaps" if material_gaps else "reconciled",
+            "scope": "point_in_time_comparison",
             "previous_equity_base_usd": previous_base,
             "previous_mdd_pct": previous_pct,
-            "mdd_pct_uses_accounting_base": percentage_recalculated,
-            "percentage_recalculation_status": (
-                "recalculated_from_all_observed_drawdown_episodes" if percentage_recalculated
-                else "unavailable_without_complete_snapshot_positive_base_and_complete_curve_summary"
-            ),
+            "mdd_pct_uses_accounting_base": False,
+            "percentage_recalculation_status": "not_recalculated_snapshot_is_not_historical_opening_capital",
             "open_current_value_delta_usd": current_delta,
             "realized_pnl_delta_usd": realized_delta,
             "cash_flow_gap_usd": cash_flows.get("cash_flow_gap_usd"),

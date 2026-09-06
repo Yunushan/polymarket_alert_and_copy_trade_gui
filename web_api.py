@@ -128,7 +128,10 @@ from polymarket.live_reports import (
     store_live_validation_report,
 )
 from polymarket.live_report_schema import LiveValidationReportSchemaError, parse_live_validation_report_json
-from polymarket.leaderboard import LEADERBOARD_MAX_OFFSET, PNL_VOLUME_BASIS, performance_ratio_metadata, wallet_membership_fingerprint
+from polymarket.leaderboard import (
+    LEADERBOARD_MAX_OFFSET, PNL_VOLUME_BASIS, normalize_leaderboard_category,
+    performance_ratio_metadata, wallet_membership_fingerprint,
+)
 from polymarket.mdd import (
     DEFAULT_CACHE_TTL_SECONDS as POLYMARKET_MDD_CACHE_TTL_SECONDS,
     MDD_CALCULATION_VERSION,
@@ -3257,7 +3260,7 @@ def polymarket_leaderboard_payload(
     if direction not in {"ASC", "DESC"}:
         direction = "DESC"
     period = _query_value(query, "period", "all") or "all"
-    category = _query_value(query, "category", "OVERALL") or "OVERALL"
+    category = normalize_leaderboard_category(_query_value(query, "category", "OVERALL"))
     limit = _parse_optional_limit(_query_value(query, "limit", "100"), 100)
     default_scan = 500 if sort == "roi_pct" else max(100, limit or 100)
     scan_limit = _parse_optional_limit(_query_value(query, "scan_limit", str(default_scan)), default_scan)

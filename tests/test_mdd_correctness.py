@@ -128,15 +128,15 @@ class DrawdownCorrectnessTests(unittest.TestCase):
         self.assertEqual(result["mdd_pct"], 25)
         self.assertEqual(len(result["drawdown_episodes"]), 2)
 
-    def test_accounting_rebase_can_change_winning_percentage_episode(self) -> None:
+    def test_accounting_snapshot_cannot_change_winning_percentage_episode(self) -> None:
         result = build_historical_mdd_payload(inputs([100, -50, 850, -100]), equity_base_usd=100, max_points=1)
         self.assertEqual(result["mdd_pct"], 25)
         self.assertEqual(len(result["points"]), 1)
         reconciled = reconcile_mdd_payload_with_accounting(result, {"equity": {"base_equity_usd": 10000}})
-        self.assertAlmostEqual(reconciled["mdd_pct"], 100 / 10900 * 100)
-        self.assertEqual(reconciled["pct_peak_timestamp"], 3)
+        self.assertEqual(reconciled["mdd_pct"], 25)
+        self.assertEqual(reconciled["pct_peak_timestamp"], 1)
         self.assertEqual(reconciled["mdd_usd"], 100)
-        self.assertTrue(reconciled["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
+        self.assertFalse(reconciled["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
 
     def test_accounting_does_not_rebase_an_incomplete_legacy_summary(self) -> None:
         legacy = {"mdd_usd": 100, "mdd_pct": 25, "peak_value": 900, "equity_base_usd": 100,

@@ -7,7 +7,20 @@ from typing import Any, Mapping, Sequence
 
 # https://docs.polymarket.com/api-reference/core/get-trader-leaderboard-rankings
 LEADERBOARD_MAX_OFFSET = 1000
+LEADERBOARD_CATEGORIES = (
+    "OVERALL", "POLITICS", "SPORTS", "ESPORTS", "CRYPTO", "CULTURE",
+    "MENTIONS", "WEATHER", "ECONOMICS", "TECH", "FINANCE",
+)
 PNL_VOLUME_BASIS = "pnl_usd / volume_usd * 100; not return on invested capital"
+
+
+def normalize_leaderboard_category(value: str | None) -> str:
+    if value is not None and not isinstance(value, str):
+        raise ValueError("Leaderboard category must be a string.")
+    category = (value or "OVERALL").strip().upper() or "OVERALL"
+    if category not in LEADERBOARD_CATEGORIES:
+        raise ValueError("Unsupported leaderboard category. Choose one of: " + ", ".join(LEADERBOARD_CATEGORIES))
+    return category
 
 
 def performance_ratio_metadata(value: Any) -> dict[str, Any]:

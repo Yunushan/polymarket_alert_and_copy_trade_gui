@@ -1071,13 +1071,14 @@ store_live_validation_report(
         snapshot = parse_accounting_snapshot_zip(raw)
 
         self.assertEqual(snapshot["status"], "ok")
-        self.assertEqual(snapshot["equity"]["base_equity_usd"], 1200.0)
+        self.assertEqual(snapshot["equity"]["max_equity_usd"], 1200.0)
+        self.assertIsNone(snapshot["equity"]["base_equity_usd"])
         self.assertEqual(snapshot["equity"]["cash_flows"]["net_cash_flow_usd"], 900.0)
         self.assertEqual(snapshot["equity"]["cash_flows"]["cash_flow_gap_usd"], -1000.0)
         self.assertAlmostEqual(snapshot["positions"]["current_value_usd"], 350.0)
         self.assertAlmostEqual(snapshot["positions"]["realized_pnl_usd"], 7.0)
 
-    def test_accounting_snapshot_reconciliation_overrides_mdd_percentage_base(self) -> None:
+    def test_accounting_snapshot_reconciliation_preserves_mdd_percentage_base(self) -> None:
         snapshot = parse_accounting_snapshot_zip(
             self._accounting_zip(
                 "timestamp,equity\n10,1000\n20,1200\n",
@@ -1091,17 +1092,19 @@ store_live_validation_report(
             "points": [{"value": 100.0}, {"value": 50.0}],
             "points_total": 2,
             "equity_base_usd": 100.0,
+            "equity_base_source": "user_supplied",
             "open_current_value": 40.0,
             "cumulative_realized_pnl": 50.0,
         }
 
         reconciled = reconcile_mdd_payload_with_accounting(payload, snapshot)
 
-        self.assertEqual(reconciled["equity_base_source"], "accounting_snapshot_max_equity")
-        self.assertEqual(reconciled["equity_base_usd"], 1200.0)
-        self.assertAlmostEqual(reconciled["mdd_pct"], 50.0 / 1300.0 * 100.0)
+        self.assertEqual(reconciled["equity_base_source"], "user_supplied")
+        self.assertEqual(reconciled["equity_base_usd"], 100.0)
+        self.assertEqual(reconciled["mdd_pct"], 25.0)
+        self.assertEqual(reconciled["accounting_snapshot"]["equity"]["max_equity_usd"], 1200.0)
         self.assertEqual(reconciled["accounting_snapshot"]["reconciliation"]["status"], "reconciled")
-        self.assertTrue(reconciled["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
+        self.assertFalse(reconciled["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
 
     def test_clob_public_wrappers_cover_batch_and_history_endpoints(self) -> None:
         with patch(HTTP_REQUEST, return_value=FakeResponse([{"asset_id": "token-1"}])) as mock_post:

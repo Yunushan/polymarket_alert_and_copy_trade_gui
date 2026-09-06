@@ -27,13 +27,13 @@ class AccountingSnapshotLimitTests(unittest.TestCase):
     def test_utf8_bom_crlf_and_quoted_newlines_are_supported(self):
         result = parse_accounting_snapshot_zip(one_csv(b'\xef\xbb\xbftimestamp,equity,note\r\n1,100,"first\r\nsecond"\r\n'))
         self.assertTrue(result["complete"])
-        self.assertEqual(result["equity"]["base_equity_usd"], 100)
+        self.assertEqual(result["equity"]["max_equity_usd"], 100)
         self.assertEqual(result["files"][0]["rows"], 1)
 
     def test_latin1_fallback_preserves_numeric_values(self):
         result = parse_accounting_snapshot_zip(one_csv(b'equity,note\n123,caf\xe9\n'))
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["equity"]["base_equity_usd"], 123)
+        self.assertEqual(result["equity"]["max_equity_usd"], 123)
 
     def test_small_row_limit_does_not_decompress_the_whole_member(self):
         raw = one_csv(b'equity\n' + b'1\n' * 1000000)
@@ -111,7 +111,7 @@ class AccountingSnapshotLimitTests(unittest.TestCase):
         raw = archive_bytes([("ignored.txt", "x" * 10000), ("equity.csv", "equity\n1\n")])
         with patch.object(accounting, "MAX_ACCOUNTING_MEMBER_BYTES", 32):
             result = parse_accounting_snapshot_zip(raw)
-        self.assertEqual(result["equity"]["base_equity_usd"], 1)
+        self.assertEqual(result["equity"]["max_equity_usd"], 1)
 
     def test_logical_record_limit_includes_quoted_newlines(self):
         for record in ('"' + "x" * 200 + '"', '"' + "x\n" * 100 + '"'):
@@ -172,13 +172,14 @@ class AccountingSnapshotLimitTests(unittest.TestCase):
             with self.subTest(value=value):
                 result = parse_accounting_snapshot_zip(one_csv(f"equity\n{value}\n"))
                 self.assertIsNone(result["equity"]["base_equity_usd"])
+                self.assertIsNone(result["equity"]["max_equity_usd"])
 
     def test_parallel_parsers_do_not_change_global_csv_limits(self):
         field_limit = csv.field_size_limit()
         raw = one_csv("equity\n123\n")
         with ThreadPoolExecutor(max_workers=4) as executor:
             results = list(executor.map(parse_accounting_snapshot_zip, [raw] * 20))
-        self.assertTrue(all(result["equity"]["base_equity_usd"] == 123 for result in results))
+        self.assertTrue(all(result["equity"]["max_equity_usd"] == 123 for result in results))
         self.assertEqual(csv.field_size_limit(), field_limit)
 
 

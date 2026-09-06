@@ -494,9 +494,15 @@ export interface PolymarketUserSearchPayload {
 export type PolymarketLeaderboardSort = "roi_pct" | "pnl_usd" | "volume_usd" | "mdd_usd" | "mdd_pct";
 export type PolymarketMddMode = "fast" | "mark_replay";
 
+export const POLYMARKET_LEADERBOARD_CATEGORIES = [
+  "OVERALL", "POLITICS", "SPORTS", "ESPORTS", "CRYPTO", "CULTURE",
+  "MENTIONS", "WEATHER", "ECONOMICS", "TECH", "FINANCE"
+] as const;
+
 export interface PolymarketLeaderboardFilters {
   sort: PolymarketLeaderboardSort;
   direction: "ASC" | "DESC";
+  category: typeof POLYMARKET_LEADERBOARD_CATEGORIES[number];
   limit: string;
   scan_limit: string;
   compute_mdd: boolean;

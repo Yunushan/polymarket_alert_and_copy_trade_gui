@@ -17,7 +17,7 @@ from .util import normalize_wallet
 MDD_METHOD_V2 = "public_data_historical_equity_curve_v2"
 MDD_METHOD_MARK_REPLAY = "clob_price_history_inventory_mark_replay_v1"
 # Increment when changing calculations to invalidate durable scan enrichment.
-MDD_CALCULATION_VERSION = 5
+MDD_CALCULATION_VERSION = 6
 MDD_PCT_BASIS_V2 = "max_t(drawdown_usd[t] / (equity_base_usd + running_peak_pnl_usd[t])) * 100"
 MAX_CLOSED_POSITIONS = 1000
 MAX_OPEN_POSITIONS = 1000
@@ -56,13 +56,14 @@ MDD_MARK_REPLAY_LIMITATIONS = [
 ]
 MDD_ACCOUNTING_ASSUMPTIONS = [
     "When requested, the public accounting snapshot ZIP is parsed for equity and position CSV rows.",
-    "The strongest available MDD percentage base prefers the maximum equity value from equity.csv over public trade notional.",
+    "Accounting balances are point-in-time diagnostics and never replace the historical MDD capital base, including an explicit equity_base_usd.",
     "Accounting snapshot reconciliation is additive and does not place orders or require credentials.",
 ]
 MDD_ACCOUNTING_LIMITATIONS = [
     "Snapshot CSV schemas may change; unknown columns are ignored and reported through parser warnings where possible.",
     "Cash-flow gaps are reported when explicit deposit/withdrawal fields are unavailable or do not explain equity changes.",
     "Snapshot reconciliation is a point-in-time statement check, not proof that every historical intra-sample equity valley was captured.",
+    "A snapshot maximum can include later deposits or profits; it does not establish opening capital or a time-aligned historical cash-flow ledger.",
 ]
 
 

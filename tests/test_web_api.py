@@ -329,6 +329,26 @@ class FakeBodyHandler:
 
 
 class WebApiTests(unittest.TestCase):
+    def test_leaderboard_http_rejects_invalid_category_before_upstream_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server, thread, base_url = self._serve_api(root / "config.json", root)
+            try:
+                with patch("polymarket.data_api._get_json") as fetch:
+                    status, payload = self._request_json(base_url, "/api/polymarket/users/leaderboard?category=ESPORT")
+                self.assertEqual(status, 400)
+                self.assertIn("Unsupported leaderboard category", payload["error"]["message"])
+                fetch.assert_not_called()
+                with patch("polymarket.data_api._get_json", return_value=[]) as fetch:
+                    status, payload = self._request_json(base_url, "/api/polymarket/users/leaderboard?category=esports")
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["category"], "ESPORTS")
+                self.assertEqual(fetch.call_args.kwargs["params"]["category"], "ESPORTS")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     @staticmethod
     def _accounting_zip(equity_csv: str, positions_csv: str) -> bytes:
         buffer = io.BytesIO()
@@ -4372,7 +4392,7 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("assumptions", payload)
         self.assertEqual(payload["trade_capital"]["events"], 0)
 
-    def test_polymarket_user_mdd_payload_uses_accounting_snapshot_equity_base_when_requested(self) -> None:
+    def test_polymarket_user_mdd_payload_keeps_accounting_snapshot_as_diagnostics(self) -> None:
         snapshot = self._accounting_zip(
             "timestamp,equity,deposits,withdrawals\n10,1000,1000,0\n20,1200,0,0\n",
             "asset,currentValue,realizedPnl\nasset-1,20,60\n",
@@ -4399,12 +4419,13 @@ class WebApiTests(unittest.TestCase):
             payload = polymarket_user_mdd_payload(WALLET, closed_limit=10, include_accounting_snapshot=True)
 
         mock_snapshot.assert_called_once()
-        self.assertEqual(payload["equity_base_source"], "accounting_snapshot_max_equity")
-        self.assertEqual(payload["equity_base_usd"], 1200.0)
+        self.assertEqual(payload["equity_base_source"], "max_public_capital_basis_from_positions_and_trade_activity")
+        self.assertEqual(payload["equity_base_usd"], 250.0)
         self.assertAlmostEqual(payload["mdd_usd"], 40.0)
-        self.assertAlmostEqual(payload["mdd_pct"], 40.0 / 1300.0 * 100.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 40.0 / 350.0 * 100.0)
         self.assertEqual(payload["accounting_snapshot"]["status"], "ok")
-        self.assertTrue(payload["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
+        self.assertEqual(payload["accounting_snapshot"]["equity"]["max_equity_usd"], 1200.0)
+        self.assertFalse(payload["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
 
     def test_polymarket_user_mdd_payload_uses_trade_activity_for_public_capital_basis(self) -> None:
         activity_pages = [
