@@ -126,6 +126,8 @@ def build_pyinstaller(work_dir: Path, package_dir: Path) -> None:
 
 
 def windows_config_bootstrap() -> str:
+    # cmd.exe expands percent variables before executing a parenthesized block.
+    # Use the precomputed directory rather than APP_CONFIG_PATH changed inside it.
     return textwrap.dedent(
         f"""\
         set "APP_DATA_DIR=%~dp0data"
@@ -138,7 +140,7 @@ def windows_config_bootstrap() -> str:
         ) || (
             if not exist "%APP_CONFIG_DIR%" mkdir "%APP_CONFIG_DIR%"
             set "APP_CONFIG_PATH=%APP_CONFIG_DIR%\\config.json"
-            if not exist "%APP_CONFIG_PATH%" if exist "%~dp0data\\config.example.json" copy "%~dp0data\\config.example.json" "%APP_CONFIG_PATH%" >nul
+            if not exist "%APP_CONFIG_DIR%\\config.json" if exist "%~dp0data\\config.example.json" copy "%~dp0data\\config.example.json" "%APP_CONFIG_DIR%\\config.json" >nul
         )
         set "PREDICTION_MARKET_CONFIG_PATH=%APP_CONFIG_PATH%"
         """
