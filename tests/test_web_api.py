@@ -329,6 +329,26 @@ class FakeBodyHandler:
 
 
 class WebApiTests(unittest.TestCase):
+    def test_leaderboard_http_rejects_invalid_category_before_upstream_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server, thread, base_url = self._serve_api(root / "config.json", root)
+            try:
+                with patch("polymarket.data_api._get_json") as fetch:
+                    status, payload = self._request_json(base_url, "/api/polymarket/users/leaderboard?category=ESPORT")
+                self.assertEqual(status, 400)
+                self.assertIn("Unsupported leaderboard category", payload["error"]["message"])
+                fetch.assert_not_called()
+                with patch("polymarket.data_api._get_json", return_value=[]) as fetch:
+                    status, payload = self._request_json(base_url, "/api/polymarket/users/leaderboard?category=esports")
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["category"], "ESPORTS")
+                self.assertEqual(fetch.call_args.kwargs["params"]["category"], "ESPORTS")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     @staticmethod
     def _accounting_zip(equity_csv: str, positions_csv: str) -> bytes:
         buffer = io.BytesIO()
@@ -1523,13 +1543,16 @@ class WebApiTests(unittest.TestCase):
         )
 
     def test_server_refuses_to_start_with_a_corrupt_configuration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config_path = root / "config.json"
-            config_path.write_text("{not-json", encoding="utf-8")
-
-            with self.assertRaises(ConfigLoadError):
-                run_server("127.0.0.1", 0, config_path)
+        for raw in ("{not-json", '{"mutation_journal":[null]}', '{"copy_activity_outbox":{}}', '{"markets":{},"markets":{}}',
+                    '{"copytrading":{"live":"false"}}', '{"copytrading":{"copy_percentage":"invalid"}}', '{"mutation_journal":[{}]}'):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "config.json"
+                config_path.write_text(raw, encoding="utf-8")
+                with patch("web_api.ReactGuiServer") as server:
+                    with self.assertRaises(ConfigLoadError):
+                        run_server("127.0.0.1", 0, config_path)
+                    server.assert_not_called()
+                self.assertEqual(config_path.read_text(encoding="utf-8"), raw)
 
     def test_web_cli_forwards_configured_frontend_directory(self) -> None:
         frontend_dir = Path("deployment") / "frontend" / "dist"
@@ -4068,6 +4091,31 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["mdd_available"])
         self.assertEqual(payload["source_sort"], "PNL")
 
+    def test_polymarket_leaderboard_deduplicates_wallets_before_filtering_and_mdd(self) -> None:
+        raw_rows = [
+            {"rank": 1, "proxyWallet": WALLET, "pnl": 10, "volume": 100},
+            {"rank": 2, "proxyWallet": WALLET.upper(), "pnl": 50, "volume": 100},
+            {"rank": 3, "proxyWallet": WALLET_2, "pnl": 20, "volume": 100},
+        ]
+        with patch("web_api.data_api.get_leaderboard", return_value=raw_rows), patch(
+            "web_api.polymarket_user_mdd_payload", return_value={
+                "mdd_pct": 10.0, "mdd_usd": 1.0, "mdd_method": "test", "mdd_pct_basis": "test",
+                "points": [], "closed_positions": 1, "open_positions": 0, "equity_base_usd": 10.0,
+                "peak_value": 1.0, "trough_value": 0.0, "peak_timestamp": 1, "trough_timestamp": 2,
+            }
+        ) as mdd:
+            payload = polymarket_leaderboard_payload({"compute_mdd": ["true"], "scan_limit": ["3"]})
+        self.assertEqual(mdd.call_count, 2)
+        self.assertEqual(payload["counts"]["scanned"], 3)
+        self.assertEqual(payload["counts"]["unique_wallets"], 2)
+        self.assertEqual(payload["counts"]["duplicate_rows"], 1)
+        self.assertEqual(payload["counts"]["returned"], 2)
+        self.assertEqual([row["pnl_usd"] for row in payload["rows"]], [20.0, 10.0])
+
+        with patch("web_api.data_api.get_leaderboard", return_value=raw_rows):
+            filtered = polymarket_leaderboard_payload({"min_pnl_usd": ["30"], "scan_limit": ["3"]})
+        self.assertEqual(filtered["counts"]["returned"], 0)
+
     def test_polymarket_leaderboard_payload_uses_full_wallet_display_fallback(self) -> None:
         leaderboard = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
 
@@ -4318,8 +4366,8 @@ class WebApiTests(unittest.TestCase):
         with patch(
             "web_api.data_api.get_closed_positions",
             return_value=[
-                {"timestamp": 10, "realizedPnl": "100", "totalBought": "1000"},
-                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "500"},
+                {"timestamp": 10, "realizedPnl": "100", "totalBought": "1000", "avgPrice": "0.5"},
+                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "500", "avgPrice": "0.5"},
             ],
         ), patch(
             "web_api.data_api.get_positions",
@@ -4338,13 +4386,14 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["closed_positions"], 2)
         self.assertEqual(payload["open_positions"], 1)
         self.assertAlmostEqual(payload["mdd_usd"], 50.0)
-        self.assertAlmostEqual(payload["mdd_pct"], 50.0 / 1700.0 * 100.0)
+        self.assertEqual(payload["equity_base_usd"], 850.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 50.0 / 950.0 * 100.0)
         self.assertEqual(payload["peak_value"], 100.0)
         self.assertEqual(payload["trough_value"], 50.0)
         self.assertIn("assumptions", payload)
         self.assertEqual(payload["trade_capital"]["events"], 0)
 
-    def test_polymarket_user_mdd_payload_uses_accounting_snapshot_equity_base_when_requested(self) -> None:
+    def test_polymarket_user_mdd_payload_keeps_accounting_snapshot_as_diagnostics(self) -> None:
         snapshot = self._accounting_zip(
             "timestamp,equity,deposits,withdrawals\n10,1000,1000,0\n20,1200,0,0\n",
             "asset,currentValue,realizedPnl\nasset-1,20,60\n",
@@ -4352,8 +4401,8 @@ class WebApiTests(unittest.TestCase):
         with patch(
             "web_api.data_api.get_closed_positions",
             return_value=[
-                {"timestamp": 10, "realizedPnl": "100", "totalBought": "100"},
-                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "100"},
+                {"timestamp": 10, "realizedPnl": "100", "totalBought": "100", "avgPrice": "0.5"},
+                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "100", "avgPrice": "0.5"},
             ],
         ), patch(
             "web_api.data_api.get_positions",
@@ -4371,12 +4420,13 @@ class WebApiTests(unittest.TestCase):
             payload = polymarket_user_mdd_payload(WALLET, closed_limit=10, include_accounting_snapshot=True)
 
         mock_snapshot.assert_called_once()
-        self.assertEqual(payload["equity_base_source"], "accounting_snapshot_max_equity")
-        self.assertEqual(payload["equity_base_usd"], 1200.0)
+        self.assertEqual(payload["equity_base_source"], "max_public_capital_basis_from_positions_and_trade_activity")
+        self.assertEqual(payload["equity_base_usd"], 150.0)
         self.assertAlmostEqual(payload["mdd_usd"], 40.0)
-        self.assertAlmostEqual(payload["mdd_pct"], 40.0 / 1300.0 * 100.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 40.0 / 250.0 * 100.0)
         self.assertEqual(payload["accounting_snapshot"]["status"], "ok")
-        self.assertTrue(payload["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
+        self.assertEqual(payload["accounting_snapshot"]["equity"]["max_equity_usd"], 1200.0)
+        self.assertFalse(payload["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
 
     def test_polymarket_user_mdd_payload_uses_trade_activity_for_public_capital_basis(self) -> None:
         activity_pages = [
@@ -4877,6 +4927,52 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(delete_status, 200)
         self.assertIn(fresh["key"], deleted["deleted_keys"])
         self.assertEqual(deleted["counts"]["entries"], 0)
+
+    def test_polymarket_cache_read_denial_is_an_error_and_preserves_cached_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            cache_path = root / "analytics-cache.json"
+            frontend_dir.mkdir()
+            save_config(AppConfig(), config_path)
+            with patch.dict(os.environ, {"POLYMARKET_ANALYTICS_CACHE_PATH": str(cache_path)}):
+                metadata = store_analytics_artifact(POLYMARKET_MDD_AUDIT_KIND, {"wallet": WALLET}, {"wallet": WALLET})
+                original_read = Path.read_bytes
+                previous_bytes = original_read(cache_path)
+
+                def deny_read(path: Path) -> bytes:
+                    if path == cache_path:
+                        raise PermissionError("private filesystem detail")
+                    return original_read(path)
+
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    routes = (
+                        ("GET", "/api/polymarket/users/mdd/cache", None),
+                        ("GET", "/api/polymarket/users/mdd/cache/health", None),
+                        ("GET", f"/api/polymarket/users/mdd/export.json?key={metadata['key']}", None),
+                        ("POST", "/api/polymarket/users/mdd/cache/purge", {"all": True}),
+                        ("DELETE", f"/api/polymarket/users/mdd/cache/{metadata['key']}", None),
+                    )
+                    with patch.object(Path, "read_bytes", deny_read):
+                        for method, route, request in routes:
+                            with self.subTest(method=method, route=route):
+                                status, payload = self._request_json(base_url, route, method=method, payload=request)
+                                self.assertEqual(status, 500)
+                                self.assertEqual(payload["error"]["code"], "internal_error")
+                                self.assertNotIn("private filesystem detail", json.dumps(payload))
+                                self.assertEqual(original_read(cache_path), previous_bytes)
+                    status, listing = self._request_json(base_url, "/api/polymarket/users/mdd/cache")
+                    self.assertEqual(status, 200)
+                    self.assertEqual(listing["counts"]["entries"], 1)
+                    self.assertEqual(listing["entries"][0]["key"], metadata["key"])
+                    self.assertEqual(cache_path.read_bytes(), previous_bytes)
+                    self.assertFalse(list(root.glob("analytics-cache.json.corrupt-*")))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
 
     def test_polymarket_user_search_payload_returns_profile_rows(self) -> None:
         with patch(

@@ -8,7 +8,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 try:
     from scripts.verify_production_deployment import (
@@ -22,6 +21,7 @@ try:
         ROLLBACK_DRILL_STEPS,
         REQUIRED_UNITS,
     )
+    from scripts.verify_restored_state import application_check_valid
 except ModuleNotFoundError:  # Direct execution adds scripts/ to sys.path.
     from verify_production_deployment import (  # type: ignore[no-redef]
         BACKUP_MAX_AGE_SECONDS,
@@ -34,6 +34,9 @@ except ModuleNotFoundError:  # Direct execution adds scripts/ to sys.path.
         ROLLBACK_DRILL_STEPS,
         REQUIRED_UNITS,
     )
+    from verify_restored_state import application_check_valid
+
+from core.deployment_identity import canonical_https_origin
 
 
 MAX_REPORT_BYTES = 1024 * 1024
@@ -160,19 +163,10 @@ def _finite_number(value: Any, label: str) -> float:
 
 
 def _canonical_origin(value: str) -> str:
-    parsed = urlparse(value.strip())
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        raise DeploymentEvidenceError("public origin must be an origin-only HTTPS URL")
-    port = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
-    return f"https://{parsed.hostname.lower()}{port}"
+    try:
+        return canonical_https_origin(value)
+    except ValueError as exc:
+        raise DeploymentEvidenceError(str(exc)) from exc
 
 
 def review_external_probe_report(
@@ -473,6 +467,10 @@ def review_deployment_report(
     restore_completed_at = _utc_timestamp(restore.get("completed_at"), "restore completed_at")
     if (
         restore.get("mode") != "isolated_full_restore"
+        or not application_check_valid(
+            restore.get("application"), version=expected_version,
+            revision=expected_revision, frontend_sha256=frontend_sha256,
+        )
         or restore.get("archive") != backup.get("archive")
         or restore.get("backup_created_at") != backup.get("created_at")
         or restore.get("backup_sha256") != backup.get("sha256")
@@ -520,6 +518,7 @@ def review_deployment_report(
             "backup_sha256": restore["backup_sha256"],
             "restored_file_count": restore["restored_file_count"],
             "restored_bytes": restore["restored_bytes"],
+            "application": restore["application"],
         },
         "rollback_drill": {
             "drill_id": rollback["drill_id"],

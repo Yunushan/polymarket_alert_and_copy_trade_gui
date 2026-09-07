@@ -5,7 +5,356 @@ readiness score. It reports a score out of 100 and separates repeatable local
 proof from evidence that can only be collected on a real host, account, or
 GitHub repository.
 
-## Current Check
+## Current Independent Assessment
+
+The latest independent review scored `533afc2` **77/100 on 2026-09-06**. This
+applies to the unmerged PR #79 candidate, not protected main or the published
+v1.0.9 release. Financial history and investment-return methodology, exhaustive
+wallet discovery, actual-host recovery and installed-release acceptance, and
+explicitly approved funded lifecycle evidence remain incomplete. Unattended
+funded production is not approved.
+
+The following [position-cost correction](POSITION_COST_BASIS.md) prices share
+quantities, uses explicit USD entry-cost/fee fields and includes dust and archived
+active positions in MDD queries. Version 7 invalidates prior scan enrichment;
+provenance remains in durable summaries and exports. Independent financial
+history, actual-host and funded acceptance are still missing. This candidate
+requires its own verification and does not automatically raise that assessment.
+
+The subsequent cross-browser commit `6aa50a0` passed
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/34030140802) and
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/34030140773).
+Its required Linux browser job passed all 60 cases: Chromium, Firefox and WebKit
+at desktop/mobile widths in both themes. This closes the engine-matrix gap,
+not physical-device, installed native GUI, release or financial acceptance.
+The local Windows full verifier still had seven failure/error records caused
+by TLS trust rejection; hosted success does not relabel that local run as a pass.
+
+The CLOB V2 wrapper and bounded audit journal are implemented, but both funded
+execution gates remain disabled pending their separate review/approval and
+acceptance requirements. A resolved journal must now contain consistent identity,
+cancellation and zero-fill evidence; duplicate keys, malformed or oversized JSON
+and contradictory state cannot authorize another audit. Offline regression
+coverage does not authenticate venue outcomes or supply operator approval.
+No additional readiness points are assigned merely for adding these guards.
+
+## Historical Assessment Notes
+
+The earlier review scored `490e59b` **74/100 on 2026-09-06**, not
+approved for unattended funded production. Its
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/34020190690) passed
+48 jobs with two optional skips, and all four
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/34020190695)
+jobs passed. Raw-input validation repairs were verified, but desktop save-failure
+injection reproduced live/copy settings changing in memory despite unchanged
+file bytes; a later unrelated save persisted the rejected live setting.
+Financial-history completeness, actual-host recovery, release acceptance and
+authorized funded lifecycle evidence remain incomplete. The score applies to
+the unmerged PR #79 candidate, not protected main or the older published release.
+
+The next persistence candidate publishes detached desktop field changes only
+after save, preserves the shared root and unchanged journal identities, and
+invalidates cached adapter settings after a committed market change. A typed
+post-replacement error distinguishes committed bytes from a pre-commit failure.
+Persistence failure pauses subsequent desktop writes, alerts and copy activity
+until the operator reconciles durable state and restarts. Regression tests cover
+pre-commit denial, stale writers, directory-sync and lock-cleanup failures,
+later writes, policy publication, multi-field follows and copy dispatch intent.
+These fixes require their own exact-commit checks and do not raise the independent
+score or establish full production acceptance by themselves.
+
+The preceding independent review scored `4f72abf` **73/100 on 2026-09-06**, not
+approved for unattended funded production. Its
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/34018549867) passed
+48 jobs with two optional skips, and its
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/34018549842)
+passed. The review nevertheless reproduced API input conversions that turned
+false-looking market flags into persisted live enablement/confirmation and
+malformed copy values into 100% sizing or a zero-second conflict window. The
+two-point reduction from the preceding independent review reflects these
+safety defects. The candidate remains on open PR #79, not protected main or a
+published release. Earlier assessments and formal local-checklist scores below
+are historical results with different scope, not competing current approvals.
+Missing external acceptance cannot be supplied by a score.
+
+The next mutation-validation candidate checks original HTTP/CLI market and copy
+settings through the shared model rules, rejects contradictory aliases, and
+shares duplicate-key/non-finite JSON rejection with configuration loading.
+Desktop copy settings validate before replacing in-memory state. Valid numeric
+strings, actual booleans, explicit optional-cap clearing and wallet-list clearing
+remain supported; invalid mutations preserve prior stored bytes. This candidate
+requires its own exact-commit verification. Regression repairs do not by
+themselves prove financial-history completeness, release installation, actual
+VPS recovery, or authorized funded-account acceptance and do not automatically
+raise the independent score.
+
+Recovery commit `7761cf6` closes a reproduced false-positive restore check:
+a checksummed backup containing malformed configuration previously passed the
+inventory-only drill. Collection now boots the restored application in an
+isolated read-only child, checks health/state and SQLite integrity, and rejects
+changed bytes or backend egress. Review requires this exact-runtime application
+evidence. Local regression results do not establish actual VPS recovery or raise
+the independent score by themselves. Its
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/33987079898) and
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33987079888)
+passed; those results do not validate the following local startup changes.
+
+The next startup candidate applies fail-closed integrity checks to ordinary
+configuration loading as well as restoration. It rejects malformed durable
+collections, oversized journals, duplicate JSON keys and non-finite numbers
+without discarding records or publishing an unloadable replacement. Valid
+legacy configurations and append-time retention remain supported.
+
+The 2026-09-06 follow-up also rejects malformed operational booleans, invalid
+copy risk numbers, contradictory percentage/scale values and duplicate or
+incomplete journal identities. It no longer converts invalid copy percentages
+to 100%, treats quoted `"false"` as enabled, synthesizes missing durable record
+IDs, or treats absent copy dispatch state as automatically pending. Save and
+restore paths use the same guards. Numeric legacy risk settings within bounds
+remain supported, as do internal HTTP status enums and valid reconciliation
+replays. This closes reproduced configuration defects; it does not supply
+financial-history completeness, actual-host recovery, release acceptance or
+funded-account evidence. The independent 75/100 assessment is not raised merely
+because these regressions pass.
+
+The accepted browser-workflow baseline applies the saved React theme,
+preserves view navigation through reload/back/forward, names the previously
+unnamed controls, announces alert/wallet results and errors, and clears an edit
+form after its wallet is deleted. Semantic palette variables and responsive form
+columns prevent light-only surfaces and cramped alert selectors. The committed
+Playwright acceptance gate uses isolated temporary backend state with outbound
+connections forbidden, covers desktop/mobile widths in both themes, and retains
+screenshots/traces in CI. See [Browser Acceptance](BROWSER_ACCEPTANCE.md) for
+scope, commands and limitations. All 16 local Edge acceptance cases passed,
+as did the 12 existing frontend tests and 24 focused runner/workflow/metadata
+tests. The full Windows verifier ran 1,405 cases with the same three errors,
+one failed assertion and nine skips originating in local TLS trust rejection;
+it is not a full local pass. Source/wheel artifact verification and the npm
+audit (including development dependencies) passed. Exact-commit hosted CI now
+also passed the 16 browser cases and package build. This supports one point over
+the preceding 74/100 assessment, not acceptance of financial, real-host or
+funded-account behavior.
+
+The response-disconnect follow-up identifies broken pipes, resets and aborts at
+the client output stream. It does not relabel upstream errors as disconnects or
+retry writes to a closed client. Local request logs/metrics use 499 with the
+attempted response status preserved; durable creates retain their commit and
+idempotent replay behavior. This follow-up requires its own exact-commit tests
+and CI before receiving additional credit.
+
+Local follow-up verification passed 10 focused Windows disconnect tests, all 41
+Linux HTTP/deadline/TLS tests and all 16 browser cases. The browser run observed
+four orderly disconnect records and no backend tracebacks. The full Windows
+verifier ran 1,415 cases in 68.867 seconds with the same three TLS errors, one
+TLS-related failed assertion and nine skips; it remains a failed full local run.
+
+The local Windows TLS failure was diagnosed without bypassing verification:
+the peer certificate issuer is `Avast Web/Mail Shield Untrusted Root`, not the
+fixture's ephemeral CA. The certificate-chain rejection is therefore expected
+for the intercepted connection. Keep the original DNS/SNI and negative trust
+tests intact. Run them in a clean Windows VM or runner without HTTPS interception;
+do not trust the interceptor's untrusted root, use `verify=False`, disable
+hostname checks, or skip the cases to manufacture a full local pass.
+
+The next managed-WebSocket candidate addresses a reproduced scope-exit cleanup
+failure: cancellation after disarming the socket guard could leave a connection
+open despite connect() raising. Cleanup now surrounds the complete connection
+scope. Direct connections pin validated DNS addresses, preserve verified TLS/SNI,
+reject non-101 upgrades, and share the setup deadline across DNS/TCP/TLS/HTTP.
+The channel clients no longer resolve DNS before that deadline and their stop
+events cancel pending direct setup. A Windows unconnected-socket guard fix also
+preserves socket family/type/protocol and releases a failed duplicate handle.
+Focused regressions use real socket pairs, loopback upgrades, ephemeral-CA TLS,
+slow peers and actual worker stop events. Memory-BIO TLS through urllib3 keeps
+the guarded raw socket owned throughout the handshake while retaining native
+certificate verification. The real TLS session test covers partial-frame
+timeouts, fragmented messages, ping/pong, binary traffic and an orderly close
+after the setup deadline. Custom SSL contexts and CA/client-certificate options
+are retained. urllib3 is now an explicit runtime dependency, with the existing
+hash-locked version unchanged. Configured proxies are preserved but remain
+outside the direct pinning/active-cancellation guarantee. This candidate needs
+its own exact-commit hosted checks, not transferred release, deployment,
+financial-history or funded acceptance evidence.
+
+Candidate verification passed 23 Linux WebSocket tests, ran 170 Linux Polymarket
+tests with one platform-specific skip, and passed 20 focused Windows metadata
+and dependency-lock tests. Wheel/source artifact validation and Ruff passed.
+The final Windows full verifier ran 1,437 cases in 70.257 seconds with five
+errors, one failed assertion and nine skips, all six failure records originating
+in the local TLS fixture's certificate-trust rejection. This is not a full local
+pass, and no certificate or hostname-verification bypass has been introduced.
+
+## Audit History: 2026-09-05
+
+The committed transport follow-up `981a2e0` passed exact-commit hosted
+[CI](https://github.com/Yunushan/market-sentinel/actions/runs/33975571723)
+(48 successful jobs, two optional skips) and
+[Security](https://github.com/Yunushan/market-sentinel/actions/runs/33975571816).
+This includes macOS deadline and real SIGTERM regressions after retaining POSIX
+reader descriptors until normal cleanup. It does not verify subsequent edits.
+
+The next storage candidate requires WAL/FULL synchronization and requests
+macOS fullfsync before scan writes. Its tests exercise actual SQLite-full errors and
+abrupt exits inside page/MDD transactions, retaining committed progress. SQLite
+backups now preflight a pinned snapshot before copying and check a configurable
+per-database budget between bounded copy steps. These are storage-contract
+improvements, not evidence of host power-loss behavior or a 100/100 promotion.
+The focused storage/backup/CLI/deployment group passed 172 tests on Linux and
+ran 172 on Windows with five platform-specific skips. The full Windows verifier
+ran 1,400 tests with nine skips, three errors and one failed assertion, all four
+failures originating in the local TLS fixture's certificate-trust rejection.
+Ruff, dependency/workflow checks, frontend build and browser smoke passed.
+This is not a full local pass; exact-commit hosted verification is still required.
+
+A subsequent review of the working tree (committed transport baseline
+`cc13dbe`, plus uncommitted deadline/cancellation changes) scored
+**70/100**, not a release approval. It reproduced two concrete candidate bugs:
+HTTP/1.0 and `Connection: close` responses lost their cancellation guard before
+body consumption, and rate-limiter lock acquisition ignored the deadline. The
+slow-TLS regression was still blocked at a 12-second diagnostic cutoff despite
+a 0.5-second budget. This result must not be replaced by the historical formal
+83/100 checklist or the earlier committed candidate's passing CI.
+
+The deadline candidate now preserves guards through nonpersistent responses,
+bounds rate-limiter lock waits, and keeps one monotonic budget across managed
+request retries. Cancellation propagates through concurrent page/MDD work and
+CSV/JSON file publication. A real Linux SIGTERM regression preserves committed
+pages, leaves interrupted MDD pending, keeps the previous export, and exits 143.
+Failed watchdog startup releases its owned socket handle. No live support gate
+has been enabled. Candidate tests are evidence for these specific fixes, not
+financial, deployed-host, signed-release or funded-account acceptance. Exact
+candidate CI and Security must be revalidated before awarding new credit.
+
+An earlier clean-commit review of `b068de1` scored **73/100**, with the
+**83/100 formal local checklist** and passing exact-commit CI/Security. It
+credited the cache correction and hosted checks but reproduced stale DNS
+address retention in shared connection pools. This is still an assessment of
+an unmerged branch, not approval of a production release or funded execution.
+
+The following transport hardening now keys pools by both their normal TLS/origin
+configuration and their validated destination addresses, and routes direct
+Polymarket HTTP through the shared managed session. New regressions cover DNS
+changes and rebinding, TLS hostname/certificate verification, redirect rejection
+before body consumption, response/session cleanup, and mutation retry limits.
+On this Windows audit machine, Avast replaces the ephemeral local TLS server's
+certificate with an untrusted interception certificate. The client rejects it;
+the Windows candidate run has two errors among 1,364 cases (seven skipped).
+Independent Ubuntu WSL execution passes all 12 HTTP transport tests, including
+positive TLS, untrusted/wrong-host certificates and DNS rotation. Broad WSL
+discovery passes 1,232 cases but has three module-import errors because Tkinter
+is absent, plus two skips; it is not a full-suite pass. The Linux CLI starts
+without Tkinter. Verification has not been disabled and TLS tests are not skipped.
+Do not carry the baseline local pass or external evidence forward to this
+candidate merely because the earlier commit passed.
+
+An earlier independent review assessed the preceding working tree at **70/100**,
+with a passing local gate and **83/100 formal checklist**. It reproduced a
+cache read-error defect: valid data could be quarantined and replaced by an
+empty active cache after a temporary read failure. That defect is now fixed
+and regression-tested, without automatically awarding more readiness points.
+An earlier 68/100 review had a failing local gate (49/100 formal checklist)
+before replay-test and Windows replacement integration. None of these results
+is production certification or acceptance of protected main or published artifacts.
+
+The baseline scan/cache fixes at `b068de1` passed
+`python -B verify.py --frontend-build --frontend-live-smoke`: **1,346 tests ran,
+7 skipped on Windows**, with 73% overall and 76% backend combined
+statement/branch coverage. Overall statement coverage is 78% and branch coverage
+is 60%; the combined percentage is not the percentage of branches exercised. Verified
+changes include:
+
+- MDD resume binds completed enrichment to normalized calculation options and
+  algorithm version. Changed settings or legacy results without calculation
+  metadata invalidate only MDD, retaining fetched pages; matching calculations
+  survive filter changes.
+- Web/API and SQLite scan results keep the first observation per normalized
+  wallet before filtering/MDD. Raw scanned rows and unique wallets are counted
+  separately; legacy database migration preserves pagination progress.
+- Page retries preserve existing MDD, and conflicting page rewrites fail closed.
+- Progress logging no longer queries aggregate database counts per MDD result.
+- Regression tests cover mode/equity/history/accounting changes, rollback,
+  legacy migration, overlapping wallets and resumed finite scan budgets.
+- An OS-held writer lock prevents concurrent scan resets/enrichment and is
+  released after abrupt process exit; separate-process tests verify ownership.
+- Status/export use read-only SQLite snapshots. Export metadata and rows stay
+  consistent while the scan writer commits additional pages.
+- Interrupted CSV/JSON file exports preserve the previous file via atomic
+  replacement. Database/journal/lock paths cannot be used as export targets.
+- Active-scan backup/restore tests omit lock/journal sidecars and restore the
+  committed database. Failed scan resets roll back rather than erasing state.
+- Dollar and percentage MDD have independent maxima/provenance, include the
+  initial observed-window loss, and return unknown risk for empty PnL histories.
+  A deterministic all-prior-points reference checks 150 random curves at three
+  equity bases. API/CLI tests reject the reproduced 25%-drawdown wallet.
+- Calculation version 5 invalidates old durable enrichment. Accounting rebasing
+  uses all observed drawdown episodes even when displayed points are truncated;
+  legacy audit exports remain available but explicitly marked non-current.
+- Process MDD input/history caches use thread-safe TTL/LRU eviction, entry and
+  serialized-data byte budgets, oversized-entry rejection and copy isolation.
+- Serial/concurrent scans stop at the documented public leaderboard offset
+  boundary without changing unlimited settings. Stable wallet membership detects
+  repeats despite changed ranks/PnL/order and survives SQLite resume/migration.
+- Replay computes all fetched trade/mark events before retaining bounded output;
+  missing inventory/history cannot qualify through a diagnostic fast fallback.
+- Accounting imports bound compressed/expanded bytes, member/file counts, rows,
+  columns and record length. Partial snapshots cannot rebase percentage risk.
+- PnL/volume replaces investment-ROI wording in controls; legacy `roi_pct` keys
+  remain compatible, with explicit formula metadata in API/CSV/JSON results.
+- Per-source history limits/windows persist through caches, SQLite and exports.
+  Reaching a source cap yields unknown top-level risk, including after accounting
+  reconciliation or resume. Exhausted public windows remain account-unverified.
+- Frontend coverage tables expose source counts, limits and observed timestamps;
+  component tests cover capped, legacy, malformed-timestamp and invalid-source
+  diagnostic states, including escaped labels and rejected-row counts.
+- Required PnL/time fields, optional financial values, duplicate position
+  observations and ambiguous same-timestamp ordering are validated before risk
+  is calculated. Invalid source history returns unknown MDD and cannot qualify
+  via API/CLI/desktop exports, accounting rebasing or resumed SQLite results.
+- Invalid source history stops mark replay before price requests; malformed or
+  conflicting price points cannot be silently dropped to keep a valid subset.
+- Atomic config/cache/evidence/export publication retries only specific Windows
+  replacement errors, at most ten attempts with under 1.5 seconds total sleep.
+  Persistent denial still raises and preserves the prior file. Tests exercise
+  both injected failures and a real Windows reader without delete sharing.
+- Desktop CSV export now preserves its previous complete output if a later row
+  cannot be serialized, and retains unknown-risk diagnostics as JSON columns.
+- Cache reads distinguish missing files from I/O failures and malformed bytes.
+  Read-denied stores are not quarantined, overwritten, or reported as empty.
+  Genuine corruption is preserved before recovery; failed quarantine or sync
+  is reported. API/CLI regression tests verify explicit errors and recovery
+  without losing artifacts or overwriting previous exports.
+
+The frontend has 12 focused tests. Current synthetic capped/invalid-history
+browser checks passed in headless Edge at 1440x1000 and 390x844; those checks do
+not establish physical mobile-device or full cross-browser acceptance. The
+concurrent Windows report-writer test also passed ten consecutive reruns after
+the bounded retry change; this is evidence of improvement, not a claim that
+every possible filesystem failure is eliminated.
+
+A synthetic offline SQLite check ingested 100,000 rows containing 10,000
+duplicates in 2.324 seconds on the audit machine and verified 90,000 distinct
+wallets and next offset 100,000. This does not measure network/MDD throughput,
+eight-million-wallet performance, production-host resource use, or durability
+under machine failure.
+
+The previous committed candidate review was **73/100**. It credited the tested direct
+transport improvements but reproduced a separate overall-deadline gap: a
+loopback server sending one byte every 0.1 seconds completed an 11-byte response
+in 1.094 seconds despite a 0.25-second socket timeout. Requests' inactivity
+timeout is not a wall-clock deadline. HTTP body reads/retries and scan batch
+waiting still require end-to-end deadline and cancellation handling; byte caps
+alone do not bound elapsed time.
+
+Remaining acceptance work includes financial metric/history completeness,
+independent reference datasets and full-account source coverage; a successful
+current-version release and installation of its actual
+artifacts; production-host restore/rollback and sustained-load exercises;
+broader UI/native browser acceptance; and explicitly authorized credentialed
+and funded venue validation. Live mutation gates remain disabled. No readiness
+points should be awarded for external acceptance until its matching evidence
+exists and is verified.
+
+## Running the Scorer
 
 Run the complete local verification profile:
 
@@ -16,8 +365,10 @@ python scripts/check_product_readiness.py \
 ```
 
 `--full-local` runs `verify.py --skip-pip-check --frontend-build
---frontend-live-smoke`. This command produced the latest **83/100 formal local
-checklist** result. It is not the deployment-oriented production score and does
+--frontend-live-smoke`. A prior clean baseline produced an **83/100 formal local
+checklist** result. Rerun the command for a new candidate; that historical pass
+does not replace the locally failing Windows TLS run described above. It is not
+the deployment-oriented production score and does
 not prove an exact deployed revision, release, external platform, or live venue.
 
 Run the no-credentials public Polymarket probe separately when external network
@@ -43,23 +394,25 @@ check does not receive local test or security points.
 
 ## Score Model (Formal Scorer)
 
-| Area | Points | Current verified | Remaining proof required |
+| Area | Points | Local checklist earned | Remaining proof required |
 | --- | ---: | ---: | --- |
 | Architecture and scope | 18 | 18 | None beyond the repository contract |
-| Tests and correctness | 18 | 18 | None |
+| Tests and correctness | 18 | 18 | No additional formal points; independent financial correctness and user-workflow acceptance remain required |
 | Security and safety | 17 | 16 | Dispatch the implemented governance collector on a clean protected-main revision with the required admin-read token and supply its exact attested artifact |
 | CI/CD and release | 17 | 14 | Exact live release-environment evidence plus a fresh GitHub-attested release report |
-| Operations and recovery | 15 | 12 | Run and supply cryptographically attested real-host deployment evidence for `v1.0.11`; the protected-main workflow is implemented but has not been dispatched |
+| Operations and recovery | 15 | 12 | Run and supply cryptographically attested real-host deployment evidence for the final current-version release; none was supplied to this local assessment |
 | Platform evidence | 10 | 5 | Dispatch the implemented platform collector against a successful exact-revision CI run and supply both exact attested artifacts |
 | Live acceptance | 5 | 0 | Reachable public endpoints plus the implemented credentialed/funded collectors' exact attested artifacts; funded execution also requires deliberate promotion of the offline-tested V2 mutation gate |
 
-The latest completed full local audit on 2026-08-28 is **83/100 (not ready)** when no external
+The recorded full local audit of baseline `b068de1` on 2026-09-05 was
+**83/100 (not ready)** when no external
 evidence manifests are supplied. Local verification covers the adapter catalog
 (68 markets, 57 implemented and 11 explicitly blocked), 344 offline fixture
 files, documentation, workflows, secret hygiene, frontend build/browser smoke,
-and packaging checks. The current verifier passed 1,188 tests (7 intentionally
-skipped on Windows), achieved 73% all-source and 75% backend branch coverage,
-satisfied the 65% overall and 74% backend floors, and passed Ruff. Counts are reported
+and packaging checks. That verifier ran 1,346 tests (1,339 passed and 7
+intentionally skipped on Windows), achieved 73% all-source and 76% backend
+combined statement/branch coverage, satisfied the 65% overall and 74% backend
+combined coverage floors, and passed Ruff. Counts are reported
 from this run rather than carried forward from an older artifact.
 The canonical capability snapshot is 55 price/paper adapters, 33 orderbook
 adapters, 35 trade-history adapters, 39 candle-history adapters, and 23 guarded
@@ -83,23 +436,26 @@ remain unawarded. No live evidence is invented to compensate for that gap. The
 score therefore reflects repeatable repository proof plus explicitly supplied
 evidence, not a production certification.
 
-## Independent Production Assessment
+## Historical Independent Assessment
 
-The stricter deployment-oriented assessment is **57/100 — NO-GO**. It discounts
+This earlier deployment-oriented assessment was **73/100 - not ready**. It discounts
 repository-design points that the formal scorer awards before an exact clean
 revision, signed release, real production host, recovery exercise, and live
-venue behavior are proven.
+venue behavior are proven. This candidate includes uncommitted direct-transport
+fixes; its baseline CI pass cannot stand in for exact-candidate hosted checks.
+The table includes the separately reproduced overall-deadline gap and must be
+reassessed against the final revision and its acceptance evidence.
 
 | Area | Independent score | Maximum | Main deduction |
 | --- | ---: | ---: | --- |
-| Architecture and capability honesty | 12 | 18 | Monolithic single-node design; Polymarket CLOB V2 mutations are unavailable |
-| Correctness and testing | 14 | 18 | Strong offline/local coverage and a passing hosted matrix, but frontend behavioral coverage and real production-host behavior remain unproven |
-| Security and safety | 11 | 17 | Good fail-closed controls; production secrets/environment, signed-commit enforcement, and independent review are absent |
-| CI/CD and release | 9 | 17 | No published `v1.0.11`; signing/release-approval evidence is incomplete |
-| Operations and recovery | 6 | 15 | Evidence collectors now require independent probing and drills, but no real deployment, restore, off-host backup, or rollback proof exists |
-| Platform evidence | 5 | 10 | Repository matrix exists, but full attested platform evidence is absent |
-| Live acceptance | 0 | 5 | Public probes did not establish reachability; credentialed/funded acceptance is absent |
-| **Total** | **57** | **100** | **Production launch is not approved** |
+| Architecture and correctness | 16 | 18 | Financial capital/history definitions and full-account discovery still need independent validation |
+| Tests and validation | 16 | 18 | The reviewed snapshot passed local verification; workflow and real-host acceptance were incomplete |
+| Security and safeguards | 15 | 17 | Direct pinning and TLS tests improved; proxy/WebSocket egress and actual production controls remain unverified |
+| CI/CD and release | 10 | 17 | Baseline CI is green; current fixes need exact-revision CI and a published, install-tested current-version release |
+| Operations and recovery | 10 | 15 | Overall response deadlines/cancellation and actual-host restore, rollback, sustained load and alert delivery remain unproven |
+| Platform evidence | 6 | 10 | Hosted matrix passes for the pushed head, but current native packages and real client-browser acceptance are incomplete |
+| Live acceptance | 0 | 5 | Exact-revision authenticated/funded acceptance is absent; Polymarket mutations remain disabled |
+| **Total** | **73** | **100** | **Reviewed candidate; unattended real-money production is not approved** |
 
 Hand-authored schema-v1 repository-settings, release-environment, platform-CI,
 platform, credentialed, and funded manifests are diagnostic inputs only. They
@@ -107,7 +463,7 @@ never award points. Schema-v2 governance, platform, and Polymarket collectors
 now provide a structural path to the full formal 100, but every external point
 remains withheld until a clean protected-main revision produces the exact
 successful hosted workflow/job, artifact, and exact-byte attestation required
-for that evidence type. This is separate from the independent 57/100 assessment. A
+for that evidence type. This is separate from the independent assessment above. A
 published stable release also remains unscored without fresh exact attested
 release evidence. The independent release-evidence reconciliation workflow
 re-drafts such a release after its Release run completes, including failed or
@@ -120,7 +476,7 @@ recollected for every final commit; it does not transfer merely because an old
 manifest or workflow run exists.
 
 The local pass is not a claim that every production failure mode has been
-eliminated. The independent production assessment is **57/100 (NO-GO)** because
+eliminated. The independent production assessment remains below the checklist because
 several formal categories award repository design points before real deployment
 behavior is proven. The hardening tree now pins
 durable stores below `/var/lib/market-sentinel`, verifies backup coverage,
@@ -132,7 +488,7 @@ persists copy-activity dispatch intent before a live venue call.
 
 The remaining risks are evidence and deployment boundaries. Every candidate
 revision must pass exact-revision CI and security before its external points are
-re-awarded; version `1.0.11` has no published, signed release and the
+re-awarded; source version `1.0.12` has no published, installed release proof and the
 previous release attempt failed its Windows-signing policy; no real host has
 proved deployment, restore, backup age, monitoring, or rollback; no current
 platform matrix evidence is bound to this tree; and public, credentialed, and
@@ -141,15 +497,17 @@ relayer submissions, and funded verification are additionally disabled until a
 durable external recovery journal and exact credentialed/funded acceptance make
 the reviewed V2-only implementation safe to promote.
 The architecture is still a monolithic,
-single-node application. DNS validation also cannot eliminate the
-validation-to-connect race in the current HTTP/WebSocket libraries, so the
-production host must enforce allow-listed egress with a firewall or controlled
-forward proxy. A venue copy dispatch has no end-to-end venue idempotency token:
+single-node application. Direct HTTP connections in the shared adapter runtime
+and Polymarket HTTP client pin validated destination addresses, but
+proxy/WebSocket paths do not establish that same uniform boundary. The
+production host must enforce allow-listed connect-time egress with a firewall
+or controlled forward proxy. A venue copy dispatch has no end-to-end venue idempotency token:
 ambiguous outcomes deliberately require manual venue-history reconciliation,
 and the in-memory conflict cache is not a global durable deduplication system.
-Branch protection currently requires one approving review, dismisses stale
-approvals, requires approval after the last push, enforces the rules for
-administrators, and does not require signed commits. Signed-commit enforcement
+The historical governance snapshot required one approving review, dismissed stale
+approvals, required approval after the last push, enforced the rules for
+administrators, and did not require signed commits. Revalidate current settings
+before using that snapshot. Signed-commit enforcement
 and independent review evidence remain separate controls before external
 evidence can support a 100/100 decision.
 
@@ -236,8 +594,9 @@ score-eligible schema-v2 artifacts, but its credentialed tier requires real
 secrets and eligible-account reads, and its funded tier intentionally fails
 closed until the offline-tested V2 mutation support is deliberately promoted
 and a bounded post-only order/immediate-cancel audit is explicitly approved.
-The scorer has no remaining structural ceiling below 100; current evidence,
-rather than missing scorer code, is what keeps the result at 83.
+The scorer has no remaining structural ceiling below 100. The historical
+83-point result lacked external evidence; every new candidate must revalidate
+local checks and supply its own qualifying external evidence.
 
 ```json
 {

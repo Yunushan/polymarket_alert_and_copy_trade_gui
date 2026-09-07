@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
+from core.request_control import RequestCancelled, RequestDeadlineExceeded, resolve_with_deadline
 from .errors import MarketConfigurationError
 
 
@@ -240,7 +241,9 @@ def _resolved_addresses(
     policy: OutboundEndpointPolicy,
 ) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
     try:
-        records = policy.resolver(hostname, port, type=socket.SOCK_STREAM)
+        records = resolve_with_deadline(policy.resolver, hostname, port, type=socket.SOCK_STREAM)
+    except (RequestCancelled, RequestDeadlineExceeded):
+        raise
     except (OSError, socket.gaierror) as exc:
         raise MarketConfigurationError(f"Outbound endpoint hostname could not be resolved: {hostname}.") from exc
     addresses = []

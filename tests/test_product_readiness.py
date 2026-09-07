@@ -106,6 +106,13 @@ def raw_production_deployment_report(
             "restored_file_count": 1,
             "restored_bytes": 128,
             "completed_at": restore_completed_at.isoformat().replace("+00:00", "Z"),
+            "application": {
+                "schema_version": 1, "config_loaded": True, "health_ready": True,
+                "state_readable": True, "mutations_blocked": True, "outbound_attempts": 0,
+                "files_unchanged": True, "sqlite_databases_checked": 0,
+                "api_version": version, "runtime_source_revision": revision,
+                "runtime_frontend_sha256": frontend_sha256,
+            },
         }
     )
     indexed["verified_production_rollback_drill"].update(

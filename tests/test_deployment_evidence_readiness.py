@@ -53,6 +53,13 @@ def _report() -> dict[str, Any]:
                 "backup_sha256": "a" * 64,
                 "restored_file_count": 2,
                 "restored_bytes": 8,
+                "application": {
+                    "schema_version": 1, "config_loaded": True, "health_ready": True,
+                    "state_readable": True, "mutations_blocked": True, "outbound_attempts": 0,
+                    "files_unchanged": True, "sqlite_databases_checked": 0,
+                    "api_version": VERSION, "runtime_source_revision": REVISION,
+                    "runtime_frontend_sha256": "c" * 64,
+                },
             },
             "rollback_drill": {
                 "drill_id": "00000000-0000-4000-8000-000000000001",

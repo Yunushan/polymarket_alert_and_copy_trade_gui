@@ -8,9 +8,12 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Dict, Iterator
 
+from .atomic_files import replace_file
 from .config_security import ConfigSecurityError, assert_no_persisted_secrets
+from .json_validation import loads_strict_json
 from .models import AppConfig
 
 
@@ -23,6 +26,10 @@ class ConfigLoadError(RuntimeError):
 
 class ConfigConflictError(RuntimeError):
     """Raised when a stale process attempts to overwrite newer configuration."""
+
+
+class ConfigCommitError(OSError):
+    """The replacement committed, but synchronization or cleanup then failed."""
 
 
 _STORAGE_REVISION_ATTR = "_market_sentinel_storage_revision"
@@ -42,14 +49,26 @@ def default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = default_config_path()
 
 
-def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
-    if not path.exists():
-        cfg = AppConfig()
-        setattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
-        return cfg
+def _read_config_bytes(path: Path) -> bytes | None:
+    # exists() can suppress permission/I/O failures. Only a missing directory
+    # entry is an uninitialized store; a failed read must never erase history.
     try:
-        raw = path.read_bytes()
-        data: Dict[str, Any] = json.loads(raw.decode("utf-8"))
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not S_ISREG(info.st_mode):
+        raise ValueError("Configuration must be a regular file, not a symbolic link or special file.")
+    return path.read_bytes()
+
+
+def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
+    try:
+        raw = _read_config_bytes(path)
+        if raw is None:
+            cfg = AppConfig()
+            setattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
+            return cfg
+        data: Dict[str, Any] = loads_strict_json(raw.decode("utf-8"))
         assert_no_persisted_secrets(data)
         cfg = AppConfig.from_dict(data)
         setattr(cfg, _STORAGE_REVISION_ATTR, hashlib.sha256(raw).hexdigest())
@@ -60,7 +79,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         ) from exc
     except Exception as exc:
         raise ConfigLoadError(
-            f"Configuration file cannot be loaded: {path}. The file was left unchanged; restore it from a backup or replace it with data/config.example.json."
+            f"Configuration file cannot be loaded: {path}. The file was left unchanged; restore a verified backup or reconcile the damaged state before restarting. Do not reset trading journals."
         ) from exc
 
 
@@ -71,31 +90,43 @@ def save_config(cfg: AppConfig, path: Path = DEFAULT_CONFIG_PATH) -> None:
     with _config_thread_lock(path):
         raw_data = cfg.to_dict()
         assert_no_persisted_secrets(raw_data)
-        data = (json.dumps(raw_data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        # Do not publish a snapshot that the strict loader will reject.
+        AppConfig.from_dict(raw_data)
+        data = (json.dumps(raw_data, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
         committed_revision = hashlib.sha256(data).hexdigest()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with _config_file_lock(path):
-            current_revision = _config_file_revision(path)
-            expected_revision = getattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
-            if expected_revision != current_revision:
-                raise ConfigConflictError(
-                    f"Configuration changed in another process: {path}. Reload it before saving; no data was written."
-                )
-            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-            tmp_path = Path(tmp_name)
-            try:
-                with os.fdopen(fd, "wb") as tmp:
-                    tmp.write(data)
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                os.replace(tmp_path, path)
-                # Replacement is the commit point. Keep the object consistent
-                # with the committed bytes even if directory durability fails.
-                setattr(cfg, _STORAGE_REVISION_ATTR, committed_revision)
-                _fsync_parent_directory(path)
-            finally:
-                if tmp_path.exists():
-                    tmp_path.unlink()
+        committed = False
+        try:
+            with _config_file_lock(path):
+                current_revision = _config_file_revision(path)
+                expected_revision = getattr(cfg, _STORAGE_REVISION_ATTR, _MISSING_REVISION)
+                if expected_revision != current_revision:
+                    raise ConfigConflictError(
+                        f"Configuration changed in another process: {path}. Reload it before saving; no data was written."
+                    )
+                fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+                tmp_path = Path(tmp_name)
+                try:
+                    with os.fdopen(fd, "wb") as tmp:
+                        tmp.write(data)
+                        tmp.flush()
+                        os.fsync(tmp.fileno())
+                    replace_file(tmp_path, path)
+                    # Replacement is the commit point, including errors during
+                    # directory sync, temporary-file cleanup or lock release.
+                    committed = True
+                    setattr(cfg, _STORAGE_REVISION_ATTR, committed_revision)
+                    _fsync_parent_directory(path)
+                finally:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+        except Exception as exc:
+            if committed:
+                raise ConfigCommitError(
+                    "Configuration was replaced, but durability or cleanup could not be confirmed. "
+                    "Reconcile the committed file before continuing."
+                ) from exc
+            raise
 
 
 @contextmanager
@@ -124,9 +155,10 @@ def _config_thread_lock(path: Path) -> Iterator[None]:
 
 
 def _config_file_revision(path: Path) -> str:
-    if not path.exists():
+    raw = _read_config_bytes(path)
+    if raw is None:
         return _MISSING_REVISION
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
 
 
 @contextmanager

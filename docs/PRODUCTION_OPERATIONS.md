@@ -26,6 +26,13 @@ regional restrictions.
   JSON, text, and static response at 16 MiB before sending response headers.
   The systemd unit retains its 30-second stop deadline as a final process-level
   safeguard.
+- A broken pipe, reset or abort while writing a response is recorded once as
+  `outcome=client_disconnected`, with local log/metric status `499` and the
+  attempted HTTP status in `response_status`. No 499 or replacement 500 response
+  is sent to the closed connection. The request still releases its worker and
+  mutation admission; a committed mutation is not undone. Retry supported
+  durable creates with the same idempotency key to reconcile uncertain delivery.
+  Upstream connection failures remain backend errors, not client disconnects.
 - When an API token is configured, the server permits ten failed token attempts
   per client per minute, then returns `429` with `Retry-After`. A valid token
   immediately clears that client record. This is a backstop for the proxy's
@@ -45,16 +52,55 @@ regional restrictions.
   returns `409 config_conflict`. Reload state before retrying. Keep the lock
   file on the same local filesystem as `config.json`, and do not run multiple
   active instances against network filesystems with unreliable advisory locks.
+- Desktop settings, market selection, wallet/follow changes, and manual
+  alert/history edits are persisted as detached field replacements before
+  publication to the shared runtime configuration. Failed pre-commit saves do
+  not install their settings or report successful actions. The config root and
+  unchanged journal objects retain their identities for background workers.
+- Configuration replacement is the commit point. `ConfigCommitError` means the
+  replacement completed but subsequent synchronization or cleanup failed; the
+  saved revision remains attached to the candidate. Do not treat that error as
+  proof that nothing was written, or blindly restore the previous snapshot.
+- After a desktop persistence failure or stale-writer conflict, configuration
+  writes, alert evaluation and copy activity are paused for that process. A
+  post-commit candidate remains reflected in memory, but execution stays paused;
+  committed copy checkpoints/dispatch intent are not rolled back in memory.
+  Fix permissions, capacity or writer conflicts, inspect the durable settings
+  and any ambiguous order journal, then restart to reload verified state. Do
+  not reset journals or assume restarting by itself resolves the underlying
+  error. A later unrelated desktop action cannot save a previously rejected
+  setting or automatically clear the pause.
 - Live-validation report, decision, and promotion-snapshot stores use the same
   single-writer/atomic-replace discipline. Existing malformed JSON is preserved
   and rejected rather than silently replaced. Restore a reviewed backup before
   resuming evidence collection after a store-read error.
+- Atomic publication of config, analytics cache, live evidence and text/CSV
+  exports retries Windows access/sharing/lock replacement errors (5, 32, 33)
+  at most ten times, with less than 1.5 seconds of total retry sleep. A held
+  reader or file scanner can temporarily deny replacement. Persistent denial
+  is still reported, and the previous file is not deleted to force success;
+  resolve access/ownership before retrying. Other errors are not retried.
+- Cache read failures are reported without treating an unreadable store as
+  missing or corrupt. Restore access and retry; do not delete a valid cache
+  to clear a read error. Malformed UTF-8/JSON or invalid entry containers are
+  quarantined with their original bytes before an empty cache can be created.
+  Quarantine rename or directory-sync failures are also reported, not hidden
+  as successful recovery. Inspect the active and `.corrupt-*` files before
+  retrying after such a failure.
 - Adapter egress defaults to reviewed HTTPS/WSS endpoints, refuses redirects,
   and rejects private, loopback, link-local, reserved, or mixed-public/private
   DNS destinations. If a reviewed local integration genuinely needs a private
   origin, list its exact scheme, host, and port in
   `MARKET_SENTINEL_OUTBOUND_PRIVATE_ORIGINS`; never use wildcards, CIDRs, or a
   public deployment's browser/API settings endpoint to change it.
+- Managed direct Polymarket WebSocket connections pin the current validated
+  DNS addresses, retain the origin hostname for TLS/SNI and HTTP Host, and
+  require a verified TLS connection and a completed 101 upgrade. DNS, TCP,
+  TLS and HTTP upgrade share one connection deadline. Worker stop events
+  cancel pending direct connections; subscriptions are not sent before upgrade.
+  Successful connections disarm their setup deadline so a later timeout cannot
+  close an established stream. Configured proxies remain honored and require
+  their own connect-time egress and deadline enforcement.
 - Managed Polymarket WebSocket connections reject any frame or complete
   fragmented message larger than 1 MiB. The frame-length check runs before
   `websocket-client` reads the declared payload, and the continuation check
@@ -77,12 +123,20 @@ regional restrictions.
 
 URL validation resolves a configured hostname immediately before a managed
 HTTP or WebSocket request and rejects every non-global answer unless the exact
-origin is explicitly allowed. It is still a preflight: `requests` and
-`websocket-client` perform their own name resolution while opening the socket,
-so the application does not pin the validated address to that connection. TLS
-hostname verification, disabled redirects, and immutable HTTP endpoint settings
-reduce exposure, but they do not eliminate a DNS-rebinding or resolver-race
-window.
+origin is explicitly allowed. The shared adapter runtime pins those addresses
+into direct HTTP connections while preserving the origin hostname for TLS.
+The Polymarket HTTP client uses the same managed direct transport, with one
+owned session spanning each bounded retry/body-read operation. Pools include
+the validated address set in their identity, so a DNS change cannot reuse a
+pool pinned to retired addresses. Redirect responses are closed before
+Requests can eagerly consume their bodies while preparing a next request.
+Managed direct WebSockets likewise resolve inside their connection deadline
+and connect only to that validated address set, without a second hostname lookup.
+Configured proxy and injected SDK/factory paths still need their own connect-time
+enforcement; do not infer uniform pinning across all transports from direct
+HTTP/WebSocket coverage.
+TLS hostname verification, disabled redirects, and immutable endpoint settings
+reduce exposure but do not remove every validation-to-connect race.
 
 A production host must therefore enforce the destination again at connect time.
 Use a service/cgroup-aware egress firewall or a forward proxy that meets all of
@@ -109,7 +163,49 @@ with controlled hostnames that return public, mixed public/private, and rebound
 private answers; all but the stable public case must fail without reaching the
 destination.
 
+### HTTP deadlines and scan cancellation
+
+Managed HTTP requests use a monotonic budget shared by DNS admission,
+rate-limiter waits, response headers/body reads, and internal retry backoff.
+The configured `timeout` is the budget for one HTTP operation, including its
+internal retries; it is not the duration limit for an entire unlimited scan.
+Response byte limits remain independent. Socket ownership lasts through
+HTTP/1.0 and `Connection: close` bodies, and a completed request disarms its
+pooled socket before another request can borrow it.
+
+Leaderboard CLI runs handle SIGINT/SIGTERM by requesting cancellation. During
+page/MDD work, cancelled requests are not retried or recorded as valid empty
+history. Committed contiguous SQLite pages and completed MDD remain resumable;
+an interrupted fetch or calculation does not overwrite the previous export.
+Exit status is 130 for SIGINT and 143 for SIGTERM. Resume the same state database
+with `--resume`, or inspect it with `polymarket-leaderboard-status`. Windows
+service termination and forced process kills are not equivalent to POSIX
+SIGTERM; abrupt-exit durability remains a separate contract.
+
+An OS DNS lookup cannot be forcibly interrupted by Python. At most 16 daemon
+DNS helpers may remain outstanding; expired lookups cannot initiate managed
+direct HTTP/WebSocket work.
+Cancellation callbacks must be fast, side-effect-free and thread-safe. Raw
+connect/TLS setup can take up to the remaining transport timeout to unwind;
+body reads and retry/rate-limiter waits are actively interrupted. Custom
+injected transports, SOCKS transports and venue SDKs do not acquire these
+guarantees merely by accepting a timeout argument. Configured WebSocket proxies
+retain the library's connection route and do not inherit direct socket guards;
+proxy deadline/egress enforcement and host acceptance above remain required.
+
 ### Durable state boundary
+
+Leaderboard scan writers require SQLite WAL with `synchronous=FULL`. Each
+page/MDD transaction requests a storage sync before reporting success, rather
+than deferring it until a checkpoint. `fullfsync=ON` additionally requests
+macOS F_FULLFSYNC where supported. Every writer connection reapplies and checks
+these settings before schema migration or scan writes; an unavailable setting
+fails closed. Read-only status/export connections do not change database mode.
+This can reduce write throughput compared with the previous NORMAL setting.
+Use a local filesystem with working locks and reliable storage sync; SQLite
+settings and process-crash tests cannot certify a VPS provider's power-loss
+behavior. Keep backups and perform real-host recovery drills. See the
+[SQLite sync contract](https://www.sqlite.org/pragma.html#pragma_synchronous).
 
 The bundled production environment pins every non-configuration durable store
 below `/var/lib/market-sentinel`:
@@ -135,6 +231,62 @@ deployment verifier; the verifier inspects the running process environment and
 fails if its effective paths or backup source differ from this boundary.
 
 ### Durable-mutation idempotency window
+
+Configuration loading rejects duplicate JSON keys, non-finite numbers,
+malformed record collections and market/safety-setting containers. Existing
+journals above the supported capacity are rejected unchanged, not trimmed on
+startup: sorting away an older pending live operation would erase its replay
+protection. Normal append-time retention still removes completed/rejected
+records while preserving unresolved ones. Valid older configurations may omit
+the newer journal collections. Saving validates the snapshot before publication
+so malformed or non-finite state cannot replace a valid configuration.
+An inaccessible, unreadable, symlinked or special-file configuration is not an
+empty store. Both loading and the save-time revision guard distinguish a truly
+missing directory entry from an inspection/read error. This avoids relying on
+[`Path.exists()`](https://docs.python.org/3/library/pathlib.html#pathlib.Path.exists),
+which can return false for inaccessible files.
+
+Operational flags in stored configuration must be JSON booleans (`true` or
+`false`), not quoted strings, numbers or nulls. Copy percentage/scale, slippage,
+positive per-trade caps and integer conflict windows are validated on load and
+before save. Valid finite legacy numeric strings remain accepted, but invalid
+values are not clamped, truncated or replaced with a 100% copy allocation.
+When both percentage and scale are present, they must agree within serialization
+rounding. Existing invalid settings need explicit operator correction.
+
+The HTTP API and CLI validate the original mutation values with the same model
+rules before changing settings. Send actual JSON booleans, not `"true"` or
+`"false"`; ordinary CLI `--enabled`/`--no-live` flags remain supported. Integer
+conflict windows must not contain fractional values. If both percentage and
+scale (or multiple percentage aliases) are supplied, they must agree; likewise
+top-level and nested market safety controls must not contradict each other.
+An empty wallet string or empty wallet list intentionally clears the follows;
+nulls and non-string members are invalid. If both follow aliases are supplied,
+the single identity must match the first normalized list identity.
+
+Shared market safety flags and positive caps are also checked when loading and
+saving configuration. A blank string or null explicitly unsets an optional
+market cap; a supplied nonblank cap must be positive and finite. Numeric
+booleans, NaN and infinity are rejected. Desktop copy settings are validated
+before being installed in memory. HTTP/CLI JSON objects, including `--json
+@file` and structured `--setting` values, reject duplicate keys and non-finite
+JSON numbers rather than silently taking the last value. Invalid settings must
+be corrected explicitly; the application does not rewrite or reset damaged
+configuration to make it load.
+
+Mutation journals require stable record IDs, SHA-256 key/request hashes,
+mutation method/path and an explicit boolean live classification. Copy outboxes
+require stable record, market, watch and activity identities. Duplicate record
+IDs, duplicate journal client keys or duplicate outbox signal identities fail
+closed. Malformed replay metadata and completed records without a response
+status are rejected. Missing/unknown dispatch states remain ambiguous, never
+automatically pending. Valid legacy configurations can omit journal collections,
+but incomplete records inside a present journal are not reconstructed with new
+identities. Restore acceptance uses these same configuration rules.
+
+On a configuration-integrity error, preserve the original bytes and reconcile
+against a verified backup and venue history. Do not replace the configuration
+with empty defaults or delete its trading journals to get the process started.
 
 The live-report, decision, and promotion-snapshot create routes use an opaque
 `Idempotency-Key` (1-128 visible ASCII characters, with no whitespace). Only a
@@ -275,7 +427,15 @@ cryptographically verified, restorable archive/manifest pairs. An orphan left
 by an interrupted publication and an invalid pair are preserved for operator
 inspection, do not consume a retention slot, and cannot evict a valid backup.
 SQLite state databases are captured with SQLite's online backup API instead of
-copying WAL, shared-memory, or rollback-journal sidecar files. Other regular
+copying WAL, shared-memory, or rollback-journal sidecar files. A read transaction
+pins each database snapshot before its page-count/size preflight, so concurrent
+WAL commits cannot expand the copy beyond its accepted payload budget. Oversized
+databases are rejected before a staged database is created. `--sqlite-timeout`
+sets the per-database lock/copy budget (30 seconds by default). Copying checks
+that budget after each 64-page step; this is not an interrupt for a blocked
+kernel/filesystem call. The systemd unit's five-minute process timeout remains
+the final service-level bound. Failed or timed-out copies publish no new pair
+and do not prune prior valid backups. Other regular
 files are copied to a private stable snapshot and rejected if they change while
 being copied. Creation enforces the same member, payload, compressed-archive,
 and bounded tar-overhead limits as verification; it verifies the staged pair
@@ -374,6 +534,24 @@ loopback-only staging host, omit `--public-url`; the script will still validate
 the local service and timer, but retain all three expected identity arguments for the
 deployed release.
 
+Production collection also restores the newest verified backup into a private
+temporary directory and boots an isolated read-only application from that copy.
+The backed-up `config.json` must exist and load without dropping durable journal
+records. Known JSON stores must pass the application's readiness checks, and
+restored SQLite files must pass integrity and foreign-key checks. The probe
+requires successful health and state responses, tests that all mutation methods
+are rejected, and compares file hashes before and after startup. Its subprocess
+has a 60-second budget, no inherited credentials or proxies, redirected durable
+store paths, and backend socket/DNS connections denied. It never promotes the
+restored files over running production state.
+
+The resulting restore evidence includes the application version, source and
+frontend fingerprints. Inventory-only restore reports are no longer accepted by
+the reviewer or readiness scorer. This isolated probe is not evidence of
+off-host backup recovery, service-account permissions, full business-workflow
+recovery, measured RPO/RTO, or an actual systemd failover; those operational drills
+still need to be performed on the deployment host.
+
 Review the raw collector output directly; do not translate its results into a
 hand-written readiness manifest. The reviewer recomputes the raw file digest,
 requires a fresh production-mode collection with the exact systemd and public
@@ -424,6 +602,34 @@ not production-host evidence.
   loopback every minute using `scripts/verify_service_health.py`. Ship failures
   of `market-sentinel-health.service` from journald to the selected monitoring
   system and alert after two consecutive failed executions.
+  Health, metrics, and authentication probes reject redirects; a response from
+  another endpoint cannot prove the requested endpoint is healthy or protected.
+  Health and metrics bodies are capped at 1 MiB, including bodies without a
+  Content-Length. Public HTTPS health evidence uses the same version and explicit
+  readiness checks as loopback health. Each probe request owns one monotonic
+  network deadline through DNS, TCP, TLS, response headers and body consumption;
+  a slow peer cannot restart the budget by sending occasional bytes. The public
+  origin's preliminary DNS check is bounded separately by the same `--timeout`.
+  Multiple public probes and health retries have separate budgets, so this is
+  not a deadline for the entire collection or retry loop. The supplied health
+  and web-startup units additionally enforce 30-second and 60-second systemd
+  limits. Use an external process deadline for standalone multi-probe runs.
+  Probe DNS uses the bounded helper pool described above; expired lookups cannot
+  initiate a later connection. Probe responses must be closed after consumption
+  so their socket guards and deadline controller can be released.
+  Operational probes are direct connections and ignore inherited HTTP/SOCKS
+  proxy variables. Public probes require HTTPS and validate every DNS answer
+  immediately before connecting to an approved numeric address, retaining the
+  original hostname for TLS certificate verification, SNI and HTTP Host. Literal
+  origins use the same public-unicast policy; multicast and reserved addresses
+  are rejected. Loopback health/metrics probes intentionally permit local targets.
+  These probe guarantees do not extend to separately injected venue SDKs/proxies.
+  Deployment origins share one strict HTTPS parser across collection, evidence
+  generation, review, and scoring. It preserves bracketed IPv6 addresses,
+  canonicalizes DNS names, and rejects userinfo, malformed ports, controls, and
+  non-origin paths or delimiters. All collector hostname lookups must return
+  exclusively public addresses, including fixture-looking names; tests supply
+  their own DNS fixtures rather than bypassing the production validator.
 - Startup readiness: run `market-sentinel doctor --strict` against the service
   configuration and production frontend before each deployment and after each
   restore. It fails on corrupt configuration, unwritable storage, or missing
@@ -516,9 +722,24 @@ where authenticated CLOB signing is explicitly approved.
 
 ### Funded production acceptance
 
-Polymarket funded production acceptance is currently unavailable because live
-mutations are blocked pending the reviewed CLOB V2 client/signing migration.
-After that migration, acceptance would still require a current credentialed-read
-report and a deliberately approved, capped order/cancel report with
-post-cancel verification. Dry-run, browser-smoke, readiness-only, and legacy
-V1 reports are not substitutes.
+The CLOB V2 wrapper and bounded audit's recovery-journal path are implemented,
+but both normal product execution and bounded funded-audit gates remain false.
+The bounded audit needs exact-revision implementation/recovery review and
+explicit operator approval before it can run. Normal product execution still
+requires current credentialed and funded order/cancel acceptance. Do not enable
+either gate merely because offline tests pass.
+
+The journal requires a private POSIX directory; Windows funded journals remain
+unavailable because the collector cannot verify an owner-only directory ACL.
+A prior journal is read with a 64 KiB limit and strict JSON decoding. Duplicate
+keys, non-finite numbers, incomplete identity, unsupported schema versions,
+unresolved state, or contradictory cancellation/zero-fill evidence block a new
+audit without moving or overwriting the prior file. A valid resolved journal
+is archived before the next audit. New writes are atomic and size-limited;
+failed final persistence cannot establish resolution. These file checks do not
+authenticate venue evidence or replace manual reconciliation after an ambiguous
+outcome, a stale lock, or a storage failure.
+
+Actual acceptance requires a current credentialed-read report and a deliberately
+approved, capped order/cancel report with post-cancel verification. Dry-run,
+browser-smoke, readiness-only, and legacy V1 reports are not substitutes.

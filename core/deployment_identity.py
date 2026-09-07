@@ -1,17 +1,55 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_REVISION_ENV = "MARKET_SENTINEL_SOURCE_REVISION"
 FRONTEND_SHA256_ENV = "MARKET_SENTINEL_FRONTEND_SHA256"
+
+
+def canonical_https_origin(value: str) -> str:
+    """Normalize origin syntax consistently; this does not authorize DNS targets."""
+    if not isinstance(value, str) or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("origin must be an origin-only HTTPS URL without control characters")
+    value = value.strip()
+    if any(char.isspace() for char in value) or "?" in value or "#" in value or "\\" in value:
+        raise ValueError("origin must be an origin-only HTTPS URL")
+    parsed = urlsplit(value)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.path not in {"", "/"}
+            or parsed.username is not None or parsed.password is not None):
+        raise ValueError("origin must be an origin-only HTTPS URL")
+    port = parsed.port
+    if port == 0 or parsed.netloc.endswith(":"):
+        raise ValueError("origin port must be between 1 and 65535")
+    host = parsed.hostname
+    if "%" in host:
+        raise ValueError("origin hostname must not contain escapes or an IPv6 scope")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if parsed.netloc.startswith("["):
+            raise ValueError("origin IP literal is unsupported") from None
+        host = host.encode("idna").decode("ascii").lower()
+        if host.endswith("."):
+            host = host[:-1]
+        if len(host) > 253 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in host.split(".")
+        ):
+            raise ValueError("origin hostname is invalid") from None
+    else:
+        host = f"[{address.compressed}]" if address.version == 6 else str(address)
+    suffix = f":{port}" if port is not None and port != 443 else ""
+    return f"https://{host}{suffix}"
 
 
 def safe_git_command(root: Path, *arguments: str) -> list[str]:

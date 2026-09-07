@@ -99,6 +99,8 @@ import {
 import type { MarketPatch } from "./api";
 import { formatAuditValue, formatNumber } from "./formatting";
 import { LivePreflightAudit } from "./live-preflight-audit";
+import { MddHistoryCoverage } from "./mdd-history-coverage";
+import { POLYMARKET_LEADERBOARD_CATEGORIES } from "./types";
 import type {
   AlertForm,
   AlertsPayload,
@@ -682,6 +684,7 @@ function defaultLeaderboardFilters(): PolymarketLeaderboardFilters {
   return {
     sort: "roi_pct",
     direction: "DESC",
+    category: "OVERALL",
     limit: "100",
     scan_limit: "500",
     compute_mdd: false,
@@ -841,6 +844,26 @@ export default function App() {
   useEffect(() => {
     void loadAll();
   }, []);
+
+  useEffect(() => {
+    if (config?.theme) {
+      document.documentElement.dataset.theme = config.theme;
+    }
+  }, [config?.theme]);
+
+  useEffect(() => {
+    const restoreTab = () => setTab(initialTabFromUrl());
+    window.addEventListener("popstate", restoreTab);
+    return () => window.removeEventListener("popstate", restoreTab);
+  }, []);
+
+  function navigateTab(next: Tab) {
+    if (next === tab) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", next);
+    window.history.pushState(null, "", url);
+    setTab(next);
+  }
 
   useEffect(() => {
     if (config?.selected_market_id) {
@@ -1952,6 +1975,10 @@ export default function App() {
         const payload = await deleteWallet(wallet.id);
         setWallets(payload);
         setWalletMessage("Wallet watch deleted.");
+        if (editingWalletId === wallet.id) {
+          setEditingWalletId(null);
+          setWalletForm(emptyWalletForm());
+        }
       } else if (action === "poll") {
         const payload = await pollWallets();
         setWallets(payload.wallets);
@@ -2371,28 +2398,28 @@ export default function App() {
           </div>
         </div>
         <nav className="nav-list" aria-label="Primary">
-          <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>
+          <button className={tab === "overview" ? "active" : ""} aria-current={tab === "overview" ? "page" : undefined} onClick={() => navigateTab("overview")}>
             <BarChart3 size={18} /> Overview
           </button>
-          <button className={tab === "markets" ? "active" : ""} onClick={() => setTab("markets")}>
+          <button className={tab === "markets" ? "active" : ""} aria-current={tab === "markets" ? "page" : undefined} onClick={() => navigateTab("markets")}>
             <SlidersHorizontal size={18} /> Markets
           </button>
-          <button className={tab === "analytics" ? "active" : ""} onClick={() => setTab("analytics")}>
+          <button className={tab === "analytics" ? "active" : ""} aria-current={tab === "analytics" ? "page" : undefined} onClick={() => navigateTab("analytics")}>
             <Trophy size={18} /> Analytics
           </button>
-          <button className={tab === "live" ? "active" : ""} onClick={() => setTab("live")}>
+          <button className={tab === "live" ? "active" : ""} aria-current={tab === "live" ? "page" : undefined} onClick={() => navigateTab("live")}>
             <ShieldCheck size={18} /> Live Safety
           </button>
-          <button className={tab === "alerts" ? "active" : ""} onClick={() => setTab("alerts")}>
+          <button className={tab === "alerts" ? "active" : ""} aria-current={tab === "alerts" ? "page" : undefined} onClick={() => navigateTab("alerts")}>
             <Bell size={18} /> Alerts
           </button>
-          <button className={tab === "wallets" ? "active" : ""} onClick={() => setTab("wallets")}>
+          <button className={tab === "wallets" ? "active" : ""} aria-current={tab === "wallets" ? "page" : undefined} onClick={() => navigateTab("wallets")}>
             <Wallet size={18} /> Wallets
           </button>
-          <button className={tab === "paper" ? "active" : ""} onClick={() => setTab("paper")}>
+          <button className={tab === "paper" ? "active" : ""} aria-current={tab === "paper" ? "page" : undefined} onClick={() => navigateTab("paper")}>
             <Activity size={18} /> Paper
           </button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
+          <button className={tab === "settings" ? "active" : ""} aria-current={tab === "settings" ? "page" : undefined} onClick={() => navigateTab("settings")}>
             <Settings size={18} /> Settings
           </button>
         </nav>
@@ -2417,7 +2444,7 @@ export default function App() {
           </button>
         </header>
 
-        {error ? <div className="error-banner">{error}</div> : null}
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
 
         {tab === "overview" ? (
           <OverviewView alerts={alerts} config={config} copy={copyState} health={health} markets={markets} paper={paper} wallets={wallets} loading={loading} />
@@ -2737,12 +2764,13 @@ function MarketsView({
         <label className="search-box">
           <Search size={17} />
           <input
+            aria-label="Search markets"
             value={marketQuery}
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder="Search markets, ids, capabilities"
           />
         </label>
-        <select value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
+        <select aria-label="Selected market" value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
           {(markets?.markets ?? []).map((market) => (
             <option key={market.market_id} value={market.market_id}>
               {market.display_name}
@@ -5178,7 +5206,7 @@ function PolymarketAnalyticsView({
               checked={mddForm.include_accounting_snapshot}
               onChange={(event) => updateMddForm("include_accounting_snapshot", event.target.checked)}
             />
-            <span>Accounting base</span>
+            <span>Accounting snapshot</span>
           </label>
           <label className="check-row">
             <input type="checkbox" checked={mddForm.persist_cache} onChange={(event) => updateMddForm("persist_cache", event.target.checked)} />
@@ -5191,11 +5219,12 @@ function PolymarketAnalyticsView({
         {mddPayload ? (
           <>
             <div className="metrics-grid four">
-              <Metric label="MDD USD" value={formatUsd(mddPayload.mdd_usd)} tone={mddPayload.mdd_available ? "warn" : "neutral"} />
-              <Metric label="MDD %" value={formatPercent(mddPayload.mdd_pct)} />
+              <Metric label="Observed MDD USD" value={formatUsd(mddPayload.mdd_usd)} tone={mddPayload.mdd_available ? "warn" : "neutral"} />
+              <Metric label="Observed MDD %" value={formatPercent(mddPayload.mdd_pct)} />
               <Metric label="Peak" value={formatUsd(mddPayload.peak_value)} />
               <Metric label="Trough" value={formatUsd(mddPayload.trough_value)} />
             </div>
+            <MddHistoryCoverage payload={mddPayload} />
             <div className="audit-summary">
               <div>
                 <span>Method</span>
@@ -5365,13 +5394,19 @@ function PolymarketAnalyticsView({
         </div>
         <form className="analytics-form leaderboard-form" onSubmit={onLeaderboardRefresh}>
           <label>
+            <span>Category</span>
+            <select value={filters.category} onChange={(event) => updateFilter("category", event.target.value as PolymarketLeaderboardFilters["category"])}>
+              {POLYMARKET_LEADERBOARD_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+          </label>
+          <label>
             <span>Sort</span>
             <select value={filters.sort} onChange={(event) => updateFilter("sort", event.target.value as PolymarketLeaderboardSort)}>
-              <option value="roi_pct">ROI %</option>
+              <option value="roi_pct">PnL/volume %</option>
               <option value="pnl_usd">PnL USD</option>
               <option value="volume_usd">Volume USD</option>
-              <option value="mdd_pct">MDD %</option>
-              <option value="mdd_usd">MDD USD</option>
+              <option value="mdd_pct">Observed MDD %</option>
+              <option value="mdd_usd">Observed MDD USD</option>
             </select>
           </label>
           <label>
@@ -5506,7 +5541,7 @@ function PolymarketAnalyticsView({
               checked={filters.mdd_include_accounting}
               onChange={(event) => updateFilter("mdd_include_accounting", event.target.checked)}
             />
-            <span>Accounting base</span>
+            <span>Accounting snapshot</span>
           </label>
           <label className="check-row">
             <input
@@ -5537,11 +5572,11 @@ function PolymarketAnalyticsView({
             <input inputMode="decimal" value={filters.max_volume_usd} onChange={(event) => updateFilter("max_volume_usd", event.target.value)} />
           </label>
           <label>
-            <span>Min ROI %</span>
+            <span>Min PnL/volume %</span>
             <input inputMode="decimal" value={filters.min_roi_pct} onChange={(event) => updateFilter("min_roi_pct", event.target.value)} />
           </label>
           <label>
-            <span>Max ROI %</span>
+            <span>Max PnL/volume %</span>
             <input inputMode="decimal" value={filters.max_roi_pct} onChange={(event) => updateFilter("max_roi_pct", event.target.value)} />
           </label>
           <label>
@@ -5587,10 +5622,10 @@ function PolymarketAnalyticsView({
                     <th>User</th>
                     <th className="numeric">PnL</th>
                     <th className="numeric">Volume</th>
-                    <th className="numeric">ROI</th>
+                    <th className="numeric" title="PnL / trading volume * 100; not investment ROI">PnL/volume %</th>
                     <th className="numeric">Trades</th>
-                    <th className="numeric">MDD USD</th>
-                    <th className="numeric">MDD %</th>
+                    <th className="numeric">Observed MDD USD</th>
+                    <th className="numeric">Observed MDD %</th>
                     <th>MDD source</th>
                     <th>Audit</th>
                   </tr>
@@ -5610,6 +5645,7 @@ function PolymarketAnalyticsView({
                       <td className="numeric">{row.mdd_available ? formatUsd(row.mdd_usd) : "-"}</td>
                       <td className="numeric">{row.mdd_available ? formatPercent(row.mdd_pct) : "-"}</td>
                       <td>
+                        <small>{(row.mdd_history_status ?? "history unverified").replaceAll("_", " ")}</small>
                         {row.mdd_available
                           ? row.mdd_accounting_status ?? row.mdd_mark_replay_status ?? (row.mdd_method?.includes("mark") ? "mark replay" : "fast")
                           : "-"}
@@ -5657,11 +5693,12 @@ function PolymarketAnalyticsView({
             {auditCacheKey ? <StatusPill tone="good">cached</StatusPill> : <StatusPill>direct</StatusPill>}
           </div>
           <div className="metrics-grid four">
-            <Metric label="MDD USD" value={formatUsd(auditPayload.mdd_usd)} tone={auditPayload.mdd_available ? "warn" : "neutral"} />
-            <Metric label="MDD %" value={formatPercent(auditPayload.mdd_pct)} />
+            <Metric label="Observed MDD USD" value={formatUsd(auditPayload.mdd_usd)} tone={auditPayload.mdd_available ? "warn" : "neutral"} />
+            <Metric label="Observed MDD %" value={formatPercent(auditPayload.mdd_pct)} />
             <Metric label="Equity base" value={formatUsd(auditPayload.equity_base_usd)} />
             <Metric label="Points" value={auditPayload.points_total ?? auditPayload.points?.length ?? 0} />
           </div>
+          <MddHistoryCoverage payload={auditPayload} />
           <div className="audit-summary">
             <div>
               <span>Wallet</span>
@@ -5855,7 +5892,7 @@ function LiveSafetyView({
             <ShieldCheck size={18} />
             <h2>Gate Controls</h2>
           </div>
-          <select value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
+          <select aria-label="Selected market" value={selectedMarketId} onChange={(event) => onSelectedMarketChange(event.target.value)}>
             {(markets?.markets ?? []).map((market) => (
               <option key={market.market_id} value={market.market_id}>
                 {market.display_name}
@@ -6583,7 +6620,7 @@ function PromotionProposalPreview({
           <p>Read-only manual patch proposal from accepted ledger decisions.</p>
         </div>
         <div className="button-row compact">
-          <select value={targetTier} onChange={(event) => onTargetTierChange(event.target.value)}>
+          <select aria-label="Promotion target tier" value={targetTier} onChange={(event) => onTargetTierChange(event.target.value)}>
             <option value="">all target tiers</option>
             <option value="credential_live_verified">credential_live_verified</option>
             <option value="funded_live_verified">funded_live_verified</option>
@@ -7104,7 +7141,7 @@ function AlertsView({
           </button>
         </div>
       </form>
-      {message ? <div className="info-banner">{message}</div> : null}
+      {message ? <div className="info-banner" role="status">{message}</div> : null}
       <div className="metrics-grid four">
         <Metric label="Alerts" value={alerts?.counts.total ?? 0} />
         <Metric label="Enabled" value={alerts?.counts.enabled ?? 0} tone="good" />
@@ -7286,7 +7323,7 @@ function WalletsCopyView({
             </button>
           </div>
         </div>
-        {message ? <div className="info-banner">{message}</div> : null}
+        {message ? <div className="info-banner" role="status">{message}</div> : null}
         <div className="table-wrap">
           <table>
             <thead>

@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -33,13 +34,13 @@ from scripts.verify_production_deployment import (
     check_source_revision,
     check_systemd,
     _fsync_parent_directory,
-    _RejectRedirects,
     _validated_public_origin,
     build_evidence,
     source_identity,
     main,
     write_evidence,
 )
+from scripts.verify_service_health import _RejectRedirects
 
 TEST_SOURCE_REVISION = "a" * 40
 TEST_FRONTEND_SHA256 = "b" * 64
@@ -58,8 +59,8 @@ class _Response:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: int = -1) -> bytes:
+        return self._body if size < 0 else self._body[:size]
 
 
 def _unauthorized_errors(*, bodies: list[io.BytesIO] | None = None) -> list[HTTPError]:
@@ -78,6 +79,28 @@ def _unauthorized_errors(*, bodies: list[io.BytesIO] | None = None) -> list[HTTP
 
 
 class ProductionDeploymentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        resolver = socket.getaddrinfo
+
+        def resolve_fixture(host, port, *args, **kwargs):
+            if host == "analytics.example.com":
+                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("1.1.1.1", port))]
+            return resolver(host, port, *args, **kwargs)
+
+        dns = patch("scripts.verify_production_deployment.socket.getaddrinfo", side_effect=resolve_fixture)
+        dns.start()
+        self.addCleanup(dns.stop)
+
+    def test_restore_drill_rejects_checksummed_but_unreadable_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "state"
+            source.mkdir()
+            (source / "config.json").write_text('{"markets":', encoding="utf-8")
+            create_backup(source, root / "backups")
+            result = deployment.check_restore_drill(root / "backups")
+        self.assertEqual(result["status"], "fail", result)
+
     def test_evidence_includes_a_versioned_utc_collection_timestamp(self) -> None:
         evidence = build_evidence(
             [{"name": "loopback_health", "status": "pass"}],
@@ -193,6 +216,10 @@ class ProductionDeploymentTests(unittest.TestCase):
             tracked = root / "web_api.py"
             tracked.write_text("SAFE = True\n", encoding="utf-8")
             subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            # Automatic maintenance can outlive commit and race with fixture
+            # cleanup on newer Git versions. Keep this temporary repo synchronous.
+            for setting, value in (("maintenance.auto", "false"), ("gc.auto", "0")):
+                subprocess.run(["git", "config", "--local", setting, value], cwd=root, check=True)
             subprocess.run(["git", "add", "."], cwd=root, check=True)
             subprocess.run(
                 [
@@ -565,16 +592,18 @@ class ProductionDeploymentTests(unittest.TestCase):
             def __exit__(self, *args):
                 return None
 
-            def read(self):
-                return good_metrics.encode("utf-8")
+            def read(self, size=-1):
+                body = good_metrics.encode("utf-8")
+                return body if size < 0 else body[:size]
 
         with patch("scripts.verify_production_deployment.urlopen", return_value=MetricsResponse()):
             self.assertEqual(check_loopback_metrics("http://127.0.0.1:8765/metrics", "token", 1.0)["status"], "pass")
 
         missing_metric = good_metrics.replace("market_sentinel_http_requests_completed_total 1", "")
         class MissingMetricResponse(MetricsResponse):
-            def read(self):
-                return missing_metric.encode("utf-8")
+            def read(self, size=-1):
+                body = missing_metric.encode("utf-8")
+                return body if size < 0 else body[:size]
 
         with patch("scripts.verify_production_deployment.urlopen", return_value=MissingMetricResponse()):
             with self.assertRaisesRegex(RuntimeError, "missing required metrics"):
@@ -1142,7 +1171,7 @@ class ProductionDeploymentTests(unittest.TestCase):
                     "1.0.11",
                     "api-token",
                 )
-        with self.assertRaisesRegex(ValueError, "absolute https"):
+        with self.assertRaisesRegex(ValueError, "origin-only HTTPS"):
             check_public_proxy("http://analytics.example.com", "", "", 1.0)
 
     def test_public_proxy_checks_static_read_metrics_state_and_mutation_routes(self) -> None:
@@ -1160,7 +1189,8 @@ class ProductionDeploymentTests(unittest.TestCase):
         calls: list[tuple[str, str, bytes | None]] = []
         errors = _unauthorized_errors()
 
-        def urlopen(request, timeout):
+        def urlopen(request, timeout, *, public_only):
+            self.assertTrue(public_only)
             calls.append((request.get_method(), request.full_url, request.data))
             if errors:
                 raise errors.pop(0)
@@ -1246,15 +1276,17 @@ class ProductionDeploymentTests(unittest.TestCase):
             "https://markets.example.net/api/health",
             headers={"Authorization": "Basic secret"},
         )
+        response = io.BytesIO()
         with self.assertRaisesRegex(RuntimeError, "redirects are forbidden"):
             _RejectRedirects().redirect_request(
                 request,
-                None,
+                response,
                 302,
                 "Found",
                 {},
                 "https://attacker.example/api/health",
             )
+        self.assertTrue(response.closed)
 
     def test_private_loopback_and_link_local_public_origins_are_rejected(self) -> None:
         for origin in ("https://127.0.0.1", "https://10.0.0.4", "https://169.254.1.2", "https://[::1]"):

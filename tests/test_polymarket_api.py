@@ -874,7 +874,8 @@ store_live_validation_report(
             cache_path = Path(tmp) / "cache-directory"
             cache_path.mkdir()
 
-            self.assertEqual(load_analytics_cache(cache_path)["entries"], {})
+            with self.assertRaises(OSError):
+                load_analytics_cache(cache_path)
             self.assertTrue(cache_path.is_dir())
             self.assertFalse(list(cache_path.parent.glob("cache-directory.corrupt-*")))
 
@@ -1029,12 +1030,11 @@ store_live_validation_report(
         self.assertEqual(params["category"], "OVERALL")
         self.assertEqual(mock_get.call_args.kwargs["timeout"], 5)
 
-    def test_leaderboard_request_allows_deep_scan_offsets(self) -> None:
+    def test_leaderboard_request_rejects_offsets_beyond_the_documented_source(self) -> None:
         with patch(HTTP_REQUEST, return_value=FakeResponse({"data": []})) as mock_get:
-            data_api.get_leaderboard(offset=2_500_000)
-
-        params = mock_get.call_args.kwargs["params"]
-        self.assertEqual(params["offset"], 2_500_000)
+            with self.assertRaisesRegex(ValueError, "offset must not exceed 1000"):
+                data_api.get_leaderboard(offset=2_500_000)
+        mock_get.assert_not_called()
 
     def test_closed_positions_request_uses_public_profile_endpoint(self) -> None:
         payload = [{"asset": "token-yes", "realizedPnl": "-12", "timestamp": 10}]
@@ -1071,13 +1071,14 @@ store_live_validation_report(
         snapshot = parse_accounting_snapshot_zip(raw)
 
         self.assertEqual(snapshot["status"], "ok")
-        self.assertEqual(snapshot["equity"]["base_equity_usd"], 1200.0)
+        self.assertEqual(snapshot["equity"]["max_equity_usd"], 1200.0)
+        self.assertIsNone(snapshot["equity"]["base_equity_usd"])
         self.assertEqual(snapshot["equity"]["cash_flows"]["net_cash_flow_usd"], 900.0)
         self.assertEqual(snapshot["equity"]["cash_flows"]["cash_flow_gap_usd"], -1000.0)
         self.assertAlmostEqual(snapshot["positions"]["current_value_usd"], 350.0)
         self.assertAlmostEqual(snapshot["positions"]["realized_pnl_usd"], 7.0)
 
-    def test_accounting_snapshot_reconciliation_overrides_mdd_percentage_base(self) -> None:
+    def test_accounting_snapshot_reconciliation_preserves_mdd_percentage_base(self) -> None:
         snapshot = parse_accounting_snapshot_zip(
             self._accounting_zip(
                 "timestamp,equity\n10,1000\n20,1200\n",
@@ -1088,18 +1089,22 @@ store_live_validation_report(
             "mdd_usd": 50.0,
             "mdd_pct": 25.0,
             "peak_value": 100.0,
+            "points": [{"value": 100.0}, {"value": 50.0}],
+            "points_total": 2,
             "equity_base_usd": 100.0,
+            "equity_base_source": "user_supplied",
             "open_current_value": 40.0,
             "cumulative_realized_pnl": 50.0,
         }
 
         reconciled = reconcile_mdd_payload_with_accounting(payload, snapshot)
 
-        self.assertEqual(reconciled["equity_base_source"], "accounting_snapshot_max_equity")
-        self.assertEqual(reconciled["equity_base_usd"], 1200.0)
-        self.assertAlmostEqual(reconciled["mdd_pct"], 50.0 / 1300.0 * 100.0)
+        self.assertEqual(reconciled["equity_base_source"], "user_supplied")
+        self.assertEqual(reconciled["equity_base_usd"], 100.0)
+        self.assertEqual(reconciled["mdd_pct"], 25.0)
+        self.assertEqual(reconciled["accounting_snapshot"]["equity"]["max_equity_usd"], 1200.0)
         self.assertEqual(reconciled["accounting_snapshot"]["reconciliation"]["status"], "reconciled")
-        self.assertTrue(reconciled["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
+        self.assertFalse(reconciled["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
 
     def test_clob_public_wrappers_cover_batch_and_history_endpoints(self) -> None:
         with patch(HTTP_REQUEST, return_value=FakeResponse([{"asset_id": "token-1"}])) as mock_post:
@@ -1250,7 +1255,7 @@ store_live_validation_report(
 
     def test_shared_client_retries_transient_public_reads_and_raises_rate_limit(self) -> None:
         with (
-            patch("polymarket.http_client.time.sleep") as mock_sleep,
+            patch("core.request_control.RequestControl.sleep") as mock_sleep,
             patch(
                 HTTP_REQUEST,
                 side_effect=[
@@ -1277,7 +1282,7 @@ store_live_validation_report(
         self.assertTrue(response.closed)
 
         with (
-            patch("polymarket.http_client.time.sleep"),
+            patch("core.request_control.RequestControl.sleep"),
             patch(
                 HTTP_REQUEST,
                 side_effect=[

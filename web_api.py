@@ -8,6 +8,7 @@ import io
 import importlib.metadata as importlib_metadata
 import ipaddress
 import json
+import math
 import mimetypes
 import os
 import posixpath
@@ -19,6 +20,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.request_control import RequestCancelled, cancellation_scope, request_scope
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +35,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 from core.models import (
     AppConfig,
     CopyTradeSettings,
+    MarketConfig,
     MutationJournalEntry,
     PaperTradeRecord,
     PriceAlert,
@@ -40,9 +43,12 @@ from core.models import (
     WalletWatch,
     bounded_mutation_result,
     MAX_MUTATION_RESULT_BYTES,
+    MARKET_SAFETY_BOOLEAN_FIELDS,
+    MARKET_SAFETY_LIMIT_FIELDS,
 )
 from core.config_security import assert_no_persisted_secrets, is_sensitive_display_key
 from core.deployment_identity import capture_runtime_identity
+from core.json_validation import loads_strict_json
 from core.storage import ConfigConflictError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
@@ -122,8 +128,13 @@ from polymarket.live_reports import (
     store_live_validation_report,
 )
 from polymarket.live_report_schema import LiveValidationReportSchemaError, parse_live_validation_report_json
+from polymarket.leaderboard import (
+    LEADERBOARD_MAX_OFFSET, PNL_VOLUME_BASIS, normalize_leaderboard_category,
+    performance_ratio_metadata, wallet_membership_fingerprint,
+)
 from polymarket.mdd import (
     DEFAULT_CACHE_TTL_SECONDS as POLYMARKET_MDD_CACHE_TTL_SECONDS,
+    MDD_CALCULATION_VERSION,
     MDD_MARK_REPLAY_ASSUMPTIONS,
     MDD_MARK_REPLAY_LIMITATIONS,
     MDD_ACCOUNTING_ASSUMPTIONS,
@@ -133,6 +144,7 @@ from polymarket.mdd import (
     MDD_PCT_BASIS_V2,
     MDD_V2_ASSUMPTIONS,
     MDD_V2_LIMITATIONS,
+    max_drawdown,
     polymarket_user_mdd_payload_mark_replay,
     polymarket_user_mdd_payload_v2,
 )
@@ -601,7 +613,7 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("JSON request body must be UTF-8.") from exc
-    data = json.loads(text)
+    data = loads_strict_json(text)
     if not isinstance(data, dict):
         raise ValueError("JSON request body must be an object.")
     return data
@@ -1123,11 +1135,13 @@ def optional_positive_float(raw: Any, label: str) -> Optional[float]:
         value = raw.strip()
         if value == "":
             return None
+    if type(value) not in (int, float, str):
+        raise ValueError(f"{label} must be blank or a positive finite number.")
     try:
         number = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{label} must be blank or a positive number.") from exc
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{label} must be blank or a positive number.")
     return float(number)
 
@@ -1905,25 +1919,13 @@ def apply_market_patch(
     if normalized not in cfg.markets:
         raise ValueError(f"Unknown market id: {normalized}")
     market_cfg = cfg.markets[normalized]
-    enabled = bool(payload["enabled"]) if "enabled" in payload else market_cfg.enabled
-    settings = dict(market_cfg.settings)
-    for key in ("live_trading_enabled", "live_trading_confirmed", "live_trading_kill_switch"):
-        if key in payload:
-            settings[key] = bool(payload[key])
-    if "live_trading_max_size" in payload:
-        max_size = optional_positive_float(payload["live_trading_max_size"], "Max order size")
-        if max_size is None:
-            settings.pop("live_trading_max_size", None)
-        else:
-            settings["live_trading_max_size"] = max_size
-    if "live_trading_max_notional" in payload:
-        max_notional = optional_positive_float(payload["live_trading_max_notional"], "Max notional")
-        if max_notional is None:
-            settings.pop("live_trading_max_notional", None)
-        else:
-            settings["live_trading_max_notional"] = max_notional
+    control_fields = (*MARKET_SAFETY_BOOLEAN_FIELDS, *MARKET_SAFETY_LIMIT_FIELDS)
+    top_settings = {key: payload[key] for key in control_fields if key in payload}
+    top = MarketConfig.from_dict(normalized, {
+        "enabled": payload.get("enabled", market_cfg.enabled), "settings": top_settings,
+    })
+    raw_settings = payload.get("settings", {})
     if "settings" in payload:
-        raw_settings = payload["settings"]
         if not isinstance(raw_settings, dict):
             raise ValueError("settings must be an object.")
         assert_no_persisted_secrets(raw_settings)
@@ -1934,9 +1936,19 @@ def apply_market_patch(
                 "edit trusted local configuration and restart: "
                 + ", ".join(blocked_outbound)
             )
-        settings.update(raw_settings)
-    market_cfg.enabled = enabled
-    market_cfg.settings = settings
+    nested = MarketConfig.validated_settings(raw_settings)
+    for key in top_settings.keys() & raw_settings.keys():
+        if top.settings.get(key) != nested.get(key):
+            raise ValueError(f"Top-level and nested market setting '{key}' disagree.")
+    settings = dict(market_cfg.settings)
+    for original, validated in ((top_settings, top.settings), (raw_settings, nested)):
+        settings.update(validated)
+        for key in MARKET_SAFETY_LIMIT_FIELDS:
+            if key in original and key not in validated:
+                settings.pop(key, None)
+    updated = MarketConfig.from_dict(normalized, {"enabled": top.enabled, "settings": settings})
+    market_cfg.enabled = updated.enabled
+    market_cfg.settings = updated.settings
     return cfg
 
 
@@ -2325,6 +2337,7 @@ def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: 
         "pnl_usd": pnl,
         "volume_usd": volume,
         "roi_pct": roi,
+        **performance_ratio_metadata(roi),
         "trade_count": _safe_int(_leaderboard_lookup(raw, "trades", "tradeCount", "trade_count", "totalTrades"), 0),
         "mdd_usd": mdd_usd,
         "mdd_pct": mdd_pct,
@@ -2343,14 +2356,6 @@ def _position_total_pnl(row: Mapping[str, Any]) -> Optional[float]:
     ]
     present = [value for value in values if value is not None]
     return sum(present) if present else None
-
-
-def _position_capital(row: Mapping[str, Any]) -> float:
-    value = _safe_float(
-        _leaderboard_lookup(row, "totalBought", "total_bought", "initialValue", "initial_value", "currentValue", "current_value"),
-        0.0,
-    )
-    return max(float(value or 0.0), 0.0)
 
 
 def _fetch_user_positions_all(wallet: str, limit: int = 500) -> List[Dict[str, Any]]:
@@ -2392,47 +2397,7 @@ def _fetch_user_closed_positions_all(wallet: str, limit: int = 500) -> List[Dict
 
 
 def _max_drawdown(points: List[Dict[str, Any]], equity_base_usd: Optional[float]) -> Dict[str, Any]:
-    if not points:
-        return {
-            "mdd_usd": 0.0,
-            "mdd_pct": 0.0 if equity_base_usd and equity_base_usd > 0 else None,
-            "peak_value": 0.0,
-            "trough_value": 0.0,
-            "peak_timestamp": None,
-            "trough_timestamp": None,
-        }
-    peak_value = float(points[0]["value"])
-    peak_ts = points[0].get("timestamp")
-    trough_value = peak_value
-    trough_ts = peak_ts
-    max_dd = 0.0
-    max_dd_pct: Optional[float] = 0.0 if equity_base_usd and equity_base_usd > 0 else None
-    max_peak = peak_value
-    max_peak_ts = peak_ts
-    for point in points:
-        value = float(point["value"])
-        timestamp = point.get("timestamp")
-        if value > peak_value:
-            peak_value = value
-            peak_ts = timestamp
-        drawdown = max(0.0, peak_value - value)
-        denominator = (float(equity_base_usd) + peak_value) if equity_base_usd and equity_base_usd > 0 else None
-        drawdown_pct = (drawdown / denominator * 100.0) if denominator and denominator > 0 else None
-        if drawdown > max_dd:
-            max_dd = drawdown
-            max_dd_pct = drawdown_pct
-            max_peak = peak_value
-            max_peak_ts = peak_ts
-            trough_value = value
-            trough_ts = timestamp
-    return {
-        "mdd_usd": max_dd,
-        "mdd_pct": max_dd_pct,
-        "peak_value": max_peak,
-        "trough_value": trough_value,
-        "peak_timestamp": max_peak_ts,
-        "trough_timestamp": trough_ts,
-    }
+    return max_drawdown(points, equity_base_usd)
 
 
 def polymarket_user_mdd_payload(
@@ -2515,6 +2480,7 @@ def polymarket_mdd_audit_params(wallet: str, options: Mapping[str, Any]) -> Dict
     params = dict(options)
     params["wallet"] = normalize_wallet(wallet)
     params["artifact"] = POLYMARKET_MDD_AUDIT_KIND
+    params["calculation_version"] = MDD_CALCULATION_VERSION
     return params
 
 
@@ -2557,6 +2523,8 @@ def polymarket_mdd_export_payload(cache_key: str) -> Dict[str, Any]:
     if loaded is None:
         raise ValueError("Unknown MDD audit cache key.")
     payload, metadata = loaded
+    metadata["calculation_current"] = payload.get("calculation_version") == MDD_CALCULATION_VERSION
+    payload["calculation_current"] = metadata["calculation_current"]
     return {"cache": metadata, "payload": payload, "export": {"format": "json", "source": POLYMARKET_MDD_AUDIT_KIND}}
 
 
@@ -3099,9 +3067,14 @@ def _fetch_polymarket_leaderboard_scan_rows(
     retry_attempts = max(1, int(scan_retry_attempts or 1))
     retry_delay = max(0.0, float(scan_retry_delay_seconds or 0.0))
     seen_page_fingerprints: set[str] = set()
+    seen_wallet_fingerprints: set[str] = set()
     completion_reason = "scan_limit_reached" if scan_limit is not None else "upstream_exhausted"
 
     def fetch_page(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
+        with cancellation_scope(is_cancelled):
+            return fetch_page_with_cancellation(page_offset, page_limit)
+
+    def fetch_page_with_cancellation(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
         for attempt in range(1, retry_attempts + 1):
             try:
                 return data_api.get_leaderboard(
@@ -3112,6 +3085,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
                     period=period,
                     category=category,
                 )
+            except RequestCancelled:
+                raise
             except Exception as exc:
                 if attempt >= retry_attempts:
                     raise
@@ -3126,7 +3101,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
                     message=warning,
                 )
                 if retry_delay:
-                    time.sleep(retry_delay)
+                    with request_scope(retry_delay + 1) as control:
+                        control.sleep(retry_delay)
         return []
 
     emit_progress(
@@ -3135,6 +3111,12 @@ def _fetch_polymarket_leaderboard_scan_rows(
         message=f"Scanning leaderboard rows {scanned_count}/{_limit_label(scan_limit)} from offset {offset}.",
     )
     while scan_limit is None or scanned_count < scan_limit:
+        if offset > LEADERBOARD_MAX_OFFSET:
+            completion_reason = "upstream_offset_limit"
+            warning = f"Leaderboard scan reached the documented upstream offset limit ({LEADERBOARD_MAX_OFFSET}); not all Polymarket accounts can be enumerated."
+            warnings.append(warning)
+            emit_progress("leaderboard", scanned=scanned_count, message=warning)
+            break
         if is_cancelled():
             cancelled = True
             completion_reason = "cancelled"
@@ -3145,6 +3127,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
         batch_specs: List[Tuple[int, int]] = []
         page_count = concurrency if remaining is None else min(concurrency, max(1, (remaining + POLYMARKET_LEADERBOARD_PAGE_SIZE - 1) // POLYMARKET_LEADERBOARD_PAGE_SIZE))
         for _ in range(page_count):
+            if offset > LEADERBOARD_MAX_OFFSET:
+                break
             if remaining is not None and remaining <= 0:
                 break
             page_limit = POLYMARKET_LEADERBOARD_PAGE_SIZE if remaining is None else min(POLYMARKET_LEADERBOARD_PAGE_SIZE, remaining)
@@ -3158,7 +3142,10 @@ def _fetch_polymarket_leaderboard_scan_rows(
         pages_by_offset: Dict[int, List[Dict[str, Any]]] = {}
         if len(batch_specs) == 1:
             page_offset, page_limit = batch_specs[0]
-            pages_by_offset[page_offset] = fetch_page(page_offset, page_limit)
+            try:
+                pages_by_offset[page_offset] = fetch_page(page_offset, page_limit)
+            except RequestCancelled:
+                cancelled = True
         else:
             with ThreadPoolExecutor(max_workers=len(batch_specs)) as executor:
                 futures = {
@@ -3167,7 +3154,11 @@ def _fetch_polymarket_leaderboard_scan_rows(
                 }
                 for future in as_completed(futures):
                     page_offset, _page_limit = futures[future]
-                    pages_by_offset[page_offset] = future.result()
+                    try:
+                        pages_by_offset[page_offset] = future.result()
+                    except RequestCancelled:
+                        cancelled = True
+                        continue
                     completed = scanned_count + sum(len(page) for page in pages_by_offset.values())
                     progress_scanned = completed if scan_limit is None else min(completed, scan_limit)
                     emit_progress(
@@ -3178,6 +3169,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
 
         stop_after_batch = False
         for page_offset, page_limit in batch_specs:
+            if page_offset not in pages_by_offset:
+                break  # Never checkpoint beyond a cancelled pagination gap.
             page = pages_by_offset.get(page_offset) or []
             if page_callback is not None:
                 try:
@@ -3199,14 +3192,17 @@ def _fetch_polymarket_leaderboard_scan_rows(
             page_fingerprint = hashlib.sha256(
                 json.dumps(page, default=str, separators=(",", ":"), sort_keys=True).encode("utf-8")
             ).hexdigest()
-            if page_fingerprint in seen_page_fingerprints:
+            wallet_fingerprint = wallet_membership_fingerprint(page)
+            if page_fingerprint in seen_page_fingerprints or (wallet_fingerprint and wallet_fingerprint in seen_wallet_fingerprints):
                 completion_reason = "repeated_page"
-                warning = f"Leaderboard scan stopped at offset {page_offset}: upstream repeated a previously returned full page."
+                warning = f"Leaderboard scan stopped at offset {page_offset}: upstream repeated a previously returned page or wallet membership."
                 warnings.append(warning)
                 emit_progress("leaderboard", scanned=scanned_count, message=warning)
                 stop_after_batch = True
                 break
             seen_page_fingerprints.add(page_fingerprint)
+            if wallet_fingerprint:
+                seen_wallet_fingerprints.add(wallet_fingerprint)
             scanned_count += len(page)
             if retain_rows:
                 raw_rows.extend(page)
@@ -3221,7 +3217,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
             scanned=progress_scanned,
             message=f"Scanning leaderboard rows {progress_scanned}/{_limit_label(scan_limit)}.",
         )
-        if is_cancelled():
+        if cancelled or is_cancelled():
             cancelled = True
             completion_reason = "cancelled"
             warnings.append("Leaderboard scan cancelled by user.")
@@ -3234,6 +3230,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
             {
                 "completion_reason": completion_reason,
                 "source_enumeration_complete": completion_reason == "end_of_results",
+                "source_max_offset": LEADERBOARD_MAX_OFFSET,
             }
         )
     return _limit_slice(raw_rows, scan_limit), cancelled
@@ -3255,7 +3252,7 @@ def polymarket_leaderboard_payload(
     if direction not in {"ASC", "DESC"}:
         direction = "DESC"
     period = _query_value(query, "period", "all") or "all"
-    category = _query_value(query, "category", "OVERALL") or "OVERALL"
+    category = normalize_leaderboard_category(_query_value(query, "category", "OVERALL"))
     limit = _parse_optional_limit(_query_value(query, "limit", "100"), 100)
     default_scan = 500 if sort == "roi_pct" else max(100, limit or 100)
     scan_limit = _parse_optional_limit(_query_value(query, "scan_limit", str(default_scan)), default_scan)
@@ -3347,7 +3344,7 @@ def polymarket_leaderboard_payload(
         try:
             return bool(cancel_check())
         except Exception:
-            return False
+            return True
 
     def emit_progress(
         phase: str,
@@ -3420,8 +3417,16 @@ def polymarket_leaderboard_payload(
 
     rate_limit_events: List[Dict[str, Any]] = []
     rows = [normalize_polymarket_leaderboard_row(row, index + 1) for index, row in enumerate(raw_rows)]
+    seen_wallets: set[str] = set()
+    duplicate_rows = 0
     prefiltered: List[Dict[str, Any]] = []
     for row in rows:
+        wallet = str(row.get("wallet") or "").strip().lower()
+        if wallet:
+            if wallet in seen_wallets:
+                duplicate_rows += 1
+                continue
+            seen_wallets.add(wallet)
         if not _number_in_range(row["pnl_usd"], min_pnl, max_pnl):
             continue
         if not _number_in_range(row["volume_usd"], min_volume, max_volume):
@@ -3433,6 +3438,8 @@ def polymarket_leaderboard_payload(
     computed_mdd = 0
     attempted_mdd = 0
     qualified_mdd = 0
+    unavailable_mdd = 0
+    history_limited_mdd = 0
     if mdd_requested:
         mdd_candidate_rows = list(prefiltered)
         if sort not in {"mdd_usd", "mdd_pct"}:
@@ -3467,7 +3474,10 @@ def polymarket_leaderboard_payload(
                 return row, "", None, {}, None
             options = build_mdd_options()
             try:
-                return row, wallet, polymarket_user_mdd_payload(wallet, **options), options, None
+                with cancellation_scope(is_cancelled):
+                    return row, wallet, polymarket_user_mdd_payload(wallet, **options), options, None
+            except RequestCancelled:
+                raise
             except Exception as exc:
                 return row, wallet, None, options, exc
 
@@ -3478,7 +3488,7 @@ def polymarket_leaderboard_payload(
             mdd_options: Dict[str, Any],
             exc: Optional[BaseException],
         ) -> bool:
-            nonlocal attempted_mdd, computed_mdd, qualified_mdd
+            nonlocal attempted_mdd, computed_mdd, qualified_mdd, unavailable_mdd, history_limited_mdd
             attempted_mdd += 1
             if not wallet:
                 emit_progress(
@@ -3521,7 +3531,19 @@ def polymarket_leaderboard_payload(
                 {
                     "mdd_usd": mdd["mdd_usd"],
                     "mdd_pct": mdd["mdd_pct"],
-                    "mdd_available": True,
+                    "mdd_available": mdd.get("mdd_available", True),
+                    "mdd_scope": mdd.get("mdd_scope", "observed_public_pnl"),
+                    "mdd_account_equity_verified": False,
+                    "mdd_history_status": mdd.get("mdd_history_status", "unknown"),
+                    "mdd_history_coverage": mdd.get("mdd_history_coverage", {}),
+                    "mdd_source_quality": mdd.get("mdd_source_quality", {}),
+                    "position_capital_basis": mdd.get("position_capital_basis", {}),
+                    "mdd_unavailable_reasons": mdd.get("mdd_unavailable_reasons", []),
+                    "mdd_calculation_version": mdd.get("calculation_version"),
+                    "mdd_pct_peak_value": mdd.get("pct_peak_value"),
+                    "mdd_pct_trough_value": mdd.get("pct_trough_value"),
+                    "mdd_pct_peak_timestamp": mdd.get("pct_peak_timestamp"),
+                    "mdd_pct_trough_timestamp": mdd.get("pct_trough_timestamp"),
                     "mdd_method": mdd["mdd_method"],
                     "mdd_pct_basis": mdd["mdd_pct_basis"],
                     "mdd_points": len(mdd["points"]),
@@ -3548,7 +3570,9 @@ def polymarket_leaderboard_payload(
                 }
             )
             computed_mdd += 1
-            if _number_in_range(row["mdd_usd"], min_mdd_usd, max_mdd_usd) and _number_in_range(row["mdd_pct"], min_mdd_pct, max_mdd_pct):
+            unavailable_mdd += int(not row["mdd_available"])
+            history_limited_mdd += int(row["mdd_history_status"] == "limit_reached")
+            if row["mdd_available"] and _number_in_range(row["mdd_usd"], min_mdd_usd, max_mdd_usd) and _number_in_range(row["mdd_pct"], min_mdd_pct, max_mdd_pct):
                 qualified_mdd += 1
             emit_progress(
                 "mdd",
@@ -3593,18 +3617,30 @@ def polymarket_leaderboard_payload(
                 message=f"Computing MDD {attempted_mdd + 1}/{mdd_total}.",
             )
             if len(batch) == 1:
-                rate_limited = apply_mdd_result(*compute_mdd_for_row(batch[0]))
+                try:
+                    rate_limited = apply_mdd_result(*compute_mdd_for_row(batch[0]))
+                except RequestCancelled:
+                    cancelled = True
             else:
                 with ThreadPoolExecutor(max_workers=len(batch)) as executor:
                     for future in as_completed([executor.submit(compute_mdd_for_row, row) for row in batch]):
-                        if apply_mdd_result(*future.result()):
-                            rate_limited = True
+                        try:
+                            if apply_mdd_result(*future.result()):
+                                rate_limited = True
+                        except RequestCancelled:
+                            cancelled = True
                 if rate_limited:
                     break
             mdd_index += len(batch)
+            if cancelled or is_cancelled():
+                cancelled = True
+                warnings.append("MDD scan cancelled by user.")
+                break
             if rate_limited:
                 break
 
+    if unavailable_mdd:
+        warnings.append(f"Excluded {unavailable_mdd} unavailable MDD result(s); {history_limited_mdd} reached a history limit.")
     filtered: List[Dict[str, Any]] = []
     for row in prefiltered:
         if mdd_requested:
@@ -3626,9 +3662,13 @@ def polymarket_leaderboard_payload(
             "returned": len(result_rows),
             "filtered": len(filtered),
             "scanned": len(rows),
+            "unique_wallets": len(seen_wallets),
+            "duplicate_rows": duplicate_rows,
             "mdd_attempted": attempted_mdd,
             "mdd_computed": computed_mdd,
             "mdd_qualified": qualified_mdd,
+            "mdd_unavailable": unavailable_mdd,
+            "mdd_history_limited": history_limited_mdd,
         },
         "sort": sort,
         "direction": direction,
@@ -3670,9 +3710,12 @@ def polymarket_leaderboard_payload(
         "source": "polymarket_data_api_leaderboard",
         "cancelled": cancelled,
         "source_sort": remote_sort,
+        "roi_pct_basis": PNL_VOLUME_BASIS,
+        "wallet_observation_policy": "first_observation_per_normalized_wallet",
         "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
         "completion_reason": str(scan_summary.get("completion_reason") or "unknown"),
         "source_enumeration_complete": bool(scan_summary.get("source_enumeration_complete")),
+        "source_max_offset": LEADERBOARD_MAX_OFFSET,
         "source_scope_note": (
             "Results cover only rows exposed by the public Polymarket leaderboard for the selected period and category; "
             "they do not establish coverage of every Polymarket account."
@@ -3686,7 +3729,7 @@ def polymarket_leaderboard_payload(
         "mdd_method": MDD_METHOD_MARK_REPLAY if mdd_mode == "mark_replay" else MDD_METHOD_V2,
         "mdd_pct_basis": MDD_PCT_BASIS_V2,
         "mdd_note": (
-            "MDD mark replay is opt-in and uses CLOB price history for trade-derived token inventory; rows without reconstructable marks fall back to v2."
+            "Observed MDD uses sampled CLOB prices and fetched inventory, not verified account equity. Incomplete replay or capped history is excluded; fast fallback is diagnostic only."
             if mdd_mode == "mark_replay"
             else "MDD v2 uses public closed-position realized PnL, public trade/activity capital basis, and the current open-position snapshot; complete account-equity MDD still requires cash-flow ledger and historical mark replay."
         ),
@@ -3822,7 +3865,7 @@ def _wallets_from_copy_payload(
             raw_values.extend(raw)
         elif isinstance(raw, str):
             raw_values.extend(raw.replace(";", ",").split(","))
-        elif raw not in (None, ""):
+        else:
             raise ValueError("follow_wallets must be a list or comma-separated string.")
     elif "follow_wallet" in payload:
         raw_values.append(payload.get("follow_wallet"))
@@ -3831,7 +3874,9 @@ def _wallets_from_copy_payload(
 
     wallets: List[str] = []
     for raw in raw_values:
-        raw_wallet = str(raw or "").strip()
+        if not isinstance(raw, str):
+            raise ValueError("Copy follow identities must be strings.")
+        raw_wallet = raw.strip()
         if not raw_wallet:
             continue
         normalized = normalize_activity_identity(market_id, raw_wallet)
@@ -3841,6 +3886,10 @@ def _wallets_from_copy_payload(
             raise ValueError("follow_wallets must contain only valid activity identities (0x or Solana wallets).")
         if normalized not in wallets:
             wallets.append(normalized)
+    if "follow_wallets" in payload and "follow_wallet" in payload:
+        single = _wallets_from_copy_payload({"follow_wallet": payload["follow_wallet"]}, existing, market_id=market_id)
+        if single != wallets[:1]:
+            raise ValueError("follow_wallet and follow_wallets disagree.")
     return wallets
 
 
@@ -3851,43 +3900,25 @@ def copy_settings_from_payload(
     market_id: str = "polymarket",
 ) -> CopyTradeSettings:
     follow_wallets = _wallets_from_copy_payload(payload, existing, market_id=market_id)
-    percentage_keys = ("copy_percentage", "scale_percent", "percentage")
-    percentage_value = next((payload[key] for key in percentage_keys if key in payload), None)
-    if percentage_value is not None:
-        copy_percentage = _safe_float(percentage_value, None)
-        if copy_percentage is None or copy_percentage < 0 or copy_percentage > 100:
-            raise ValueError("copy_percentage must be a number between 0 and 100.")
-        scale = float(copy_percentage) / 100.0
-    elif "scale" in payload:
-        scale = _safe_float(payload.get("scale"), None)
-    else:
-        scale = max(0.0, min(float(existing.scale), 1.0))
-    max_usdc = _safe_float(payload.get("max_usdc_per_trade", existing.max_usdc_per_trade), None)
-    slippage = _safe_float(payload.get("slippage", existing.slippage), None)
-    if scale is None or scale < 0 or scale > 1:
-        raise ValueError("scale must be a number between 0 and 1, matching copy_percentage 0..100.")
-    if max_usdc is None or max_usdc <= 0:
-        raise ValueError("max_usdc_per_trade must be a positive number.")
-    if slippage is None or slippage < 0 or slippage > 1:
-        raise ValueError("slippage must be a number between 0 and 1.")
-    try:
-        conflict_window = int(payload.get("conflict_window_seconds", existing.conflict_window_seconds))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("conflict_window_seconds must be an integer.") from exc
-    if conflict_window < 0 or conflict_window > 86400:
-        raise ValueError("conflict_window_seconds must be between 0 and 86400.")
-    return CopyTradeSettings(
-        enabled=bool_from_setting(payload.get("enabled"), existing.enabled),
-        live=bool_from_setting(payload.get("live"), existing.live),
-        follow_wallet=follow_wallets[0] if follow_wallets else "",
-        follow_wallets=follow_wallets,
-        scale=float(scale),
-        max_usdc_per_trade=float(max_usdc),
-        slippage=float(slippage),
-        allow_sells=bool_from_setting(payload.get("allow_sells"), existing.allow_sells),
-        conflict_guard=bool_from_setting(payload.get("conflict_guard"), existing.conflict_guard),
-        conflict_window_seconds=conflict_window,
-    )
+    data = existing.to_dict()
+    data.pop("copy_percentage")
+    for key in (
+        "enabled", "live", "scale", "max_usdc_per_trade", "slippage",
+        "allow_sells", "conflict_guard", "conflict_window_seconds",
+    ):
+        if key in payload:
+            data[key] = payload[key]
+    percentages = [payload[key] for key in ("copy_percentage", "scale_percent", "percentage") if key in payload]
+    if percentages:
+        scales = [CopyTradeSettings.from_dict({"copy_percentage": value}).scale for value in percentages]
+        if any(not math.isclose(scales[0], scale, rel_tol=0, abs_tol=1e-12) for scale in scales[1:]):
+            raise ValueError("Copy percentage aliases disagree.")
+        data["copy_percentage"] = percentages[0]
+        if "scale" not in payload:
+            data.pop("scale")
+    data["follow_wallet"] = follow_wallets[0] if follow_wallets else ""
+    data["follow_wallets"] = follow_wallets
+    return CopyTradeSettings.from_dict(data)
 
 
 def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> CopyTradeSettings:
@@ -5596,6 +5627,40 @@ class ReactGuiServer(ThreadingHTTPServer):
             self.shutdown_request(request)
 
 
+class HttpClientDisconnected(ConnectionError):
+    """The response stream, not an upstream transport, lost its client."""
+
+
+class _ClientResponseWriter:
+    """Identify peer disconnects at the only stream that writes to the client."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._disconnected = False
+
+    def _call(self, operation: Callable[..., Any], *args: Any) -> Any:
+        if self._disconnected:
+            raise HttpClientDisconnected("The HTTP client has disconnected.")
+        try:
+            return operation(*args)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+            self._disconnected = True
+            raise HttpClientDisconnected("The HTTP client has disconnected.") from exc
+
+    def write(self, data: Any) -> Any:
+        return self._call(self._stream.write, data)
+
+    def flush(self) -> None:
+        self._call(self._stream.flush)
+
+    @property
+    def closed(self) -> bool:
+        return self._stream.closed
+
+    def close(self) -> None:
+        self._stream.close()
+
+
 class ReactGuiHandler(BaseHTTPRequestHandler):
     server_version = "PredictionMarketReactGui/0.1"
     _security_headers = (
@@ -5614,6 +5679,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         """Bound each client connection so incomplete requests cannot pin worker threads."""
         super().setup()
+        self.wfile = _ClientResponseWriter(self.wfile)
         self.connection.settimeout(HTTP_CONNECTION_TIMEOUT_SECONDS)
 
     def version_string(self) -> str:
@@ -5631,12 +5697,19 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         started_at = time.monotonic()
         self._request_id = secrets.token_hex(12)
         self._response_status: Optional[int] = None
+        client_disconnected = False
         try:
             super().handle_one_request()
+        except HttpClientDisconnected:
+            client_disconnected = True
+            self.close_connection = True
         finally:
             method = str(getattr(self, "command", "") or "").upper()
             if method:
                 status = self._response_status if self._response_status is not None else HTTPStatus.INTERNAL_SERVER_ERROR
+                if client_disconnected:
+                    # 499 is local accounting only; no second response is sent.
+                    status = 499
                 duration_seconds = time.monotonic() - started_at
                 self.app_server.http_metrics.record(method, int(status), duration_seconds)
                 raw_path = str(getattr(self, "path", "") or "")
@@ -5650,6 +5723,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     "duration_ms": round(max(0.0, duration_seconds) * 1000, 3),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+                if client_disconnected:
+                    event.update(outcome="client_disconnected", response_status=self._response_status)
                 print(json.dumps(event, sort_keys=True, separators=(",", ":")), flush=True)
 
     def send_response(self, code: int, message: Optional[str] = None) -> None:
@@ -6125,6 +6200,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             )
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
+        except HttpClientDisconnected:
+            raise
         except Exception as exc:
             print(f"[web-gui] internal error while handling GET {path}: {type(exc).__name__}")
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")
@@ -6856,6 +6933,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
             return
+        except HttpClientDisconnected:
+            raise
         except Exception as exc:
             print(f"[web-gui] internal error while handling {method} {path}: {type(exc).__name__}")
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")

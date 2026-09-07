@@ -18,8 +18,8 @@ POLYMARKET_LIVE_MUTATION_BLOCKER = (
     "py-clob-client/V1 order flows must not be used in production."
 )
 POLYMARKET_BOUNDED_AUDIT_MUTATION_BLOCKER = (
-    "The bounded Polymarket CLOB V2 funded order/cancel audit is disabled until an operator-approved "
-    "durable recovery journal is wired to the exact clean revision; normal product mutation "
+    "The bounded Polymarket CLOB V2 funded order/cancel audit is disabled pending operator approval "
+    "of the V2 implementation and durable recovery journal for the exact clean revision; normal product mutation "
     "support and bounded audit mutation support are independent gates."
 )
 

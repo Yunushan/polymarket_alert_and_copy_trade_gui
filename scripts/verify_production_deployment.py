@@ -15,12 +15,13 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from stat import S_IFDIR, S_IFREG, S_IMODE, S_ISDIR, S_ISREG
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import Request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -28,11 +29,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.deployment_identity import (
     SHA256_HEX,
+    canonical_https_origin,
     frontend_tree_sha256,
     git_top_level_matches,
     safe_git_command,
     safe_git_environment,
 )
+from core.probe_transport import is_public_probe_address
+from core.request_control import request_scope, resolve_with_deadline
 
 if __package__:
     from scripts.restore_state_backup import (
@@ -42,7 +46,8 @@ if __package__:
         catalog_verified_backups,
         restore_backup,
     )
-    from scripts.verify_service_health import check_health
+    from scripts.verify_service_health import check_health, open_probe as urlopen, read_health_payload, read_probe_body
+    from scripts.verify_restored_state import application_check_valid, isolated_environment
 else:  # Supports the documented `python /path/to/scripts/verify_production_deployment.py` invocation.
     from restore_state_backup import (
         DEFAULT_MAX_ARCHIVE_BYTES,
@@ -51,7 +56,8 @@ else:  # Supports the documented `python /path/to/scripts/verify_production_depl
         catalog_verified_backups,
         restore_backup,
     )
-    from verify_service_health import check_health
+    from verify_service_health import check_health, open_probe as urlopen, read_health_payload, read_probe_body
+    from verify_restored_state import application_check_valid, isolated_environment
 
 try:
     import tomllib
@@ -129,39 +135,29 @@ PUBLIC_PROXY_AUTH_PROBES = (
 )
 
 
-class _RejectRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        raise RuntimeError("public proxy redirects are forbidden")
-
-
-def _public_open(request: Request, timeout: float):
-    if urlopen.__class__.__module__ == "unittest.mock":
-        return urlopen(request, timeout=timeout)
-    return build_opener(_RejectRedirects()).open(request, timeout=timeout)
-
-
-def _validated_public_origin(value: str) -> str:
-    parsed = urlparse(value.strip())
-    if parsed.scheme != "https" or not parsed.hostname or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
-        raise ValueError("public URL must be an absolute https origin-only URL")
-    try:
-        address = ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        address = None
-    if address is not None and (not address.is_global or address.is_loopback or address.is_link_local or address.is_private):
-        raise ValueError("public URL must not use a private, loopback, or link-local address")
-    if address is None and not parsed.hostname.endswith(".example.com"):
+def _validated_public_origin(value: str, timeout: float = 10.0) -> str:
+    with request_scope(timeout):
+        origin = canonical_https_origin(value)
+        parsed = urlparse(origin)
         try:
-            resolved = {
-                ipaddress.ip_address(item[4][0])
-                for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
-            }
-        except OSError as exc:
-            raise ValueError("public URL hostname could not be resolved safely") from exc
-        if not resolved or any(not item.is_global for item in resolved):
-            raise ValueError("public URL resolves to a private, loopback, or link-local address")
-    port = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
-    return f"https://{parsed.hostname.lower()}{port}"
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            address = None
+        if address is not None and not is_public_probe_address(str(address)):
+            raise ValueError("public URL must use a public unicast address")
+        if address is None:
+            try:
+                resolved = {
+                    item[4][0]
+                    for item in resolve_with_deadline(
+                        socket.getaddrinfo, parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
+                    )
+                }
+            except OSError as exc:
+                raise ValueError("public URL hostname could not be resolved safely") from exc
+            if not resolved or any(not is_public_probe_address(item) for item in resolved):
+                raise ValueError("public URL must resolve exclusively to public unicast addresses")
+    return origin
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -664,8 +660,12 @@ def check_restore_drill(
     backup_directory: Path,
     *,
     clock: Callable[[], float] = time.time,
+    frontend_dir: Path = PROJECT_ROOT / "frontend" / "dist",
+    expected_version: str = "",
+    expected_source_revision: str = "",
+    expected_frontend_sha256: str = "",
 ) -> dict[str, Any]:
-    """Actually restore the newest valid backup into a private isolated directory."""
+    """Restore and boot a read-only application against the isolated backup."""
 
     base = {"name": "verified_restore_drill", "mode": "isolated_full_restore"}
     try:
@@ -710,7 +710,28 @@ def check_restore_drill(
                 or restored_bytes != manifest.get("verified_bytes")
             ):
                 raise RuntimeError("restored file inventory does not match the verified backup manifest")
+            result = subprocess.run(
+                [
+                    sys.executable, "-I", "-B", str(PROJECT_ROOT / "scripts" / "verify_restored_state.py"),
+                    "--state", str(restored), "--frontend-dir", str(frontend_dir.resolve()),
+                ],
+                cwd=temporary, env=isolated_environment(restored),
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            if result.returncode != 0 or len(result.stdout) > 4096:
+                raise RuntimeError("restored application validation failed; backup contents were not promoted")
+            application = json.loads(result.stdout)
+            identity = source_identity()
+            if not application_check_valid(
+                application,
+                version=expected_version or identity["project_version"],
+                revision=expected_source_revision or identity["git_revision"],
+                frontend_sha256=expected_frontend_sha256 or frontend_tree_sha256(frontend_dir),
+            ):
+                raise RuntimeError("restored application validation or runtime identity is invalid")
         completed_at = datetime.fromtimestamp(clock(), timezone.utc).isoformat().replace("+00:00", "Z")
+    except subprocess.TimeoutExpired:
+        return {**base, "status": "fail", "detail": "restored application exceeded the 60-second validation budget"}
     except (OSError, RuntimeError, ValueError, tarfile.TarError) as exc:
         return {**base, "status": "fail", "detail": str(exc)}
     return {
@@ -722,7 +743,8 @@ def check_restore_drill(
         "restored_file_count": restored_files,
         "restored_bytes": restored_bytes,
         "completed_at": completed_at,
-        "detail": "the complete verified backup was restored and inventoried in an isolated private directory",
+        "application": application,
+        "detail": "the complete backup was restored, booted read-only without venue access, and left unchanged",
     }
 
 
@@ -965,7 +987,7 @@ def check_loopback_metrics(url: str, token: str, timeout: float) -> dict[str, An
         headers["Authorization"] = f"Bearer {token}"
     with urlopen(Request(url, headers=headers, method="GET"), timeout=timeout) as response:
         content_type = str(response.headers.get("Content-Type") or "").lower()
-        body = response.read().decode("utf-8")
+        body = read_probe_body(response).decode("utf-8")
     if response.status != 200:
         raise RuntimeError(f"loopback metrics endpoint returned HTTP {response.status}")
     if not content_type.startswith("text/plain; version=0.0.4"):
@@ -1018,7 +1040,7 @@ def check_public_proxy(
     *,
     require_upstream_token: bool = True,
 ) -> dict[str, Any]:
-    origin = _validated_public_origin(url)
+    origin = _validated_public_origin(url, timeout)
     if not username or not password:
         raise ValueError("public proxy verification requires non-empty Basic Auth credentials")
     if require_upstream_token and not upstream_token.strip():
@@ -1036,7 +1058,7 @@ def check_public_proxy(
             Request(probe_url, data=body, headers=headers, method=method),
             timeout,
             f"public proxy {method} {urlparse(probe_url).path or '/'}",
-            opener=_public_open,
+            opener=partial(urlopen, public_only=True),
         )
 
     health_url = urljoin(base_url, "api/health")
@@ -1044,12 +1066,10 @@ def check_public_proxy(
     headers = {"Accept": "application/json"}
     encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     headers["Authorization"] = f"Basic {encoded}"
-    with _public_open(Request(health_url, headers=headers, method="GET"), timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    with urlopen(Request(health_url, headers=headers, method="GET"), timeout=timeout, public_only=True) as response:
+        payload = read_health_payload(response)
         response_headers = {str(name).lower(): str(value) for name, value in response.headers.items()}
         missing = [name for name in REQUIRED_PROXY_HEADER_VALUES if name not in response_headers]
-        if response.status != 200 or payload.get("status") != "ok":
-            raise RuntimeError("public proxy health endpoint did not report status=ok")
         if expected_version and str(payload.get("api_version", "")) != expected_version:
             raise RuntimeError(
                 f"public proxy reported version {payload.get('api_version')}, expected {expected_version}"
@@ -1152,7 +1172,7 @@ def build_external_public_probe_evidence(
 ) -> dict[str, Any]:
     """Probe the public deployment from a separately attested GitHub-hosted job."""
 
-    origin = _validated_public_origin(public_origin)
+    origin = _validated_public_origin(public_origin, timeout)
     revision = expected_source_revision.strip().lower()
     frontend_sha256 = expected_frontend_sha256.strip().lower()
     if not expected_version.strip() or not COMMIT_SHA.fullmatch(revision):
@@ -1292,8 +1312,8 @@ def main() -> int:
     expected_source_revision = args.expected_source_revision.strip().lower()
     expected_frontend_sha256 = args.expected_frontend_sha256.strip().lower()
     try:
-        public_origin = _validated_public_origin(args.public_url) if args.public_url else ""
-    except ValueError:
+        public_origin = _validated_public_origin(args.public_url, args.timeout) if args.public_url else ""
+    except (OSError, ValueError):
         public_origin = ""
     collection = {
         "mode": "production" if not args.skip_systemd and bool(args.public_url) else "local_smoke",
@@ -1370,7 +1390,12 @@ def main() -> int:
                             args.host_identity_file,
                         )
                     )
-                    checks.append(check_restore_drill(args.backup_directory))
+                    checks.append(check_restore_drill(
+                        args.backup_directory, frontend_dir=args.frontend_dir,
+                        expected_version=expected_version,
+                        expected_source_revision=expected_source_revision,
+                        expected_frontend_sha256=expected_frontend_sha256,
+                    ))
                     checks.append(
                         check_rollback_drill(
                             args.rollback_drill_report,

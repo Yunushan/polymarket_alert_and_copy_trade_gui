@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import csv
 import json
 import queue
 import sys
@@ -11,6 +12,7 @@ import unittest
 from contextlib import redirect_stdout
 from importlib import metadata as importlib_metadata
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import (
@@ -276,8 +278,8 @@ class AnalyticsHarness:
     def _copy_text_to_clipboard(self, text: str, label: str):
         return App._copy_text_to_clipboard(self, text, label)
 
-    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "", *, persist: bool = True):
-        return App._ensure_wallet_watch_from_leaderboard(self, wallet, display_name, persist=persist)
+    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = ""):
+        return App._ensure_wallet_watch_from_leaderboard(self, wallet, display_name)
 
     def _copy_follow_wallets_from_text(self):
         return App._copy_follow_wallets_from_text(self)
@@ -454,6 +456,49 @@ class FakeRegistry:
 
 
 class AppLogicTests(unittest.TestCase):
+    @staticmethod
+    def copy_settings_harness():
+        return SimpleNamespace(
+            cfg=AppConfig(), ui_queue=queue.Queue(),
+            _require_selected_market_capability=lambda *_: True,
+            _copy_follow_wallets_from_text=lambda: [WALLET],
+            ct_enabled_var=FakeVar(True), ct_live_var=FakeVar(False),
+            ct_allow_sells_var=FakeVar(False), ct_conflict_guard_var=FakeVar(True),
+            ct_scale_var=FakeVar("25"), ct_max_var=FakeVar("2.5"),
+            ct_slip_var=FakeVar("0.02"), ct_follow_var=FakeVar(WALLET),
+        )
+
+    def test_desktop_copy_settings_validate_before_installing_or_saving(self) -> None:
+        for variable, values in (
+            ("ct_scale_var", ("NaN", "Infinity", True, "invalid", "101")),
+            ("ct_max_var", ("NaN", "Infinity", True, "0")),
+            ("ct_slip_var", ("NaN", "Infinity", True, "-1")),
+            ("ct_live_var", ("false", 1, None, ["false"])),
+        ):
+            for value in values:
+                with self.subTest(variable=variable, value=value):
+                    harness = self.copy_settings_harness()
+                    getattr(harness, variable).set(value)
+                    before = harness.cfg.copytrading
+                    with patch("app.save_config") as save, patch("app.messagebox.showerror") as error, patch("app.messagebox.showwarning") as warning:
+                        App.save_copy_settings(harness)
+                    save.assert_not_called()
+                    error.assert_called_once()
+                    warning.assert_not_called()
+                    self.assertIs(harness.cfg.copytrading, before)
+                    self.assertTrue(harness.ui_queue.empty())
+
+    def test_desktop_copy_settings_accept_valid_raw_values(self) -> None:
+        harness = self.copy_settings_harness()
+        with patch("app.save_config") as save, patch("app.messagebox.showerror") as error:
+            App.save_copy_settings(harness)
+        save.assert_called_once_with(harness.cfg)
+        error.assert_not_called()
+        self.assertEqual(harness.cfg.copytrading.scale, 0.25)
+        self.assertEqual(harness.cfg.copytrading.max_usdc_per_trade, 2.5)
+        self.assertFalse(harness.cfg.copytrading.live)
+        self.assertEqual(harness.cfg.copytrading.normalized_follow_wallets(), [WALLET])
+
     def test_frozen_smoke_payload_uses_packaged_release_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             package_root = Path(tmp) / "market-sentinel-v1.0.11-win-x64"
@@ -796,6 +841,50 @@ class AppLogicTests(unittest.TestCase):
 
         App.copy_selected_leaderboard_user(harness)
         self.assertEqual(harness.clipboard, ["alpha-trader"])
+
+    def test_desktop_leaderboard_export_preserves_unknown_risk_and_source_diagnostics(self) -> None:
+        harness = AnalyticsHarness()
+        quality = {"status": "invalid", "sources": {"closed_positions": {"invalid_rows": 1}}}
+        cost = {"unit": "USD", "closed_unknown_rows": 1, "account_fees_verified": False}
+        reasons = ["invalid_source_data:closed_positions:invalid_timestamp"]
+        harness._last_leaderboard_payload = {"rows": [{
+            "wallet": WALLET, "display_name": "Trader", "roi_pct": 10,
+            "pnl_volume_pct": 10, "roi_pct_basis": "PnL / volume, not investment ROI",
+            "mdd_usd": None, "mdd_pct": None, "mdd_history_status": "invalid_source_data",
+            "mdd_source_quality": quality, "mdd_unavailable_reasons": reasons,
+            "position_capital_basis": cost,
+            "mdd_account_equity_verified": False,
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "leaderboard.csv"
+            with patch("app.filedialog.asksaveasfilename", return_value=str(target)), patch("app.messagebox.showerror") as error:
+                App.export_polymarket_leaderboard(harness)
+            error.assert_not_called()
+            with target.open(encoding="utf-8", newline="") as stream:
+                row, = csv.DictReader(stream)
+            self.assertEqual(row["wallet"], WALLET)
+            self.assertEqual(row["mdd_pct"], "")
+            self.assertEqual(row["mdd_history_status"], "invalid_source_data")
+            self.assertEqual(json.loads(row["mdd_source_quality"]), quality)
+            self.assertEqual(json.loads(row["position_capital_basis"]), cost)
+            self.assertEqual(json.loads(row["mdd_unavailable_reasons"]), reasons)
+            self.assertIn("not investment ROI", row["roi_pct_basis"])
+            self.assertIn("Exported 1 rows", harness.lb_status_var.get())
+
+    def test_desktop_leaderboard_export_failure_keeps_previous_complete_file(self) -> None:
+        harness = AnalyticsHarness()
+        harness._last_leaderboard_payload = {"rows": [
+            {"wallet": WALLET}, {"wallet": WALLET, "mdd_source_quality": {"invalid": object()}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "leaderboard.csv"
+            target.write_text("previous complete export", encoding="utf-8")
+            with patch("app.filedialog.asksaveasfilename", return_value=str(target)), patch("app.messagebox.showerror") as error:
+                App.export_polymarket_leaderboard(harness)
+            error.assert_called_once()
+            self.assertEqual(target.read_text(), "previous complete export")
+            self.assertFalse(list(target.parent.glob(f".{target.name}.*.tmp")))
+            self.assertEqual(harness.logged, [])
 
     def test_desktop_polymarket_leaderboard_action_sets_up_copy_trading_follow(self) -> None:
         harness = AnalyticsHarness()

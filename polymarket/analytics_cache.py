@@ -15,6 +15,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
+from core.atomic_files import replace_file
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ANALYTICS_CACHE_PATH = PROJECT_ROOT / "data" / "polymarket_analytics_cache.json"
@@ -218,9 +219,11 @@ def _locked_cache_mutation(*, path_parameter: str, positional_index: Optional[in
 
 
 def _analytics_cache_file_revision(target: Path) -> str:
-    if not target.exists():
+    try:
+        encoded = target.read_bytes()
+    except FileNotFoundError:
         return _MISSING_REVISION
-    return hashlib.sha256(target.read_bytes()).hexdigest()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def make_cache_key(kind: str, params: Mapping[str, Any]) -> str:
@@ -236,21 +239,23 @@ def load_analytics_cache(path: Optional[Path | str] = None) -> Dict[str, Any]:
 
 
 def _load_analytics_cache_unlocked(target: Path) -> Dict[str, Any]:
-    if not target.exists():
-        return _empty_cache(revision=_MISSING_REVISION)
     try:
         encoded = target.read_bytes()
+    except FileNotFoundError:
+        return _empty_cache(revision=_MISSING_REVISION)
+
+    # A failed read is not evidence of corrupt data. Let I/O failures reach the
+    # caller without renaming a valid store or treating it as a cache miss.
+    try:
         decoded = json.loads(encoded.decode("utf-8"))
-    except Exception:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         _quarantine_invalid_cache(target)
         return _empty_cache(revision=_MISSING_REVISION)
-    if not isinstance(decoded, dict):
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("entries", {}), dict):
         _quarantine_invalid_cache(target)
         return _empty_cache(revision=_MISSING_REVISION)
     raw = _RevisionedAnalyticsCache(decoded, revision=hashlib.sha256(encoded).hexdigest())
-    entries = raw.get("entries")
-    if not isinstance(entries, dict):
-        raw["entries"] = {}
+    raw.setdefault("entries", {})
     raw.setdefault("version", ANALYTICS_CACHE_VERSION)
     raw.setdefault("created_at", _now())
     raw.setdefault("updated_at", raw.get("created_at", _now()))
@@ -294,7 +299,7 @@ def _save_analytics_cache_unlocked(cache: Mapping[str, Any], target: Path) -> Pa
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, target)
+        replace_file(temporary, target)
         # Replacement is the commit point. Update snapshot provenance before
         # directory fsync so the same object can safely retry after an
         # acknowledged-but-not-durability-confirmed commit.
@@ -310,16 +315,11 @@ def _save_analytics_cache_unlocked(cache: Mapping[str, Any], target: Path) -> Pa
     return target
 
 
-def _quarantine_invalid_cache(target: Path) -> Optional[Path]:
-    """Preserve a malformed cache without making cache recovery fatal."""
-    if not target.is_file():
-        return None
+def _quarantine_invalid_cache(target: Path) -> Path:
+    """Preserve malformed bytes before allowing a new active cache."""
     backup = target.with_name(f"{target.name}.corrupt-{time.time_ns()}")
-    try:
-        os.replace(target, backup)
-        _fsync_parent_directory(backup)
-    except OSError:
-        return None
+    replace_file(target, backup)
+    _fsync_parent_directory(backup)
     return backup
 
 
@@ -562,6 +562,12 @@ def load_analytics_artifact(
 
 
 def mdd_payload_to_csv(payload: Mapping[str, Any]) -> str:
+    quality_fields = ["mdd_history_status", "mdd_source_quality", "mdd_unavailable_reasons", "mdd_history_coverage",
+                      "position_capital_basis"]
+    provenance_fields = [
+        "calculation_version", "calculation_current", "pct_drawdown_usd",
+        "pct_peak_value", "pct_trough_value", "pct_peak_timestamp", "pct_trough_timestamp", "drawdown_baseline",
+    ]
     fields = [
         "section",
         "wallet",
@@ -575,6 +581,8 @@ def mdd_payload_to_csv(payload: Mapping[str, Any]) -> str:
         "trough_value",
         "source",
         "status",
+        *provenance_fields,
+        *quality_fields,
     ]
     rows = [
         {
@@ -590,6 +598,9 @@ def mdd_payload_to_csv(payload: Mapping[str, Any]) -> str:
             "trough_value": payload.get("trough_value"),
             "source": payload.get("mdd_pct_basis"),
             "status": "ok" if payload.get("mdd_available") else "unavailable",
+            **{key: payload.get(key) for key in provenance_fields},
+            **{key: json.dumps(payload[key], sort_keys=True) if isinstance(payload.get(key), (dict, list)) else payload.get(key)
+               for key in quality_fields},
         }
     ]
     for point in payload.get("points") or []:
@@ -687,6 +698,7 @@ def _payload_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
     for key in (
         "wallet",
         "mdd_method",
+        "calculation_version",
         "mdd_available",
         "mdd_usd",
         "mdd_pct",

@@ -10,6 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import requests
+from requests.adapters import HTTPAdapter
+
 from market_adapters.azuro import AzuroAdapter
 from market_adapters.errors import MarketConfigurationError, MarketHTTPError
 from market_adapters.limitless import LimitlessAdapter
@@ -23,7 +26,13 @@ from market_adapters.outbound import (
     is_outbound_endpoint_setting,
     validate_outbound_url,
 )
-from market_adapters.runtime import AdapterRuntime, _ValidatingSession
+from market_adapters.runtime import (
+    AdapterRuntime,
+    _PinnedHTTPAdapter,
+    _PinnedHTTPSConnection,
+    _PinnedPoolManager,
+    _ValidatingSession,
+)
 from market_adapters.sx_bet import SxBetAdapter
 
 
@@ -202,6 +211,105 @@ class OutboundEndpointTests(unittest.TestCase):
         finally:
             session.close()
         self.assertEqual(calls, 2)
+
+    def test_pinned_pools_refresh_changed_addresses_and_reuse_equivalent_sets(self) -> None:
+        manager = _PinnedPoolManager()
+        self.addCleanup(manager.clear)
+        first = manager.connection_from_url(
+            "https://venue.example.test", pool_kwargs={"pinned_addresses": ("93.184.216.34",)}
+        )
+        changed = manager.connection_from_url(
+            "https://venue.example.test", pool_kwargs={"pinned_addresses": ("1.1.1.1", "8.8.8.8")}
+        )
+        equivalent = manager.connection_from_url(
+            "https://venue.example.test", pool_kwargs={"pinned_addresses": ("8.8.8.8", "1.1.1.1", "1.1.1.1")}
+        )
+        self.assertIsNot(first, changed)
+        self.assertIs(changed, equivalent)
+        self.assertEqual(first._new_conn()._market_sentinel_pinned_addresses, ("93.184.216.34",))
+        self.assertEqual(changed._new_conn()._market_sentinel_pinned_addresses, ("1.1.1.1", "8.8.8.8"))
+
+    def test_pinned_pool_key_retains_origin_and_tls_identity(self) -> None:
+        manager = _PinnedPoolManager()
+        self.addCleanup(manager.clear)
+        options = {"pinned_addresses": ("93.184.216.34",), "cert_reqs": "CERT_REQUIRED", "ca_certs": "one.pem"}
+        original = manager.connection_from_url("https://venue.example.test", pool_kwargs=options)
+        for url, changes in (
+            ("https://other.example.test", {}),
+            ("https://venue.example.test:8443", {}),
+            ("http://venue.example.test", {}),
+            ("https://venue.example.test", {"ca_certs": "two.pem"}),
+            ("https://venue.example.test", {"cert_file": "client.pem"}),
+            ("https://venue.example.test", {"server_hostname": "other.example.test"}),
+        ):
+            with self.subTest(url=url, changes=changes):
+                pool = manager.connection_from_url(url, pool_kwargs={**options, **changes})
+                self.assertIsNot(pool, original)
+        self.assertIs(original, manager.connection_from_url("https://venue.example.test", pool_kwargs=options))
+
+    def test_changed_address_pools_stay_bounded_and_clear_on_session_close(self) -> None:
+        session = _ValidatingSession(OutboundEndpointPolicy())
+        manager = session.get_adapter("https://").poolmanager
+        for index in range(40):
+            manager.connection_from_url(
+                "https://venue.example.test", pool_kwargs={"pinned_addresses": (f"93.184.216.{index + 1}",)}
+            )
+        self.assertEqual(len(manager.pools), 10)
+        session.close()
+        self.assertEqual(len(manager.pools), 0)
+
+    def test_pinned_socket_fallback_keeps_hostname_and_restores_dns_state(self) -> None:
+        import urllib3.connection
+
+        connection = _PinnedHTTPSConnection(
+            "venue.example.test", pinned_addresses=("93.184.216.34", "1.1.1.1")
+        )
+        targets = []
+        connected_socket = object()
+
+        def connect(active):
+            targets.append(active._dns_host)
+            if len(targets) == 1:
+                raise OSError("first address unavailable")
+            return connected_socket
+
+        with patch.object(urllib3.connection.HTTPSConnection, "_new_conn", connect):
+            self.assertIs(connection._new_conn(), connected_socket)
+        self.assertEqual(targets, ["93.184.216.34", "1.1.1.1"])
+        self.assertEqual(connection.host, "venue.example.test")
+        self.assertEqual(connection._dns_host, "venue.example.test")
+        with patch.object(urllib3.connection.HTTPSConnection, "_new_conn", side_effect=OSError("unavailable")):
+            with self.assertRaises(OSError):
+                connection._new_conn()
+        self.assertEqual(connection._dns_host, "venue.example.test")
+
+    def test_proxy_transport_stays_delegated_without_direct_pools(self) -> None:
+        adapter = _PinnedHTTPAdapter()
+        self.addCleanup(adapter.close)
+        request = requests.Request("GET", "https://venue.example.test").prepare()
+        request._market_sentinel_pinned_addresses = ("93.184.216.34",)
+        proxies = {"https": "http://proxy.example.test:8080"}
+        expected = object()
+        with (
+            patch.object(HTTPAdapter, "get_connection", return_value=expected) as legacy,
+            patch.object(HTTPAdapter, "get_connection_with_tls_context", return_value=expected) as current,
+            patch.object(adapter.poolmanager, "connection_from_host") as direct,
+        ):
+            self.assertIs(adapter.get_connection(request.url, proxies), expected)
+            self.assertIs(adapter.get_connection_with_tls_context(request, True, proxies), expected)
+            legacy.assert_called_once_with(request.url, proxies)
+            current.assert_called_once_with(request, True, proxies, None)
+            direct.assert_not_called()
+
+    def test_failed_send_removes_request_and_thread_local_pins(self) -> None:
+        session = _ValidatingSession(OutboundEndpointPolicy(resolver=resolver_for("93.184.216.34")))
+        self.addCleanup(session.close)
+        request = session.prepare_request(requests.Request("GET", "https://venue.example.test"))
+        with patch.object(HTTPAdapter, "send", side_effect=requests.ConnectionError("failed")):
+            with self.assertRaises(requests.ConnectionError):
+                session.send(request, proxies={})
+        self.assertFalse(hasattr(request, "_market_sentinel_pinned_addresses"))
+        self.assertFalse(hasattr(session.get_adapter(request.url)._market_sentinel_active_pins, "addresses"))
 
     def test_exact_private_origin_allowlist_supports_local_gateways(self) -> None:
         policy = OutboundEndpointPolicy.from_environment(

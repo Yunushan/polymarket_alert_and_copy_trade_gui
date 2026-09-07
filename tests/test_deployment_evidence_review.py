@@ -75,6 +75,13 @@ def _report() -> dict[str, object]:
             "restored_file_count": 3,
             "restored_bytes": 42,
             "completed_at": "2026-08-26T11:25:00Z",
+            "application": {
+                "schema_version": 1, "config_loaded": True, "health_ready": True,
+                "state_readable": True, "mutations_blocked": True, "outbound_attempts": 0,
+                "files_unchanged": True, "sqlite_databases_checked": 0,
+                "api_version": VERSION, "runtime_source_revision": REVISION,
+                "runtime_frontend_sha256": FRONTEND_SHA256,
+            },
         }
     )
     indexed["verified_production_rollback_drill"].update(
@@ -118,6 +125,24 @@ def _report() -> dict[str, object]:
 
 
 class DeploymentEvidenceReviewTests(unittest.TestCase):
+    def test_inventory_only_or_wrong_runtime_restore_cannot_pass_review(self) -> None:
+        for replacement in (None, {}, {"health_ready": True}):
+            report = _report()
+            restore = next(item for item in report["checks"] if item["name"] == "verified_restore_drill")
+            restore["application"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(DeploymentEvidenceError):
+                self._review(report)
+        for key, bad_value in (
+            ("health_ready", False), ("outbound_attempts", 1), ("files_unchanged", False),
+            ("mutations_blocked", False), ("runtime_source_revision", "f" * 40),
+            ("runtime_frontend_sha256", "f" * 64), ("sqlite_databases_checked", True),
+        ):
+            report = _report()
+            restore = next(item for item in report["checks"] if item["name"] == "verified_restore_drill")
+            restore["application"][key] = bad_value
+            with self.subTest(key=key), self.assertRaises(DeploymentEvidenceError):
+                self._review(report)
+
     def _review(self, report: dict[str, object], *, now: datetime = NOW) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "deployment.json"

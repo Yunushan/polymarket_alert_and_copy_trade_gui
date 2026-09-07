@@ -10,6 +10,22 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class CiCdWorkflowTests(unittest.TestCase):
+    def test_browser_workflows_gate_frontend_artifact_publication(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        frontend = text.split("  frontend:\n", 1)[1].split("  mobile-web:\n", 1)[0]
+        for fragment in (
+            "npx playwright install --with-deps chromium firefox webkit",
+            "python scripts/verify_browser_workflows.py",
+            "--require-hashes -r requirements-test.lock",
+            "frontend/test-results/",
+            "frontend/playwright-report/",
+            "if: always()",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, frontend)
+        self.assertNotIn("continue-on-error", frontend)
+        self.assertLess(frontend.index("Verify browser workflows"), frontend.index("Upload built frontend"))
+
     def test_ci_workflow_covers_python_frontend_and_artifacts(self) -> None:
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 

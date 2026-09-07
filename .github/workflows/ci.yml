@@ -370,6 +370,35 @@ jobs:
       - name: Build React frontend
         run: npm run build
 
+      - name: Set up Python for browser workflows
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Install isolated browser backend dependencies
+        working-directory: .
+        run: |
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
+
+      - name: Install browser acceptance runtime
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Verify browser workflows
+        working-directory: .
+        run: python scripts/verify_browser_workflows.py
+
+      - name: Upload browser acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: browser-workflow-evidence
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload built frontend
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

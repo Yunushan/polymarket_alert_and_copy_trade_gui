@@ -2,10 +2,48 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import sys
 import time
+from pathlib import Path
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.probe_transport import _RejectRedirects, open_probe  # noqa: F401 - compatibility exports for probe callers
+
+
+MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
+
+
+def read_probe_body(response) -> bytes:
+    headers = getattr(response, "headers", {})
+    length = headers.get("Content-Length")
+    if length is not None:
+        try:
+            declared_bytes = int(length)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("probe response has an invalid Content-Length") from exc
+        if declared_bytes < 0 or declared_bytes > MAX_PROBE_RESPONSE_BYTES:
+            raise RuntimeError("probe response exceeds the byte limit")
+    body = response.read(MAX_PROBE_RESPONSE_BYTES + 1)
+    if len(body) > MAX_PROBE_RESPONSE_BYTES:
+        raise RuntimeError("probe response exceeds the byte limit")
+    return body
+
+
+def read_health_payload(response) -> dict:
+    if response.status != 200:
+        raise RuntimeError(f"health endpoint returned HTTP {response.status}")
+    try:
+        payload = json.loads(read_probe_body(response).decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise RuntimeError("health endpoint returned invalid JSON") from exc
+    return validate_health_payload(payload)
 
 
 def check_health(url: str, token: str, timeout: float) -> dict:
@@ -13,17 +51,18 @@ def check_health(url: str, token: str, timeout: float) -> dict:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = Request(url, headers=headers, method="GET")
-    with urlopen(request, timeout=timeout) as response:
-        if response.status != 200:
-            raise RuntimeError(f"health endpoint returned HTTP {response.status}")
-        payload = json.loads(response.read().decode("utf-8"))
+    with open_probe(request, timeout=timeout) as response:
+        return read_health_payload(response)
+
+
+def validate_health_payload(payload: object) -> dict:
     if not isinstance(payload, dict) or payload.get("status") != "ok":
         raise RuntimeError("health endpoint did not report status=ok")
     version = payload.get("api_version")
     if not isinstance(version, str) or not version.strip() or version == "unknown":
         raise RuntimeError("health endpoint did not report a usable api_version")
     readiness = payload.get("readiness")
-    if readiness is not None:
+    if "readiness" in payload:
         if not isinstance(readiness, dict) or readiness.get("ready") is not True:
             status = readiness.get("status") if isinstance(readiness, dict) else "invalid"
             raise RuntimeError(f"health endpoint reported service readiness={status or 'degraded'}")
@@ -34,10 +73,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check the local MarketSentinel web API health endpoint.")
     parser.add_argument("--url", default="http://127.0.0.1:8765/api/health")
     parser.add_argument("--token", default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""))
-    parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--timeout", type=float, default=5.0,
+                        help="Overall network deadline in seconds for each health request.")
     parser.add_argument("--retries", type=int, default=12)
     parser.add_argument("--retry-delay", type=float, default=1.0)
     args = parser.parse_args()
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("--timeout must be finite and greater than zero")
 
     last_error: Exception | None = None
     for attempt in range(1, max(1, args.retries) + 1):

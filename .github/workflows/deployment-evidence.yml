@@ -32,6 +32,16 @@ jobs:
       frontend_sha256: ${{ steps.identity.outputs.frontend_sha256 }}
       production_origin: ${{ steps.origin.outputs.production_origin }}
     steps:
+      - name: Checkout protected main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
       - name: Require exact protected production origin
         id: origin
         shell: bash
@@ -42,18 +52,8 @@ jobs:
           set -euo pipefail
           test -n "${APPROVED_ORIGIN}"
           test "${REQUESTED_ORIGIN}" = "${APPROVED_ORIGIN}"
-          python -c 'import ipaddress,socket,sys; from urllib.parse import urlparse; p=urlparse(sys.argv[1]); assert p.scheme == "https" and p.hostname and p.path in ("", "/") and not (p.username or p.password or p.query or p.fragment); addresses={ipaddress.ip_address(item[4][0]) for item in socket.getaddrinfo(p.hostname, p.port or 443, type=socket.SOCK_STREAM)}; assert addresses and all(address.is_global for address in addresses)' "${APPROVED_ORIGIN}"
+          python -c 'import sys; from scripts.verify_production_deployment import _validated_public_origin; origin = _validated_public_origin(sys.argv[1], timeout=10); sys.exit(0 if origin == sys.argv[1] else "Production origin must be canonical")' "${APPROVED_ORIGIN}"
           echo "production_origin=${APPROVED_ORIGIN}" >> "${GITHUB_OUTPUT}"
-
-      - name: Checkout protected main
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
 
       - name: Resolve exact release coordinates
         id: coordinates

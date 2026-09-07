@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 try:
     from scripts.release_version import normalize_release_tag, normalize_release_version
     from scripts.review_deployment_evidence import DeploymentEvidenceError, review_deployment_report
+    from scripts.verify_restored_state import application_check_valid
     from scripts.trusted_readiness_evidence import (
         REPORT_TYPE as TRUSTED_EVIDENCE_REPORT_TYPE,
         WORKFLOW_CONTRACTS as TRUSTED_EVIDENCE_WORKFLOW_CONTRACTS,
@@ -42,6 +43,7 @@ try:
 except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the repository root, to sys.path.
     from release_version import normalize_release_tag, normalize_release_version
     from review_deployment_evidence import DeploymentEvidenceError, review_deployment_report
+    from verify_restored_state import application_check_valid
     from trusted_readiness_evidence import (
         REPORT_TYPE as TRUSTED_EVIDENCE_REPORT_TYPE,
         WORKFLOW_CONTRACTS as TRUSTED_EVIDENCE_WORKFLOW_CONTRACTS,
@@ -53,6 +55,7 @@ except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the r
 
 from polymarket.live_report_schema import validate_live_validation_report
 from polymarket.live_reports import live_validation_report_promotion
+from core.deployment_identity import canonical_https_origin
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2889,26 +2892,14 @@ def _deployment_result(status: str, detail: str, *, report_hash: str = "") -> di
 def _canonical_deployment_origin(value: Any) -> str:
     if not _is_nonblank_string(value):
         return ""
-    parsed = urlparse(value.strip())
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        return ""
-    hostname = parsed.hostname.lower()
-    if hostname in {"localhost", "example.com", "analytics.example.com"} or hostname.endswith(".example.com"):
-        return ""
     try:
-        port = parsed.port
+        origin = canonical_https_origin(value)
     except ValueError:
         return ""
-    suffix = f":{port}" if port and port != 443 else ""
-    return f"https://{hostname}{suffix}"
+    hostname = urlparse(origin).hostname
+    if hostname in {"localhost", "example.com", "analytics.example.com"} or hostname.endswith(".example.com"):
+        return ""
+    return origin
 
 
 def _attested_deployment_report(
@@ -3061,7 +3052,11 @@ def _attested_deployment_report(
     external_probe = deployment.get("external_probe")
     if (
         not isinstance(restore_drill, dict)
-        or set(restore_drill) != {"completed_at", "backup_sha256", "restored_file_count", "restored_bytes"}
+        or set(restore_drill) != {"completed_at", "backup_sha256", "restored_file_count", "restored_bytes", "application"}
+        or not application_check_valid(
+            restore_drill.get("application"), version=expected_version,
+            revision=expected_revision, frontend_sha256=deployment.get("frontend_sha256"),
+        )
         or not isinstance(restore_drill.get("backup_sha256"), str)
         or not _HASH_RE.fullmatch(restore_drill["backup_sha256"])
         or type(restore_drill.get("restored_file_count")) is not int

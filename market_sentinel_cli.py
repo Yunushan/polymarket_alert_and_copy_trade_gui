@@ -7,19 +7,27 @@ import importlib.metadata as importlib_metadata
 import json
 import math
 import os
+import signal
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TextIO
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, TextIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from core.atomic_files import atomic_text_writer
+from core.json_validation import loads_strict_json
+from core.request_control import RequestCancelled, cancellation_scope, request_scope
 from core.storage import ConfigLoadError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
-from polymarket.leaderboard_state import LeaderboardStateStore
+from polymarket.leaderboard import LEADERBOARD_CATEGORIES, normalize_leaderboard_category
+from polymarket.leaderboard_state import LeaderboardStateStore, leaderboard_writer_lock_path
+from polymarket.mdd import MDD_CALCULATION_VERSION
 from polymarket.live_reports import (
     live_validation_coverage_promotion_proposal_markdown,
     live_validation_promotion_proposal_snapshot_diff_markdown,
@@ -114,6 +122,17 @@ LEADERBOARD_FIELDS = [
     "mdd_method",
     "mdd_pct_basis",
     "mdd_source",
+    "pnl_volume_pct",
+    "roi_pct_basis",
+    "mdd_scope",
+    "mdd_account_equity_verified",
+    "mdd_history_status",
+    "mdd_history_coverage",
+    "mdd_source_quality",
+    "position_capital_basis",
+    "mdd_unavailable_reasons",
+    "mdd_calculation_version",
+    "mdd_calculation_current",
 ]
 
 SORT_ALIASES = {
@@ -168,8 +187,8 @@ def _coerce_value(value: Any) -> Any:
     if not text:
         return ""
     try:
-        return json.loads(text)
-    except Exception:
+        return loads_strict_json(text)
+    except json.JSONDecodeError:
         return text
 
 
@@ -179,7 +198,7 @@ def _json_arg(value: Optional[str]) -> Dict[str, Any]:
     raw = value
     if raw.startswith("@"):
         raw = Path(raw[1:]).expanduser().read_text(encoding="utf-8")
-    data = json.loads(raw)
+    data = loads_strict_json(raw)
     if not isinstance(data, dict):
         raise argparse.ArgumentTypeError("JSON payload must be an object.")
     return data
@@ -258,7 +277,7 @@ def build_polymarket_leaderboard_params(args: argparse.Namespace) -> Dict[str, L
     _add_param(params, "sort", sort)
     _add_param(params, "direction", args.direction)
     _add_param(params, "period", args.period)
-    _add_param(params, "category", args.category)
+    _add_param(params, "category", normalize_leaderboard_category(args.category))
     _add_param(params, "limit", args.returned)
     _add_param(params, "scan_limit", args.scanned)
     _add_param(params, "compute_mdd", args.compute_mdd)
@@ -317,6 +336,13 @@ def _csv_rows(rows: Iterable[Mapping[str, Any]]) -> Iterable[Dict[str, Any]]:
     for row in rows:
         item = {field: row.get(field, "") for field in LEADERBOARD_FIELDS}
         item["mdd_source"] = _row_mdd_source(row)
+        version = row.get("mdd_calculation_version", row.get("calculation_version"))
+        item["mdd_calculation_version"] = version
+        item["mdd_calculation_current"] = type(version) is int and version == MDD_CALCULATION_VERSION
+        item["mdd_history_coverage"] = json.dumps(row.get("mdd_history_coverage", {}), sort_keys=True, separators=(",", ":"))
+        item["mdd_source_quality"] = json.dumps(row.get("mdd_source_quality", {}), sort_keys=True, separators=(",", ":"))
+        item["position_capital_basis"] = json.dumps(row.get("position_capital_basis", {}), sort_keys=True, separators=(",", ":"))
+        item["mdd_unavailable_reasons"] = json.dumps(row.get("mdd_unavailable_reasons", []), separators=(",", ":"))
         yield item
 
 
@@ -354,9 +380,52 @@ def _format_rate(count: int, elapsed_seconds: float) -> str:
     return f"{count / elapsed_seconds:.2f}/s"
 
 
-def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str, output: Optional[str]) -> None:
-    stream, should_close = _open_output(output)
-    try:
+class _CancellableLeaderboardWriter:
+    def __init__(self, stream: TextIO, cancel_check: Callable[[], bool]) -> None:
+        self.stream = stream
+        self.cancel_check = cancel_check
+
+    def check(self) -> None:
+        if self.cancel_check():
+            raise RequestCancelled("Leaderboard export cancelled before publication.")
+
+    def write(self, text: str) -> int:
+        self.check()
+        return self.stream.write(text)
+
+
+@contextmanager
+def _leaderboard_output(
+    output: Optional[str], cancel_check: Optional[Callable[[], bool]] = None,
+) -> Iterator[TextIO | _CancellableLeaderboardWriter]:
+    context = nullcontext(sys.stdout) if not output or output == "-" else atomic_text_writer(Path(output).expanduser(), newline="")
+    with context as stream:
+        if cancel_check is None:
+            yield stream
+        else:
+            writer = _CancellableLeaderboardWriter(stream, cancel_check)
+            writer.check()
+            yield writer
+            writer.check()
+
+
+def _validate_leaderboard_output(output: Optional[str], state_path: Path) -> None:
+    if not output or output == "-":
+        return
+    target = Path(output).expanduser().resolve()
+    database = state_path.expanduser().resolve()
+    protected = [database, leaderboard_writer_lock_path(database)]
+    protected.extend(Path(str(database) + suffix) for suffix in ("-wal", "-shm", "-journal"))
+    for source in protected:
+        if target == source or (target.exists() and source.exists() and target.samefile(source)):
+            raise ValueError("Leaderboard output must not overwrite its state database, journal or writer lock.")
+
+
+def write_leaderboard_payload(
+    payload: Mapping[str, Any], *, output_format: str, output: Optional[str],
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> None:
+    with _leaderboard_output(output, cancel_check) as stream:
         if output_format == "json":
             json.dump(payload, stream, indent=2, sort_keys=True)
             stream.write("\n")
@@ -365,9 +434,6 @@ def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str,
         writer = csv.DictWriter(stream, fieldnames=LEADERBOARD_FIELDS)
         writer.writeheader()
         writer.writerows(_csv_rows(payload.get("rows") or []))
-    finally:
-        if should_close:
-            stream.close()
 
 
 _UNLIMITED_LIMIT_TOKENS = {"0", "-1", "all", "any", "none", "unlimited", "max"}
@@ -400,9 +466,9 @@ def _write_streamed_leaderboard_payload(
     *,
     output_format: str,
     output: Optional[str],
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
-    stream, should_close = _open_output(output)
-    try:
+    with _leaderboard_output(output, cancel_check) as stream:
         if output_format == "csv":
             writer = csv.DictWriter(stream, fieldnames=LEADERBOARD_FIELDS)
             writer.writeheader()
@@ -425,9 +491,6 @@ def _write_streamed_leaderboard_payload(
             stream.write(":")
             json.dump(value, stream, separators=(",", ":"), sort_keys=True)
         stream.write("}\n")
-    finally:
-        if should_close:
-            stream.close()
 
 
 def _disk_backed_mdd_options(args: argparse.Namespace) -> Dict[str, Any]:
@@ -467,7 +530,12 @@ def _leaderboard_filter_values(args: argparse.Namespace) -> Dict[str, Optional[f
     }
 
 
-def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
+def _run_disk_backed_polymarket_leaderboard(
+    args: argparse.Namespace, *, cancel_check: Optional[Callable[[], bool]] = None,
+) -> int:
+    is_cancelled = cancel_check or (lambda: False)
+    if is_cancelled():
+        raise RequestCancelled("Leaderboard scan cancelled.")
     if args.checkpoint:
         raise ValueError("Use either --checkpoint or --state-db. The SQLite state database is already resumable.")
 
@@ -492,13 +560,26 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
     retry_delay = max(0.0, min(_cli_optional_float(args.scan_retry_delay_seconds) or 0.0, 3600.0))
     warnings: List[str] = []
     state_path = Path(args.state_db).expanduser()
+    _validate_leaderboard_output(args.output, state_path)
     store = LeaderboardStateStore(state_path)
     try:
         store.prepare(
-            {"remote_sort": remote_sort, "direction": direction, "period": period, "category": category},
+            _leaderboard_scan_signature(params),
             resume=bool(args.resume),
         )
+        mdd_options = _disk_backed_mdd_options(args)
+        if mdd_requested:
+            mdd_signature = {
+                "calculation_version": MDD_CALCULATION_VERSION,
+                "options": {key: value for key, value in mdd_options.items() if key != "cache_ttl_seconds"},
+            }
+            invalidated = store.prepare_mdd(mdd_signature)
+            if invalidated:
+                warnings.append(
+                    f"Recomputing {invalidated} saved MDD results: calculation settings changed or legacy results lack a settings signature."
+                )
         state = store.progress()
+        scanned_rows = int(state["scanned"])
         if not args.quiet:
             print(
                 f"[{_log_timestamp()} pid={os.getpid()} status=starting elapsed=00:00:00 phase=setup] "
@@ -508,9 +589,11 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             )
 
         def emit(phase: str, **values: Any) -> None:
+            nonlocal scanned_rows
+            scanned_rows = int(values.get("scanned", scanned_rows))
             if progress_callback is None:
                 return
-            scanned = int(values.get("scanned", store.progress()["rows"]))
+            scanned = scanned_rows
             if phase == "mdd":
                 total = int(values.get("mdd_total", 0))
                 attempted = int(values.get("mdd_attempted", 0))
@@ -537,15 +620,16 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 }
             )
 
-        if not state["scan_complete"] and (scan_limit is None or state["rows"] < scan_limit):
+        if not state["scan_complete"] and (scan_limit is None or state["scanned"] < scan_limit):
             def save_page(offset: int, _limit: int, page: List[Dict[str, Any]]) -> bool:
                 normalized = [normalize_polymarket_leaderboard_row(row, offset + index + 1) for index, row in enumerate(page)]
                 return store.record_page(offset, _limit, normalized)
 
+            scan_summary: Dict[str, Any] = {}
             _fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=scan_limit,
                 scan_start_offset=int(state["next_offset"]),
-                initial_scanned=int(state["rows"]),
+                initial_scanned=int(state["scanned"]),
                 retain_rows=False,
                 remote_sort=remote_sort,
                 direction=direction,
@@ -554,16 +638,21 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 scan_concurrency=scan_concurrency,
                 scan_retry_attempts=retry_attempts,
                 scan_retry_delay_seconds=retry_delay,
-                is_cancelled=lambda: False,
+                is_cancelled=is_cancelled,
                 emit_progress=emit,
                 warnings=warnings,
                 page_callback=save_page,
+                scan_summary=scan_summary,
             )
+            if scan_summary.get("completion_reason") == "upstream_offset_limit":
+                store.stop_at_upstream_limit()
+            if is_cancelled() or scan_summary.get("completion_reason") == "cancelled":
+                raise RequestCancelled("Leaderboard scan cancelled; committed pages remain resumable.")
 
         if mdd_requested:
+            scanned_rows = int(store.progress()["scanned"])
             candidate_count = store.candidate_count(filters)
             mdd_total = min(candidate_count, mdd_scan_limit) if mdd_scan_limit is not None else candidate_count
-            mdd_options = _disk_backed_mdd_options(args)
             processed = 0
             computed = 0
             rate_limited = False
@@ -573,12 +662,15 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                 if not wallet:
                     return row, None, ValueError("Leaderboard row does not contain a wallet.")
                 try:
-                    return row, polymarket_user_mdd_payload(wallet, **mdd_options), None
+                    with cancellation_scope(is_cancelled):
+                        return row, polymarket_user_mdd_payload(wallet, **mdd_options), None
                 except Exception as exc:
                     return row, None, exc
 
             batch: List[Mapping[str, Any]] = []
             for candidate in store.iter_mdd_candidates(filters, sort=sort, direction=direction, limit=mdd_scan_limit):
+                if is_cancelled():
+                    raise RequestCancelled("MDD scan cancelled; committed results remain resumable.")
                 if candidate["mdd_status"] == "done":
                     processed += 1
                     continue
@@ -590,6 +682,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                     futures = [executor.submit(compute, row) for row in batch]
                     results = [future.result() for future in as_completed(futures)]
                 for row, mdd, exc in results:
+                    if isinstance(exc, RequestCancelled):
+                        raise exc
                     processed += 1
                     if exc is None and mdd is not None:
                         attach_polymarket_mdd_audit_cache(
@@ -604,7 +698,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                         if len(warnings) < 100:
                             warnings.append(f"MDD unavailable for {row.get('wallet')}: {exc}")
                         rate_limited = rate_limited or isinstance(exc, PolymarketRateLimitError)
-                    emit("mdd", scanned=store.progress()["rows"], filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
+                    emit("mdd", scanned=scanned_rows, filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
                          message=f"Computing MDD {processed}/{mdd_total}.")
                 batch = []
                 if rate_limited:
@@ -612,6 +706,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                     break
             if batch and not rate_limited:
                 for row, mdd, exc in [compute(row) for row in batch]:
+                    if isinstance(exc, RequestCancelled):
+                        raise exc
                     processed += 1
                     if exc is None and mdd is not None:
                         attach_polymarket_mdd_audit_cache(
@@ -623,14 +719,20 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
                         store.set_mdd(int(row["id"]), None, exc)
                         if len(warnings) < 100:
                             warnings.append(f"MDD unavailable for {row.get('wallet')}: {exc}")
-                    emit("mdd", scanned=store.progress()["rows"], filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
+                    emit("mdd", scanned=scanned_rows, filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
                          message=f"Computing MDD {processed}/{mdd_total}.")
 
+        if is_cancelled():
+            raise RequestCancelled("Leaderboard scan cancelled; previous output was preserved.")
         final_state = store.progress()
         qualified = store.result_count(filters, require_mdd=mdd_requested)
         returned = min(qualified, returned_limit) if returned_limit is not None else qualified
         payload: Dict[str, Any] = {
-            "counts": {"returned": returned, "filtered": qualified, "scanned": final_state["rows"], "mdd_attempted": final_state["mdd_done"] + final_state["mdd_errors"], "mdd_computed": final_state["mdd_done"]},
+            "counts": {
+                "returned": returned, "filtered": qualified, "scanned": final_state["scanned"],
+                "unique_wallets": final_state["unique_wallets"], "duplicate_rows": final_state["duplicate_rows"],
+                "mdd_attempted": final_state["mdd_done"] + final_state["mdd_errors"], "mdd_computed": final_state["mdd_done"],
+            },
             "sort": sort,
             "direction": direction,
             "period": period,
@@ -644,6 +746,8 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             "disk_backed": True,
             "state_db": str(state_path),
             "state": final_state,
+            "mdd_signature": store.status()["mdd_signature"],
+            "wallet_observation_policy": "first_observation_per_normalized_wallet",
             "completion_reason": final_state["stop_reason"] or ("scan_limit_reached" if scan_limit is not None else "unknown"),
             "source_enumeration_complete": final_state["stop_reason"] == "end_of_results",
             "source_scope_note": (
@@ -653,7 +757,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             "source": "polymarket_data_api_leaderboard",
             "source_sort": remote_sort,
             "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_durable_local_state",
-            "mdd_available": final_state["mdd_done"] > 0,
+            "mdd_available": final_state["mdd_available"] > 0,
             "warnings": warnings,
         }
         _write_streamed_leaderboard_payload(
@@ -661,11 +765,12 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             store.iter_results(filters, require_mdd=mdd_requested, sort=sort, direction=direction, limit=returned_limit),
             output_format=args.format,
             output=args.output,
+            cancel_check=is_cancelled,
         )
         if not args.quiet:
             print(
                 f"[{_log_timestamp()} pid={os.getpid()} status=done elapsed={_format_elapsed(time.monotonic() - started_at)} phase=done] "
-                f"Done: returned={returned} filtered={qualified} scanned={final_state['rows']} mdd_computed={final_state['mdd_done']} completion={payload['completion_reason']} warnings={len(warnings)} state_db={state_path}",
+                f"Done: returned={returned} filtered={qualified} scanned={final_state['scanned']} unique_wallets={final_state['unique_wallets']} duplicate_rows={final_state['duplicate_rows']} mdd_computed={final_state['mdd_done']} completion={payload['completion_reason']} warnings={len(warnings)} state_db={state_path}",
                 file=sys.stderr,
             )
         return 0
@@ -673,13 +778,42 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
         store.close()
 
 
-def _load_leaderboard_checkpoint(path: Path) -> tuple[List[Dict[str, Any]], int, int, int]:
+def _leaderboard_scan_signature(params: Mapping[str, List[str]]) -> Dict[str, Any]:
+    signature = {
+        "remote_sort": LEADERBOARD_SORTS[params["sort"][0]],
+        "direction": params["direction"][0].upper(),
+        "period": params["period"][0],
+        "category": normalize_leaderboard_category(params["category"][0]),
+    }
+    # Older ESPORTS scans fetched OVERALL despite retaining the requested label.
+    if signature["category"] == "ESPORTS":
+        signature["category_contract_version"] = 1
+    return signature
+
+
+def _validate_saved_leaderboard_category(signature: Mapping[str, Any]) -> None:
+    if "category" not in signature:
+        return
+    category = normalize_leaderboard_category(signature["category"])
+    if category == "ESPORTS" and signature.get("category_contract_version") != 1:
+        raise ValueError("Legacy ESPORTS scan contains unverified category data. Start a new scan in a separate state database.")
+
+
+def _load_leaderboard_checkpoint(path: Path, *, signature: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], int, int, int]:
     if not path.exists():
         return [], 0, 0, 0
 
     pages: Dict[int, tuple[int, List[Dict[str, Any]]]] = {}
     ignored = 0
     with path.open("r", encoding="utf-8") as stream:
+        try:
+            header = json.loads(stream.readline())
+        except json.JSONDecodeError as exc:
+            raise ValueError("Checkpoint has no valid scan identity; start a new scan in a separate checkpoint file.") from exc
+        if not isinstance(header, Mapping) or header.get("type") != "leaderboard_scan" or header.get("version") != 1:
+            raise ValueError("Legacy checkpoint has no scan identity; start a new scan in a separate checkpoint file.")
+        if header.get("signature") != dict(signature):
+            raise ValueError("Checkpoint was created with different leaderboard scan settings.")
         for line in stream:
             raw = line.strip()
             if not raw:
@@ -689,6 +823,8 @@ def _load_leaderboard_checkpoint(path: Path) -> tuple[List[Dict[str, Any]], int,
             except json.JSONDecodeError:
                 ignored += 1
                 continue
+            if isinstance(record, Mapping) and record.get("type") == "leaderboard_scan":
+                raise ValueError("Checkpoint contains multiple scan identities; start a new scan in a separate checkpoint file.")
             if not isinstance(record, Mapping) or record.get("type") != "leaderboard_page":
                 ignored += 1
                 continue
@@ -728,7 +864,14 @@ class _LeaderboardCheckpointWriter:
         self.fsync_every = max(1, int(fsync_every or 20))
         self.written = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        needs_newline = False
+        if self.path.exists() and self.path.stat().st_size:
+            with self.path.open("rb") as stream:
+                stream.seek(-1, os.SEEK_END)
+                needs_newline = stream.read(1) != b"\n"
         self.stream = self.path.open("a", encoding="utf-8")
+        if needs_newline:
+            self.stream.write("\n")
 
     def record(self, offset: int, limit: int, rows: List[Dict[str, Any]]) -> None:
         json.dump(
@@ -802,6 +945,37 @@ def _progress_printer(enabled: bool, *, started_at: Optional[float] = None):
 
 
 def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
+    started_at = time.monotonic()
+    cancelled = threading.Event()
+    received_signal = [int(signal.SIGINT)]
+    previous_handlers = {}
+
+    def interrupt(signum, _frame):
+        received_signal[0] = signum
+        cancelled.set()
+
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, interrupt)
+        with cancellation_scope(cancelled.is_set):
+            try:
+                return _run_polymarket_leaderboard(args, cancel_check=cancelled.is_set)
+            except RequestCancelled:
+                print(
+                    f"[{_log_timestamp()} pid={os.getpid()} status=cancelled "
+                    f"elapsed={_format_elapsed(time.monotonic() - started_at)} phase=cancelled] Scan cancelled; "
+                    "committed checkpoints remain resumable; file exports are published only when complete.",
+                    file=sys.stderr, flush=True,
+                )
+                return 128 + received_signal[0]
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
+def _run_polymarket_leaderboard(args: argparse.Namespace, *, cancel_check: Callable[[], bool]) -> int:
     if str(getattr(args, "state_db", "") or "").strip():
         if bool(getattr(args, "resume_on_failure", False)):
             max_restarts = _cli_clamp_int(getattr(args, "resume_max_restarts", 0), 0, 0, 1_000_000)
@@ -809,7 +983,7 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
             restart = 0
             while True:
                 try:
-                    return _run_disk_backed_polymarket_leaderboard(args)
+                    return _run_disk_backed_polymarket_leaderboard(args, cancel_check=cancel_check)
                 except PolymarketHTTPError as exc:
                     restart += 1
                     if max_restarts and restart > max_restarts:
@@ -824,8 +998,9 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
                             flush=True,
                         )
                     args.resume = True
-                    time.sleep(delay)
-        return _run_disk_backed_polymarket_leaderboard(args)
+                    with request_scope(delay + 1) as control:
+                        control.sleep(delay)
+        return _run_disk_backed_polymarket_leaderboard(args, cancel_check=cancel_check)
     if bool(getattr(args, "resume_on_failure", False)):
         raise ValueError("--resume-on-failure requires --state-db so the next attempt has durable scan state.")
 
@@ -835,7 +1010,7 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
     checkpoint_path_text = str(getattr(args, "checkpoint", "") or "").strip()
     checkpoint_writer: Optional[_LeaderboardCheckpointWriter] = None
     initial_raw_rows: Optional[List[Mapping[str, Any]]] = None
-    payload_kwargs: Dict[str, Any] = {"progress_callback": progress_callback}
+    payload_kwargs: Dict[str, Any] = {"progress_callback": progress_callback, "cancel_check": cancel_check}
     if not args.quiet:
         checkpoint_label = checkpoint_path_text or "-"
         print(
@@ -846,8 +1021,10 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
         )
     if checkpoint_path_text:
         checkpoint_path = Path(checkpoint_path_text).expanduser()
-        if getattr(args, "resume", False):
-            checkpoint_rows, next_offset, loaded_pages, ignored_lines = _load_leaderboard_checkpoint(checkpoint_path)
+        _validate_leaderboard_output(args.output, checkpoint_path)
+        signature = _leaderboard_scan_signature(params)
+        if getattr(args, "resume", False) and checkpoint_path.exists():
+            checkpoint_rows, next_offset, loaded_pages, ignored_lines = _load_leaderboard_checkpoint(checkpoint_path, signature=signature)
             initial_raw_rows = checkpoint_rows
             _add_param(params, "scan_start_offset", next_offset)
             if not args.quiet:
@@ -859,8 +1036,9 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
                     flush=True,
                 )
         else:
-            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            checkpoint_path.write_text("", encoding="utf-8")
+            with atomic_text_writer(checkpoint_path) as stream:
+                json.dump({"type": "leaderboard_scan", "version": 1, "signature": signature}, stream, sort_keys=True)
+                stream.write("\n")
         checkpoint_writer = _LeaderboardCheckpointWriter(
             checkpoint_path,
             fsync_every=max(1, int(str(getattr(args, "checkpoint_fsync_every", "20") or "20"))),
@@ -873,7 +1051,9 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
     finally:
         if checkpoint_writer is not None:
             checkpoint_writer.close()
-    write_leaderboard_payload(payload, output_format=args.format, output=args.output)
+    if cancel_check() or payload.get("cancelled"):
+        raise RequestCancelled("Leaderboard scan cancelled; previous output was preserved.")
+    write_leaderboard_payload(payload, output_format=args.format, output=args.output, cancel_check=cancel_check)
 
     counts = payload.get("counts") or {}
     warning_count = len(payload.get("warnings") or [])
@@ -899,13 +1079,11 @@ def run_polymarket_leaderboard_status(args: argparse.Namespace) -> int:
     state_path = Path(args.state_db).expanduser()
     if not state_path.is_file():
         raise FileNotFoundError(f"Leaderboard state database does not exist: {state_path}")
-    store = LeaderboardStateStore(state_path)
-    try:
+    _validate_leaderboard_output(args.output, state_path)
+    with closing(LeaderboardStateStore(state_path, read_only=True)) as store, store.snapshot():
         payload = store.status()
         payload["process"] = _leaderboard_process_status(getattr(args, "pid_file", ""))
         return _write_command_payload(args, payload)
-    finally:
-        store.close()
 
 
 def _leaderboard_process_status(pid_file_value: Any) -> Dict[str, Any]:
@@ -955,6 +1133,7 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
     state_path = Path(args.state_db).expanduser()
     if not state_path.is_file():
         raise FileNotFoundError(f"Leaderboard state database does not exist: {state_path}")
+    _validate_leaderboard_output(args.output, state_path)
     sort = SORT_ALIASES.get(str(args.sort or "roi_pct").strip().lower(), "roi_pct")
     direction = str(args.direction or "DESC").upper()
     returned_limit = _cli_optional_limit(args.returned, 100)
@@ -962,17 +1141,26 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
     require_mdd = bool(args.require_mdd) or sort in {"mdd_usd", "mdd_pct"} or any(
         filters[key] is not None for key in ("min_mdd_usd", "max_mdd_usd", "min_mdd_pct", "max_mdd_pct")
     )
-    store = LeaderboardStateStore(state_path)
-    try:
+    with closing(LeaderboardStateStore(state_path, read_only=True)) as store, store.snapshot():
         state = store.progress()
+        scan_status = store.status()
+        _validate_saved_leaderboard_category(scan_status["signature"])
+        mdd_signature = scan_status["mdd_signature"]
+        mdd_current = isinstance(mdd_signature, Mapping) and mdd_signature.get("calculation_version") == MDD_CALCULATION_VERSION
         qualified = store.result_count(filters, require_mdd=require_mdd)
+        if require_mdd and qualified and not mdd_current:
+            raise ValueError(
+                "Saved MDD calculations are obsolete or unversioned. Resume the scan to recompute MDD before risk-filtered export."
+            )
         returned = min(qualified, returned_limit) if returned_limit is not None else qualified
         completion_reason = state["stop_reason"] or ("in_progress" if not state["scan_complete"] else "unknown")
         payload: Dict[str, Any] = {
             "counts": {
                 "returned": returned,
                 "filtered": qualified,
-                "scanned": state["rows"],
+                "scanned": state["scanned"],
+                "unique_wallets": state["unique_wallets"],
+                "duplicate_rows": state["duplicate_rows"],
                 "mdd_computed": state["mdd_done"],
                 "mdd_errors": state["mdd_errors"],
                 "mdd_pending": state["mdd_pending"],
@@ -982,11 +1170,19 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
             "limit": returned_limit,
             "limit_unlimited": returned_limit is None,
             "require_mdd": require_mdd,
-            "partial": not state["scan_complete"] or (require_mdd and state["mdd_pending"] > 0),
+            "partial": state["stop_reason"] != "end_of_results" or (
+                require_mdd and (state["mdd_pending"] > 0 or state["mdd_errors"] > 0)
+            ),
             "completion_reason": completion_reason,
             "state": state,
             "state_db": str(state_path),
+            "scan_signature": scan_status["signature"],
             "exported_at": int(time.time()),
+            "mdd_signature": mdd_signature,
+            "mdd_calculation_current": mdd_current,
+            "warnings": ["Saved MDD calculations are obsolete or unversioned; resume the scan to recompute them."]
+            if state["mdd_done"] and not mdd_current else [],
+            "wallet_observation_policy": "first_observation_per_normalized_wallet",
             "source": "polymarket_data_api_leaderboard_durable_state",
             "ranking_scope": "computed_from_currently_saved_public_leaderboard_rows",
             "source_scope_note": (
@@ -1001,8 +1197,6 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
             output=args.output,
         )
         return 0
-    finally:
-        store.close()
 
 
 def run_health(args: argparse.Namespace) -> int:
@@ -2897,12 +3091,12 @@ def build_parser() -> argparse.ArgumentParser:
         "polymarket-leaderboard",
         aliases=["leaderboard", "polymarket-analytics"],
         parents=[common],
-        help="Run the Polymarket ROI/PnL/volume/MDD leaderboard scan without a GUI.",
+        help="Rank public Polymarket candidates by PnL/volume, PnL, volume, or observed MDD without a GUI.",
     )
-    leaderboard.add_argument("--sort", default="roi_pct", help="roi_pct, pnl_usd, volume_usd, mdd_pct, or mdd_usd.")
+    leaderboard.add_argument("--sort", default="roi_pct", help="roi_pct (PnL/volume %%, not investment ROI), pnl_usd, volume_usd, mdd_pct, or mdd_usd (observed public PnL drawdown).")
     leaderboard.add_argument("--direction", default="DESC", choices=["ASC", "DESC"])
     leaderboard.add_argument("--period", default="all")
-    leaderboard.add_argument("--category", default="OVERALL")
+    leaderboard.add_argument("--category", default="OVERALL", help="Leaderboard category: " + ", ".join(LEADERBOARD_CATEGORIES))
     leaderboard.add_argument("--returned", "--limit", default="100", help="Rows to return; use unlimited, all, 0, or -1 for no local cap.")
     leaderboard.add_argument("--scanned", "--scan-limit", default="500", help="Rows to scan; use unlimited, all, 0, or -1 to scan until the API is exhausted.")
     leaderboard.add_argument("--compute-mdd", action="store_true")
@@ -2914,7 +3108,7 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--mdd-trade-limit", default="1000")
     leaderboard.add_argument("--mdd-open-limit", default="500")
     leaderboard.add_argument("--mdd-mark-replay-token-limit", default="10")
-    leaderboard.add_argument("--mdd-mark-replay-point-limit", default="5000")
+    leaderboard.add_argument("--mdd-mark-replay-point-limit", default="5000", help="Retained replay points; all fetched trades and marks still contribute to MDD.")
     leaderboard.add_argument("--mdd-mark-replay-interval", default="1h")
     leaderboard.add_argument("--mdd-mark-replay-fidelity", default="60")
     leaderboard.add_argument("--mdd-include-accounting", action="store_true")
@@ -2982,7 +3176,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export current durable leaderboard rows without starting, resuming, or changing a scan.",
     )
     leaderboard_export.add_argument("--state-db", required=True, help="Existing SQLite state database created by polymarket-leaderboard.")
-    leaderboard_export.add_argument("--sort", default="roi_pct", help="roi_pct, pnl_usd, volume_usd, mdd_pct, or mdd_usd.")
+    leaderboard_export.add_argument("--sort", default="roi_pct", help="roi_pct (PnL/volume %%, not investment ROI), pnl_usd, volume_usd, mdd_pct, or mdd_usd (observed public PnL drawdown).")
     leaderboard_export.add_argument("--direction", default="DESC", choices=["ASC", "DESC"])
     leaderboard_export.add_argument("--returned", "--limit", default="unlimited", help="Rows to export; use unlimited, all, 0, or -1 for no local cap.")
     leaderboard_export.add_argument("--require-mdd", action="store_true", help="Export only rows with completed MDD calculations.")
@@ -3535,7 +3729,7 @@ def build_parser() -> argparse.ArgumentParser:
     user_mdd.add_argument("--max-points", default="50")
     user_mdd.add_argument("--cache-ttl-seconds", default="0")
     user_mdd.add_argument("--mark-replay-token-limit", default="10")
-    user_mdd.add_argument("--mark-replay-point-limit", default="5000")
+    user_mdd.add_argument("--mark-replay-point-limit", default="5000", help="Retained replay points; all fetched trades and marks still contribute to MDD.")
     user_mdd.add_argument("--mark-replay-interval", default="1h")
     user_mdd.add_argument("--mark-replay-fidelity", default="60")
     user_mdd.add_argument("--include-accounting", action="store_true")

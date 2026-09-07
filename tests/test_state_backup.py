@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,7 @@ class StateBackupTests(unittest.TestCase):
         self.assertIn("--max-members", result.stdout)
         self.assertIn("--max-bytes", result.stdout)
         self.assertIn("--max-archive-bytes", result.stdout)
+        self.assertIn("--sqlite-timeout", result.stdout)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -401,6 +403,137 @@ class StateBackupTests(unittest.TestCase):
             self.assertEqual(catalog.orphan_manifests, (orphan_manifest.name,))
             self.assertEqual(catalog.invalid_pairs, (invalid_archive.name,))
 
+    def test_sqlite_size_limit_rejects_before_creating_staged_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "large.sqlite3"
+            staging = root / "staged.sqlite3"
+            connection = sqlite3.connect(source)
+            try:
+                connection.execute("CREATE TABLE data (value BLOB)")
+                connection.execute("INSERT INTO data VALUES (zeroblob(1048576))")
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaisesRegex(RuntimeError, "uncompressed restore safety limits"):
+                backup_state._snapshot_sqlite(source, staging, 4096)
+            self.assertFalse(staging.exists())
+
+    def test_sqlite_snapshot_does_not_grow_when_live_writer_commits_after_preflight(self) -> None:
+        connect = sqlite3.connect
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "live.sqlite3"
+            staging = root / "staged.sqlite3"
+            writer = connect(source)
+            try:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("CREATE TABLE data (value BLOB)")
+                writer.execute("INSERT INTO data VALUES ('original')")
+                writer.commit()
+                size_limit = writer.execute("PRAGMA page_size").fetchone()[0] * writer.execute("PRAGMA page_count").fetchone()[0]
+
+                class GrowingConnection(sqlite3.Connection):
+                    def backup(self, target, **kwargs):
+                        writer.execute("INSERT INTO data VALUES (zeroblob(1048576))")
+                        writer.commit()
+                        return super().backup(target, **kwargs)
+
+                with patch("scripts.backup_state.sqlite3.connect", side_effect=lambda *args, **kwargs: connect(
+                    *args, **kwargs, factory=GrowingConnection,
+                )):
+                    backup_state._snapshot_sqlite(source, staging, size_limit)
+                self.assertLessEqual(staging.stat().st_size, size_limit)
+                reader = connect(staging)
+                try:
+                    self.assertEqual(reader.execute("SELECT value FROM data").fetchall(), [("original",)])
+                    self.assertEqual(reader.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                finally:
+                    reader.close()
+                self.assertEqual(writer.execute("SELECT COUNT(*) FROM data").fetchone()[0], 2)
+            finally:
+                writer.close()
+
+    def test_sqlite_copy_deadline_preserves_previous_backup_and_does_not_publish(self) -> None:
+        connect = sqlite3.connect
+        now = [0.0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "state"
+            source.mkdir()
+            database = source / "large.sqlite3"
+            destination = root / "backups"
+            connection = connect(database)
+            try:
+                connection.execute("CREATE TABLE data (value BLOB)")
+                connection.execute("INSERT INTO data VALUES (zeroblob(1048576))")
+                connection.commit()
+            finally:
+                connection.close()
+            previous = create_backup(source, destination, retain=1)
+            existing_files = set(destination.iterdir())
+            chunks = []
+
+            class SlowConnection(sqlite3.Connection):
+                def backup(self, target, **kwargs):
+                    progress = kwargs["progress"]
+
+                    def slow_progress(status, remaining, total):
+                        chunks.append((remaining, total))
+                        now[0] = 2.0
+                        progress(status, remaining, total)
+
+                    kwargs["progress"] = slow_progress
+                    return super().backup(target, **kwargs)
+
+            with (
+                patch("scripts.backup_state.sqlite3.connect", side_effect=lambda *args, **kwargs: connect(
+                    *args, **kwargs, factory=SlowConnection,
+                )),
+                patch("scripts.backup_state.time.monotonic", side_effect=lambda: now[0]),
+                self.assertRaisesRegex(RuntimeError, "SQLite backup exceeded"),
+            ):
+                create_backup(source, destination, retain=1, sqlite_timeout_seconds=1)
+            self.assertEqual(len(chunks), 1)
+            self.assertGreater(chunks[0][0], 0, "deadline must stop the real copy before all pages are copied")
+            self.assertEqual(set(destination.iterdir()), existing_files)
+            self.assertEqual(verify_backup(destination / previous["archive"])["file_count"], 1)
+
+    def test_sqlite_lock_wait_obeys_budget_and_releases_connections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "locked.sqlite3"
+            staging = Path(temporary) / "staged.sqlite3"
+            writer = sqlite3.connect(source)
+            try:
+                writer.execute("CREATE TABLE data (value TEXT)")
+                writer.execute("INSERT INTO data VALUES ('durable')")
+                writer.commit()
+                writer.execute("BEGIN EXCLUSIVE")
+                before = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, "unable to create a consistent SQLite backup"):
+                    backup_state._snapshot_sqlite(source, staging, 65536, timeout_seconds=0.1)
+                self.assertLess(time.monotonic() - before, 2)
+                self.assertFalse(staging.exists())
+                writer.rollback()
+                # This phase proves lock cleanup and recovery, not disk throughput.
+                backup_state._snapshot_sqlite(source, staging, 65536)
+                restored = sqlite3.connect(staging)
+                try:
+                    self.assertEqual(restored.execute("SELECT value FROM data").fetchall(), [("durable",)])
+                finally:
+                    restored.close()
+            finally:
+                writer.close()
+
+    def test_invalid_sqlite_timeout_is_rejected_before_backup_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "backups"
+            for timeout in (0, -1, float("nan"), float("inf")):
+                with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "finite and positive"):
+                    create_backup(root, destination, sqlite_timeout_seconds=timeout)
+            self.assertFalse(destination.exists())
+
     def test_backup_uses_a_consistent_sqlite_snapshot_without_transaction_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -428,6 +561,29 @@ class StateBackupTests(unittest.TestCase):
                 self.assertEqual(restored_connection.execute("SELECT value FROM rows").fetchone()[0], "durable")
             finally:
                 restored_connection.close()
+
+    def test_backup_of_active_leaderboard_omits_writer_lock_and_restores_rows(self) -> None:
+        from polymarket.leaderboard_state import LeaderboardStateStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "state"
+            destination = root / "backups"
+            writer = LeaderboardStateStore(source / "scan.sqlite3")
+            try:
+                writer.prepare({}, resume=False)
+                writer.record_page(0, 1, [{"wallet": "0xaaa"}])
+                archive = destination / str(create_backup(source, destination)["archive"])
+                with tarfile.open(archive, "r:gz") as handle:
+                    self.assertEqual(handle.getnames(), ["scan.sqlite3"])
+                restore_backup(archive, root / "restored")
+                recovered = LeaderboardStateStore(root / "restored" / "scan.sqlite3", read_only=True)
+                try:
+                    self.assertEqual(recovered.progress()["rows"], 1)
+                finally:
+                    recovered.close()
+            finally:
+                writer.close()
 
     def test_restore_rejects_unsafe_archive_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

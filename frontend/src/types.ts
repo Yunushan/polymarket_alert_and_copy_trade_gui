@@ -494,9 +494,15 @@ export interface PolymarketUserSearchPayload {
 export type PolymarketLeaderboardSort = "roi_pct" | "pnl_usd" | "volume_usd" | "mdd_usd" | "mdd_pct";
 export type PolymarketMddMode = "fast" | "mark_replay";
 
+export const POLYMARKET_LEADERBOARD_CATEGORIES = [
+  "OVERALL", "POLITICS", "SPORTS", "ESPORTS", "CRYPTO", "CULTURE",
+  "MENTIONS", "WEATHER", "ECONOMICS", "TECH", "FINANCE"
+] as const;
+
 export interface PolymarketLeaderboardFilters {
   sort: PolymarketLeaderboardSort;
   direction: "ASC" | "DESC";
+  category: typeof POLYMARKET_LEADERBOARD_CATEGORIES[number];
   limit: string;
   scan_limit: string;
   compute_mdd: boolean;
@@ -536,6 +542,9 @@ export interface PolymarketLeaderboardRow {
   pnl_usd: number | null;
   volume_usd: number | null;
   roi_pct: number | null;
+  pnl_volume_pct?: number | null;
+  roi_pct_basis?: string;
+  mdd_history_status?: string;
   trade_count: number;
   mdd_usd: number | null;
   mdd_pct: number | null;
@@ -607,6 +616,20 @@ export interface PolymarketMddPoint {
 }
 
 export interface PolymarketMddPayload {
+  mdd_source_quality?: {
+    status: string;
+    sources: Record<string, { status: string; rows: number; invalid_rows: number; reasons: Record<string, number> }>;
+  };
+  mdd_unavailable_reasons?: string[];
+  mdd_history_status?: string;
+  mdd_history_coverage?: Record<string, {
+    status: string;
+    returned: number;
+    limit: number;
+    first_timestamp: number | null;
+    last_timestamp: number | null;
+    rows_without_timestamp: number;
+  }>;
   wallet?: string | null;
   mdd_usd: number | null;
   mdd_pct: number | null;

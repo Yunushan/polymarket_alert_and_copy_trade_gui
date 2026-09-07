@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import secrets
 import stat
 import sqlite3
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
@@ -22,6 +24,7 @@ DEFAULT_MAX_MEMBERS = 10_000
 DEFAULT_MAX_UNCOMPRESSED_BYTES = 1_073_741_824
 DEFAULT_MAX_ARCHIVE_BYTES = 268_435_456
 DEFAULT_MAX_TAR_METADATA_BYTES = 1_048_576
+DEFAULT_SQLITE_TIMEOUT_SECONDS = 30.0
 
 
 class _BoundedWriter:
@@ -83,21 +86,45 @@ def _is_sqlite_database(path: Path) -> bool:
 
 
 def _is_sqlite_sidecar(path: Path) -> bool:
+    if path.name.startswith(".") and path.name.endswith(".writer.lock"):
+        return True
     for suffix in ("-wal", "-shm", "-journal"):
         if path.name.endswith(suffix):
             return Path(path.name[: -len(suffix)]).suffix.lower() in SQLITE_SUFFIXES
     return False
 
 
-def _snapshot_sqlite(source: Path, staging_path: Path) -> Path:
+def _snapshot_sqlite(
+    source: Path, staging_path: Path, max_bytes: int, *, timeout_seconds: float = DEFAULT_SQLITE_TIMEOUT_SECONDS,
+) -> Path:
+    if max_bytes < 1:
+        raise RuntimeError("backup source exceeds uncompressed restore safety limits")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("SQLite backup timeout must be finite and positive")
+    deadline = time.monotonic() + timeout_seconds
     staging_path.parent.mkdir(parents=True, exist_ok=True)
     source_uri = source.resolve().as_uri() + "?mode=ro"
     source_connection: sqlite3.Connection | None = None
     destination_connection: sqlite3.Connection | None = None
     try:
-        source_connection = sqlite3.connect(source_uri, uri=True, timeout=30)
-        destination_connection = sqlite3.connect(staging_path)
-        source_connection.backup(destination_connection)
+        source_connection = sqlite3.connect(source_uri, uri=True, timeout=timeout_seconds)
+        # Pin the read snapshot before sizing it. Otherwise a concurrent WAL
+        # writer can grow/restart the backup after an apparently safe preflight.
+        source_connection.execute("BEGIN")
+        source_connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+        page_size = source_connection.execute("PRAGMA page_size").fetchone()[0]
+        page_count = source_connection.execute("PRAGMA page_count").fetchone()[0]
+
+        def check_progress(_status: int, _remaining: int, total: int) -> None:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"SQLite backup exceeded its {timeout_seconds:g}-second budget")
+            if total * page_size > max_bytes:
+                raise RuntimeError("backup source exceeds uncompressed restore safety limits")
+
+        check_progress(0, page_count, page_count)
+        destination_connection = sqlite3.connect(staging_path, timeout=max(0.0, deadline - time.monotonic()))
+        source_connection.backup(destination_connection, pages=64, progress=check_progress, sleep=0.05)
+        check_progress(0, 0, page_count)
     except sqlite3.Error as exc:
         raise RuntimeError(f"unable to create a consistent SQLite backup for {source}") from exc
     finally:
@@ -230,9 +257,12 @@ def create_backup(
     max_members: int = DEFAULT_MAX_MEMBERS,
     max_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
     max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
+    sqlite_timeout_seconds: float = DEFAULT_SQLITE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     if retain < 1 or max_members < 1 or max_bytes < 1 or max_archive_bytes < 1:
         raise ValueError("retain, max-members, max-bytes, and max-archive-bytes must be positive")
+    if not math.isfinite(sqlite_timeout_seconds) or sqlite_timeout_seconds <= 0:
+        raise ValueError("SQLite backup timeout must be finite and positive")
     source, destination = _validate_locations(source, destination)
     now = _utc_now()
     archive_name = f"{BACKUP_PREFIX}{now.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}.tar.gz"
@@ -260,7 +290,9 @@ def create_backup(
                     snapshot_path = snapshots_root.joinpath(*relative_path.parts)
                     remaining_bytes = max_bytes - uncompressed_bytes
                     if _is_sqlite_database(file_path):
-                        archive_source = _snapshot_sqlite(file_path, snapshot_path)
+                        archive_source = _snapshot_sqlite(
+                            file_path, snapshot_path, remaining_bytes, timeout_seconds=sqlite_timeout_seconds,
+                        )
                         snapshot_bytes = archive_source.stat().st_size
                         if snapshot_bytes > remaining_bytes:
                             raise RuntimeError("backup source exceeds uncompressed restore safety limits")
@@ -330,6 +362,7 @@ def main() -> int:
     parser.add_argument("--max-members", type=int, default=DEFAULT_MAX_MEMBERS)
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_UNCOMPRESSED_BYTES)
     parser.add_argument("--max-archive-bytes", type=int, default=DEFAULT_MAX_ARCHIVE_BYTES)
+    parser.add_argument("--sqlite-timeout", type=float, default=DEFAULT_SQLITE_TIMEOUT_SECONDS, help="Seconds allowed per SQLite snapshot, including lock waits (default: 30).")
     args = parser.parse_args()
     try:
         result = create_backup(
@@ -339,6 +372,7 @@ def main() -> int:
             max_members=args.max_members,
             max_bytes=args.max_bytes,
             max_archive_bytes=args.max_archive_bytes,
+            sqlite_timeout_seconds=args.sqlite_timeout,
         )
     except (OSError, RuntimeError, ValueError, tarfile.TarError) as exc:
         raise SystemExit(f"State backup failed: {exc}") from exc

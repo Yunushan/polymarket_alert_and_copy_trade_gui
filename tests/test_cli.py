@@ -33,6 +33,38 @@ def run_cli_silent(args: list[str]) -> int:
 
 
 class MarketSentinelCliTests(unittest.TestCase):
+    def test_mdd_cache_read_errors_fail_without_overwriting_cache_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "cache.json"
+            output = root / "export.json"
+            previous_bytes = b'{"version": 1, "entries": {"existing": {"kind": "audit"}}}'
+            target.write_bytes(previous_bytes)
+            output.write_text("previous export", encoding="utf-8")
+            original_read = Path.read_bytes
+
+            def deny_read(path: Path) -> bytes:
+                if path == target:
+                    raise PermissionError("cache temporarily unreadable")
+                return original_read(path)
+
+            for command in (["list"], ["health"], ["purge", "--all"]):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    self.subTest(command=command),
+                    patch.dict(os.environ, {"POLYMARKET_ANALYTICS_CACHE_PATH": str(target), "MARKET_SENTINEL_CLI_DEBUG": ""}),
+                    patch.object(Path, "read_bytes", deny_read),
+                    patch("sys.stdout", stdout),
+                    patch("sys.stderr", stderr),
+                ):
+                    result = market_sentinel_cli.main(["polymarket-mdd-cache", *command, "--output", str(output)])
+                self.assertEqual(result, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("cache temporarily unreadable", stderr.getvalue())
+                self.assertEqual(target.read_bytes(), previous_bytes)
+                self.assertEqual(output.read_text(encoding="utf-8"), "previous export")
+                self.assertFalse(list(root.glob("cache.json.corrupt-*")))
+
     def test_market_read_commands_expose_normalized_adapter_operations(self) -> None:
         cfg = SimpleNamespace(selected_market_id="space")
         adapter = SimpleNamespace(
@@ -2080,7 +2112,7 @@ class MarketSentinelCliTests(unittest.TestCase):
         transient_error = PolymarketHTTPError("ssl eof", service="data", method="GET", url="https://data-api.polymarket.com")
 
         with patch("market_sentinel_cli._run_disk_backed_polymarket_leaderboard", side_effect=[transient_error, 0]) as mock_run, patch(
-            "market_sentinel_cli.time.sleep"
+            "core.request_control.RequestControl.sleep"
         ) as mock_sleep:
             exit_code = market_sentinel_cli.run_polymarket_leaderboard(args)
 
@@ -2208,6 +2240,7 @@ class MarketSentinelCliTests(unittest.TestCase):
             store = LeaderboardStateStore(state_path)
             try:
                 store.prepare({"remote_sort": "PNL", "direction": "DESC", "period": "all", "category": "OVERALL"}, resume=False)
+                store.prepare_mdd({"calculation_version": market_sentinel_cli.MDD_CALCULATION_VERSION})
                 store.record_page(
                     0,
                     2,
@@ -2242,6 +2275,96 @@ class MarketSentinelCliTests(unittest.TestCase):
             self.assertEqual(payload["counts"]["returned"], 1)
             self.assertEqual(payload["rows"][0]["display_name"], "eligible")
             self.assertEqual(payload["counts"]["mdd_pending"], 1)
+
+    def test_leaderboard_export_uses_one_snapshot_while_writer_commits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "scan.sqlite3"
+            writer = LeaderboardStateStore(state_path)
+            try:
+                writer.prepare({}, resume=False)
+                writer.record_page(0, 1, [{"wallet": "0xaaa", "pnl_usd": 10.0}])
+                original_write = market_sentinel_cli._write_streamed_leaderboard_payload
+
+                def write_during_export(payload, rows, **kwargs):
+                    writer.record_page(1, 1, [{"wallet": "0xbbb", "pnl_usd": 20.0}])
+                    original_write(payload, rows, **kwargs)
+
+                stdout = io.StringIO()
+                with patch("sys.stdout", stdout), patch(
+                    "market_sentinel_cli._write_streamed_leaderboard_payload", side_effect=write_during_export
+                ):
+                    self.assertEqual(market_sentinel_cli.main([
+                        "polymarket-leaderboard-export", "--state-db", str(state_path), "--format", "json",
+                    ]), 0)
+                result = json.loads(stdout.getvalue())
+                self.assertEqual(result["counts"]["scanned"], 1)
+                self.assertEqual(result["counts"]["returned"], 1)
+                self.assertEqual([row["wallet"] for row in result["rows"]], ["0xaaa"])
+                self.assertEqual(writer.progress()["rows"], 2)
+            finally:
+                writer.close()
+
+    def test_leaderboard_export_marks_errors_and_repeated_pages_as_partial(self) -> None:
+        for reason in ("mdd_error", "repeated_page"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                state_path = Path(temporary) / "scan.sqlite3"
+                store = LeaderboardStateStore(state_path)
+                try:
+                    store.prepare({}, resume=False)
+                    store.prepare_mdd({"calculation_version": market_sentinel_cli.MDD_CALCULATION_VERSION})
+                    page = [{"wallet": "0xaaa"}]
+                    store.record_page(0, 50 if reason == "mdd_error" else 1, page)
+                    row = next(store.iter_mdd_candidates({}, sort="roi_pct", direction="DESC", limit=None))
+                    if reason == "mdd_error":
+                        store.set_mdd(row["id"], None, ValueError("upstream unavailable"))
+                    else:
+                        store.set_mdd(row["id"], {"mdd_pct": 10.0})
+                        store.record_page(1, 1, page)
+                finally:
+                    store.close()
+                stdout = io.StringIO()
+                with patch("sys.stdout", stdout):
+                    self.assertEqual(market_sentinel_cli.main([
+                        "polymarket-leaderboard-export", "--state-db", str(state_path), "--require-mdd", "--format", "json",
+                    ]), 0)
+                self.assertTrue(json.loads(stdout.getvalue())["partial"])
+
+    def test_leaderboard_output_cannot_overwrite_database_or_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "scan.sqlite3"
+            store = LeaderboardStateStore(database)
+            try:
+                store.prepare({}, resume=False)
+                protected = [database, market_sentinel_cli.leaderboard_writer_lock_path(database)]
+                protected.extend(Path(str(database) + suffix) for suffix in ("-wal", "-shm", "-journal"))
+                for output in protected:
+                    with self.subTest(output=output.name), self.assertRaisesRegex(ValueError, "must not overwrite"):
+                        market_sentinel_cli._validate_leaderboard_output(str(output), database)
+                for command in ("polymarket-leaderboard", "polymarket-leaderboard-export", "polymarket-leaderboard-status"):
+                    with self.subTest(command=command), patch("sys.stderr", io.StringIO()):
+                        self.assertEqual(market_sentinel_cli.main([
+                            command, "--state-db", str(database), "--output", str(database),
+                        ]), 1)
+                self.assertEqual(store.progress()["rows"], 0)
+            finally:
+                store.close()
+
+    def test_streamed_export_failure_preserves_previous_output(self) -> None:
+        for output_format in ("json", "csv"):
+            with self.subTest(output_format=output_format), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / f"result.{output_format}"
+                output.write_text("previous", encoding="utf-8")
+
+                def interrupted_rows():
+                    yield {"wallet": "0xaaa"}
+                    raise OSError("snapshot read failed")
+
+                with self.assertRaisesRegex(OSError, "snapshot read failed"):
+                    market_sentinel_cli._write_streamed_leaderboard_payload(
+                        {}, interrupted_rows(), output_format=output_format, output=str(output),
+                    )
+                self.assertEqual(output.read_text(), "previous")
+                self.assertFalse(list(output.parent.glob(f".{output.name}.*.tmp")))
 
     def test_polymarket_leaderboard_cli_checkpoints_and_resumes_pages(self) -> None:
         payload = {
@@ -2423,6 +2546,101 @@ class MarketSentinelCliTests(unittest.TestCase):
             self.assertNotIn("points", payload["rows"][0])
             self.assertEqual(payload["completion_reason"], "end_of_results")
             self.assertTrue(payload["source_enumeration_complete"])
+
+    def test_state_db_resume_recomputes_changed_mdd_settings_without_refetching_pages(self) -> None:
+        wallet = "0x" + "a" * 40
+        changes = [
+            ["--mdd-mode", "mark_replay"],
+            ["--equity-base-usd", "500"],
+            ["--mdd-history-limit", "200"],
+            ["--mdd-trade-limit", "200"],
+            ["--mdd-mark-replay-fidelity", "120"],
+            ["--mdd-include-accounting"],
+        ]
+        for changed_args in changes:
+            with self.subTest(changed_args=changed_args), tempfile.TemporaryDirectory() as temporary:
+                database = Path(temporary) / "scan.sqlite3"
+                output = Path(temporary) / "scan.json"
+                args = [
+                    "polymarket-leaderboard", "--state-db", str(database),
+                    "--scanned", "unlimited", "--returned", "unlimited",
+                    "--compute-mdd", "--mdd-scan", "unlimited", "--max-mdd-pct", "20",
+                    "--format", "json", "--output", str(output), "--quiet",
+                ]
+
+                def fake_scan(*_args, **kwargs):
+                    kwargs["page_callback"](0, 50, [{"proxyWallet": wallet, "pnl": 30, "volume": 100}])
+                    return [], False
+
+                with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows", side_effect=fake_scan), patch(
+                    "market_sentinel_cli.polymarket_user_mdd_payload", return_value={"mdd_pct": 10.0, "mdd_method": "old"}
+                ), patch("market_sentinel_cli.attach_polymarket_mdd_audit_cache"):
+                    self.assertEqual(market_sentinel_cli.main(args), 0)
+                self.assertEqual(json.loads(output.read_text())["counts"]["returned"], 1)
+
+                with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows") as fetch, patch(
+                    "market_sentinel_cli.polymarket_user_mdd_payload", return_value={"mdd_pct": 40.0, "mdd_method": "new"}
+                ) as mdd, patch("market_sentinel_cli.attach_polymarket_mdd_audit_cache"):
+                    self.assertEqual(market_sentinel_cli.main(args + ["--resume"] + changed_args), 0)
+                fetch.assert_not_called()
+                mdd.assert_called_once()
+                result = json.loads(output.read_text())
+                self.assertEqual(result["counts"]["returned"], 0)
+                self.assertTrue(any("Recomputing 1" in warning for warning in result["warnings"]))
+                self.assertEqual(result["mdd_signature"]["calculation_version"], market_sentinel_cli.MDD_CALCULATION_VERSION)
+
+                with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows") as fetch, patch(
+                    "market_sentinel_cli.polymarket_user_mdd_payload"
+                ) as mdd:
+                    self.assertEqual(market_sentinel_cli.main(args + ["--resume"] + changed_args + ["--max-mdd-pct", "50"]), 0)
+                fetch.assert_not_called()
+                mdd.assert_not_called()
+                self.assertEqual(json.loads(output.read_text())["counts"]["returned"], 1)
+
+    def test_state_db_deduplicates_wallets_and_resumes_using_scanned_rows(self) -> None:
+        wallet = "0x" + "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "scan.sqlite3"
+            output = Path(temporary) / "scan.json"
+            args = [
+                "polymarket-leaderboard", "--state-db", str(database),
+                "--scanned", "4", "--returned", "unlimited", "--compute-mdd",
+                "--mdd-scan", "unlimited", "--format", "json", "--output", str(output), "--quiet",
+            ]
+
+            def fake_scan(*_args, **kwargs):
+                kwargs["page_callback"](0, 2, [
+                    {"rank": 1, "proxyWallet": wallet, "pnl": 30, "volume": 100},
+                    {"rank": 2, "proxyWallet": "0x" + "b" * 40, "pnl": 10, "volume": 100},
+                ])
+                kwargs["page_callback"](2, 2, [
+                    {"rank": 3, "proxyWallet": wallet.upper(), "pnl": 40, "volume": 100},
+                    {"rank": 4, "proxyWallet": "0x" + "c" * 40, "pnl": 10, "volume": 100},
+                ])
+                return [], False
+
+            with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows", side_effect=fake_scan), patch(
+                "market_sentinel_cli.polymarket_user_mdd_payload", return_value={"mdd_pct": 10.0}
+            ) as mdd, patch("market_sentinel_cli.attach_polymarket_mdd_audit_cache"):
+                self.assertEqual(market_sentinel_cli.main(args), 0)
+            self.assertEqual(mdd.call_count, 3)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["counts"]["scanned"], 4)
+            self.assertEqual(result["counts"]["unique_wallets"], 3)
+            self.assertEqual(result["counts"]["duplicate_rows"], 1)
+            self.assertEqual(result["rows"][0]["pnl_usd"], 30.0)
+
+            with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows") as fetch, patch(
+                "market_sentinel_cli.polymarket_user_mdd_payload"
+            ) as mdd:
+                self.assertEqual(market_sentinel_cli.main(args + ["--resume", "--mdd-cache-ttl-seconds", "0"]), 0)
+            fetch.assert_not_called()
+            mdd.assert_not_called()
+
+            with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows") as fetch:
+                self.assertEqual(market_sentinel_cli.main(args + ["--resume", "--scanned", "5"]), 0)
+            self.assertEqual(fetch.call_args.kwargs["initial_scanned"], 4)
+            self.assertEqual(fetch.call_args.kwargs["scan_start_offset"], 4)
 
     def test_config_and_market_cli_update_persisted_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2629,21 +2847,24 @@ class MarketSentinelCliTests(unittest.TestCase):
                 self.assertEqual(run_cli_silent(["doctor", "--strict", "--config", str(config_path), "--frontend-dir", tmp]), 1)
 
     def test_doctor_cli_reports_corrupt_configuration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config.json"
-            config_path.write_text("{not-json", encoding="utf-8")
-            stdout = io.StringIO()
-            with patch("market_sentinel_cli._dependency_rows", return_value=[]), patch(
-                "market_sentinel_cli.health_payload",
-                return_value={"frontend_build_available": True},
-            ), patch("sys.stdout", stdout):
-                exit_code = market_sentinel_cli.main(["doctor", "--config", str(config_path), "--frontend-dir", tmp])
+        for raw in ("{not-json", '{"mutation_journal":[null]}', '{"copy_activity_outbox":{}}', '{"markets":{},"markets":{}}',
+                    '{"copytrading":{"live":"false"}}', '{"copytrading":{"copy_percentage":"invalid"}}', '{"mutation_journal":[{}]}'):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.json"
+                config_path.write_text(raw, encoding="utf-8")
+                stdout = io.StringIO()
+                with patch("market_sentinel_cli._dependency_rows", return_value=[]), patch(
+                    "market_sentinel_cli.health_payload",
+                    return_value={"frontend_build_available": True},
+                ), patch("sys.stdout", stdout):
+                    exit_code = market_sentinel_cli.main(["doctor", "--strict", "--config", str(config_path), "--frontend-dir", tmp])
 
-        self.assertEqual(exit_code, 1)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["status"], "error")
-        self.assertEqual(payload["checks"][0]["name"], "configuration")
-        self.assertEqual(payload["checks"][0]["status"], "fail")
+                self.assertEqual(exit_code, 1)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["checks"][0]["name"], "configuration")
+                self.assertEqual(payload["checks"][0]["status"], "fail")
+                self.assertEqual(config_path.read_text(encoding="utf-8"), raw)
 
     def test_full_app_cli_command_groups_are_registered(self) -> None:
         parser = market_sentinel_cli.build_parser()

@@ -153,9 +153,9 @@ def build_live_order_cancel_plan(request: LiveOrderCancelRequest) -> Dict[str, A
     if blockers:
         status = "blocked"
     elif request.execute and POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED:
-        # The execution harness stays testable for a future reviewed V2
-        # implementation, but the production constant is deliberately false
-        # until that migration exists.  With the default constant, execution
+        # The execution harness stays testable, but the production constant
+        # remains false pending exact-revision V2/recovery review and operator
+        # approval. With the default constant, execution
         # is therefore blocked above before any transport-capable dependency
         # is constructed or called.
         status = "ready_to_execute"
