@@ -5,6 +5,11 @@ from pathlib import Path
 
 from scripts.verify_dependency_lock import lock_issues
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility.
+    import tomli as tomllib
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -72,12 +77,15 @@ class DependencyLockTests(unittest.TestCase):
 
     def test_test_lock_covers_runtime_and_test_dependencies(self) -> None:
         lock = (ROOT / "requirements-test.lock").read_text(encoding="utf-8")
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+        dependencies = [
+            *project["dependencies"],
+            *project["optional-dependencies"]["live"],
+            *project["optional-dependencies"]["test"],
+        ]
         self.assertEqual(
             [],
-            lock_issues(
-                lock,
-                ["requests>=2.31.0", "py-clob-client-v2>=1.1.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.16.5"],
-            ),
+            lock_issues(lock, dependencies),
         )
 
     def test_live_lock_covers_authenticated_clob_sdk_dependencies(self) -> None:
